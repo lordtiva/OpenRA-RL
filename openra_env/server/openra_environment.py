@@ -533,13 +533,15 @@ class OpenRAEnvironment(MCPEnvironment):
                 entry = {"id": uid, "type": u["type"], "idle": u["is_idle"],
                          "can_attack": u["can_attack"], "stance": u["stance"],
                          "cell_x": u["cell_x"], "cell_y": u["cell_y"],
-                         "activity": u["current_activity"]}
+                         "activity": u["current_activity"],
+                         "path_blocked": u.get("path_blocked", False)}
                 # Halted-unreachable flag: surfaced to the briefing builder and
                 # the minimap renderer so the model gets a visual indicator of
                 # units stuck on bad targets. Cleared automatically below when
                 # the unit's tracked move target changes (= model issued a
-                # different command).
-                if uid in env._halted_unreachable:
+                # different command). Engine-authoritative: path_blocked from
+                # Mobile.MoveResult == CompleteDestinationBlocked also counts.
+                if uid in env._halted_unreachable or u.get("path_blocked", False):
                     entry["halted_unreachable"] = True
                 # Clear stale move targets for idle units
                 move_targets = getattr(env, "_move_targets", {})

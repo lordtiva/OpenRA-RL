@@ -118,6 +118,7 @@ class UnitInfoModel(Action):
     attack_range: int = Field(default=0, description="Max attack range in WDist units")
     passenger_count: int = Field(default=-1, description="Cargo count (0 if transport empty, -1 if N/A)")
     is_building: bool = Field(default=False, description="False for units, helps distinguish in visible_enemies")
+    path_blocked: bool = Field(default=False, description="True if last Move returned CompleteDestinationBlocked — target unreachable (water/cliff/blockers)")
 
 
 class BuildingInfoModel(Action):

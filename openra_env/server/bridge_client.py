@@ -304,6 +304,7 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
                 "attack_range": u.attack_range,
                 "passenger_count": u.passenger_count,
                 "is_building": u.is_building,
+                "path_blocked": u.path_blocked,
             }
             for u in obs.units
         ],
@@ -361,6 +362,7 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
                 "attack_range": u.attack_range,
                 "passenger_count": u.passenger_count,
                 "is_building": u.is_building,
+                "path_blocked": u.path_blocked,
             }
             for u in obs.visible_enemies
         ],

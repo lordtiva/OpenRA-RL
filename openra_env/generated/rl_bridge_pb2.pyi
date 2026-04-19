@@ -173,7 +173,7 @@ class RlMilitary(_message.Message):
     def __init__(self, units_killed: _Optional[int] = ..., units_lost: _Optional[int] = ..., buildings_killed: _Optional[int] = ..., buildings_lost: _Optional[int] = ..., army_value: _Optional[int] = ..., active_unit_count: _Optional[int] = ..., kills_cost: _Optional[int] = ..., deaths_cost: _Optional[int] = ..., assets_value: _Optional[int] = ..., experience: _Optional[int] = ..., order_count: _Optional[int] = ...) -> None: ...
 
 class RlUnitInfo(_message.Message):
-    __slots__ = ("actor_id", "type", "pos_x", "pos_y", "cell_x", "cell_y", "hp_percent", "is_idle", "current_activity", "owner", "ammo", "can_attack", "facing", "experience_level", "stance", "speed", "attack_range", "passenger_count", "is_building")
+    __slots__ = ("actor_id", "type", "pos_x", "pos_y", "cell_x", "cell_y", "hp_percent", "is_idle", "current_activity", "owner", "ammo", "can_attack", "facing", "experience_level", "stance", "speed", "attack_range", "passenger_count", "is_building", "path_blocked")
     ACTOR_ID_FIELD_NUMBER: _ClassVar[int]
     TYPE_FIELD_NUMBER: _ClassVar[int]
     POS_X_FIELD_NUMBER: _ClassVar[int]
@@ -193,6 +193,7 @@ class RlUnitInfo(_message.Message):
     ATTACK_RANGE_FIELD_NUMBER: _ClassVar[int]
     PASSENGER_COUNT_FIELD_NUMBER: _ClassVar[int]
     IS_BUILDING_FIELD_NUMBER: _ClassVar[int]
+    PATH_BLOCKED_FIELD_NUMBER: _ClassVar[int]
     actor_id: int
     type: str
     pos_x: int
@@ -212,7 +213,8 @@ class RlUnitInfo(_message.Message):
     attack_range: int
     passenger_count: int
     is_building: bool
-    def __init__(self, actor_id: _Optional[int] = ..., type: _Optional[str] = ..., pos_x: _Optional[int] = ..., pos_y: _Optional[int] = ..., cell_x: _Optional[int] = ..., cell_y: _Optional[int] = ..., hp_percent: _Optional[float] = ..., is_idle: bool = ..., current_activity: _Optional[str] = ..., owner: _Optional[str] = ..., ammo: _Optional[int] = ..., can_attack: bool = ..., facing: _Optional[int] = ..., experience_level: _Optional[int] = ..., stance: _Optional[int] = ..., speed: _Optional[int] = ..., attack_range: _Optional[int] = ..., passenger_count: _Optional[int] = ..., is_building: bool = ...) -> None: ...
+    path_blocked: bool
+    def __init__(self, actor_id: _Optional[int] = ..., type: _Optional[str] = ..., pos_x: _Optional[int] = ..., pos_y: _Optional[int] = ..., cell_x: _Optional[int] = ..., cell_y: _Optional[int] = ..., hp_percent: _Optional[float] = ..., is_idle: bool = ..., current_activity: _Optional[str] = ..., owner: _Optional[str] = ..., ammo: _Optional[int] = ..., can_attack: bool = ..., facing: _Optional[int] = ..., experience_level: _Optional[int] = ..., stance: _Optional[int] = ..., speed: _Optional[int] = ..., attack_range: _Optional[int] = ..., passenger_count: _Optional[int] = ..., is_building: bool = ..., path_blocked: bool = ...) -> None: ...
 
 class RlBuildingInfo(_message.Message):
     __slots__ = ("actor_id", "type", "pos_x", "pos_y", "hp_percent", "owner", "is_producing", "production_progress", "producing_item", "is_powered", "is_repairing", "sell_value", "rally_x", "rally_y", "power_amount", "can_produce", "cell_x", "cell_y")
