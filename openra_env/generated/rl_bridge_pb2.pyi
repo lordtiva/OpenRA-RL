@@ -31,7 +31,6 @@ class ActionType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     SET_PRIMARY: _ClassVar[ActionType]
     SURRENDER: _ClassVar[ActionType]
     FAST_ADVANCE: _ClassVar[ActionType]
-    PATROL: _ClassVar[ActionType]
 NO_OP: ActionType
 MOVE: ActionType
 ATTACK_MOVE: ActionType
@@ -54,7 +53,6 @@ POWER_DOWN: ActionType
 SET_PRIMARY: ActionType
 SURRENDER: ActionType
 FAST_ADVANCE: ActionType
-PATROL: ActionType
 
 class GameObservation(_message.Message):
     __slots__ = ("tick", "episode_id", "economy", "military", "units", "buildings", "production", "visible_enemies", "map_info", "spatial_map", "spatial_channels", "done", "reward", "result", "available_production", "visible_enemy_buildings", "explored_percent", "interrupted", "interrupt_reason", "actual_ticks_advanced", "kill_events")
@@ -371,3 +369,33 @@ class DestroySessionRequest(_message.Message):
 class DestroySessionResponse(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
+
+class SaveSnapshotRequest(_message.Message):
+    __slots__ = ("session_id",)
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    def __init__(self, session_id: _Optional[str] = ...) -> None: ...
+
+class SaveSnapshotResponse(_message.Message):
+    __slots__ = ("snapshot", "last_frame")
+    SNAPSHOT_FIELD_NUMBER: _ClassVar[int]
+    LAST_FRAME_FIELD_NUMBER: _ClassVar[int]
+    snapshot: bytes
+    last_frame: int
+    def __init__(self, snapshot: _Optional[bytes] = ..., last_frame: _Optional[int] = ...) -> None: ...
+
+class LoadSnapshotRequest(_message.Message):
+    __slots__ = ("snapshot", "session_id")
+    SNAPSHOT_FIELD_NUMBER: _ClassVar[int]
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    snapshot: bytes
+    session_id: str
+    def __init__(self, snapshot: _Optional[bytes] = ..., session_id: _Optional[str] = ...) -> None: ...
+
+class LoadSnapshotResponse(_message.Message):
+    __slots__ = ("session_id", "last_frame")
+    SESSION_ID_FIELD_NUMBER: _ClassVar[int]
+    LAST_FRAME_FIELD_NUMBER: _ClassVar[int]
+    session_id: str
+    last_frame: int
+    def __init__(self, session_id: _Optional[str] = ..., last_frame: _Optional[int] = ...) -> None: ...

@@ -157,6 +157,39 @@ class BridgeClient:
         logger.info(f"Created session {self.session_id} (map={map_name})")
         return response.session_id
 
+    def save_snapshot(self, session_id: str = "") -> tuple[bytes, int]:
+        """Serialize a session to an .orasav byte blob.
+
+        Returns (snapshot_bytes, last_frame). Used by expert-anchored GRPO
+        to capture the expert's state at each fork turn, so K fork samples
+        can load bit-identical state instead of re-replaying orders.
+        """
+        sid = session_id or self.session_id
+        if not sid:
+            raise RuntimeError("save_snapshot: no session_id")
+        if not self._connected or self._stub is None:
+            self.connect()
+        request = rl_bridge_pb2.SaveSnapshotRequest(session_id=sid)
+        response = self._stub.SaveSnapshot(request, timeout=60.0)
+        return bytes(response.snapshot), int(response.last_frame)
+
+    def load_snapshot(self, snapshot: bytes, session_id: str = "") -> tuple[str, int]:
+        """Create a new session from an .orasav byte blob.
+
+        Returns (assigned_session_id, last_frame). If session_id is empty
+        a fresh one is generated server-side. The returned session is
+        ready to accept FastAdvance calls just like a normal session.
+        """
+        if not self._connected or self._stub is None:
+            self.connect()
+        request = rl_bridge_pb2.LoadSnapshotRequest(
+            snapshot=bytes(snapshot),
+            session_id=session_id,
+        )
+        response = self._stub.LoadSnapshot(request, timeout=120.0, wait_for_ready=True)
+        self.session_id = response.session_id
+        return response.session_id, int(response.last_frame)
+
     def destroy_session(self, session_id: str = "") -> None:
         """Destroy a game session (multi-session mode).
 

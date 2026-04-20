@@ -62,6 +62,16 @@ class RLBridgeStub(object):
                 request_serializer=rl__bridge__pb2.DestroySessionRequest.SerializeToString,
                 response_deserializer=rl__bridge__pb2.DestroySessionResponse.FromString,
                 _registered_method=True)
+        self.SaveSnapshot = channel.unary_unary(
+                '/openra.rl.RLBridge/SaveSnapshot',
+                request_serializer=rl__bridge__pb2.SaveSnapshotRequest.SerializeToString,
+                response_deserializer=rl__bridge__pb2.SaveSnapshotResponse.FromString,
+                _registered_method=True)
+        self.LoadSnapshot = channel.unary_unary(
+                '/openra.rl.RLBridge/LoadSnapshot',
+                request_serializer=rl__bridge__pb2.LoadSnapshotRequest.SerializeToString,
+                response_deserializer=rl__bridge__pb2.LoadSnapshotResponse.FromString,
+                _registered_method=True)
 
 
 class RLBridgeServicer(object):
@@ -106,6 +116,25 @@ class RLBridgeServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SaveSnapshot(self, request, context):
+        """Snapshot a running session into an .orasav-format byte blob. The
+        returned bytes can be passed to LoadSnapshot (same process, different
+        session) to recreate the exact state. Used by expert-anchored GRPO
+        to fork K samples from the expert's state at a chosen tick.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def LoadSnapshot(self, request, context):
+        """Create a new session by loading an .orasav byte blob produced by a
+        prior SaveSnapshot. The new session replays the recorded orders and
+        applies stored trait-data patches to reach the saved tick.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_RLBridgeServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -133,6 +162,16 @@ def add_RLBridgeServicer_to_server(servicer, server):
                     servicer.DestroySession,
                     request_deserializer=rl__bridge__pb2.DestroySessionRequest.FromString,
                     response_serializer=rl__bridge__pb2.DestroySessionResponse.SerializeToString,
+            ),
+            'SaveSnapshot': grpc.unary_unary_rpc_method_handler(
+                    servicer.SaveSnapshot,
+                    request_deserializer=rl__bridge__pb2.SaveSnapshotRequest.FromString,
+                    response_serializer=rl__bridge__pb2.SaveSnapshotResponse.SerializeToString,
+            ),
+            'LoadSnapshot': grpc.unary_unary_rpc_method_handler(
+                    servicer.LoadSnapshot,
+                    request_deserializer=rl__bridge__pb2.LoadSnapshotRequest.FromString,
+                    response_serializer=rl__bridge__pb2.LoadSnapshotResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -273,6 +312,60 @@ class RLBridge(object):
             '/openra.rl.RLBridge/DestroySession',
             rl__bridge__pb2.DestroySessionRequest.SerializeToString,
             rl__bridge__pb2.DestroySessionResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SaveSnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/openra.rl.RLBridge/SaveSnapshot',
+            rl__bridge__pb2.SaveSnapshotRequest.SerializeToString,
+            rl__bridge__pb2.SaveSnapshotResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def LoadSnapshot(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/openra.rl.RLBridge/LoadSnapshot',
+            rl__bridge__pb2.LoadSnapshotRequest.SerializeToString,
+            rl__bridge__pb2.LoadSnapshotResponse.FromString,
             options,
             channel_credentials,
             insecure,
