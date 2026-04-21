@@ -483,7 +483,6 @@ def commands_to_proto(commands: list[dict]) -> rl_bridge_pb2.AgentAction:
         "power_down": rl_bridge_pb2.POWER_DOWN,
         "set_primary": rl_bridge_pb2.SET_PRIMARY,
         "surrender": rl_bridge_pb2.SURRENDER,
-        "patrol": rl_bridge_pb2.PATROL,
         "fast_advance": rl_bridge_pb2.FAST_ADVANCE,
     }
 
