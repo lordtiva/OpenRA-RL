@@ -1450,6 +1450,26 @@ class OpenRAEnvironment(MCPEnvironment):
                 "time_remaining_seconds": round(max(0, env._planning_max_time_s - elapsed), 1),
             }
 
+        # ── Snapshot (engine save/load) ──────────────────────────────────
+
+        @configurable_tool
+        def save_snapshot() -> dict:
+            """Serialize the current session state as a portable byte blob.
+
+            Uses the engine's GameSave infrastructure (advance-and-patch
+            mechanism) via bridge.save_snapshot. Returns the snapshot bytes
+            base64-encoded so MCP can ferry them. Pair with
+            env.reset(load_snapshot_bytes=...) to restore the state in a
+            fresh session (same game-server process, within-process
+            lockstep determinism → bit-identical unit state)."""
+            import base64 as _b64
+            snap_bytes, last_frame = env._bridge.save_snapshot()
+            return {
+                "snapshot_b64": _b64.b64encode(snap_bytes).decode("ascii"),
+                "snapshot_bytes": len(snap_bytes),
+                "last_frame": last_frame,
+            }
+
         # ── Action Tools (advance game state) ────────────────────────────
 
         @configurable_tool
@@ -3391,29 +3411,50 @@ class OpenRAEnvironment(MCPEnvironment):
             # Multi-session mode: create a new session on the shared daemon.
             # No process launch needed — the daemon is already running.
             from openra_env.server.openra_process import BOT_TYPE_MAP
-            logger.info(f"Creating session: map={self._config.map_name}")
             self._bridge.connect()
-            actual_bot_type = BOT_TYPE_MAP.get(self._config.bot_type, self._config.bot_type)
-            # Enemy must join as dummy (passive — waits for connection that
-            # never comes) when no bot_type specified. This keeps the player
-            # slot filled so pre-placed buildings spawn, but no AI runs.
-            # Using invalid types leaves the slot empty → no enemy actors.
-            if not actual_bot_type:
-                actual_bot_type = "dummy"
-            bots = f"Multi1:rl-agent,{self._config.ai_slot}:{actual_bot_type}"
-            try:
-                session_id = self._bridge.create_session(
-                    map_name=self._config.map_name,
-                    bots=bots,
-                    seed=self._config.seed or 0,
-                )
-            except Exception as e:
-                self._broken = True
-                raise RuntimeError(
-                    f"create_session failed (map={self._config.map_name}): {e}. "
-                    f"Environment marked as broken — subsequent calls will fail fast."
-                ) from e
-            logger.info(f"Session created: {session_id}")
+
+            # If the caller supplied load_snapshot_bytes (bytes or b64 string),
+            # recreate the session from the engine snapshot instead of
+            # CreateSession. The engine's advance-and-patch LoadSession path
+            # restores (map, seed, bots) from the snapshot's lobby metadata
+            # so we don't need to pass any of those — just the bytes.
+            snap = kwargs.get("load_snapshot_bytes")
+            if snap is not None:
+                import base64 as _b64
+                snap_bytes = _b64.b64decode(snap) if isinstance(snap, str) else bytes(snap)
+                logger.info(f"Creating session from snapshot: {len(snap_bytes)} bytes")
+                try:
+                    session_id, last_frame = self._bridge.load_snapshot(snap_bytes)
+                except Exception as e:
+                    self._broken = True
+                    raise RuntimeError(
+                        f"load_snapshot failed ({len(snap_bytes)} bytes): {e}. "
+                        f"Environment marked as broken — subsequent calls will fail fast."
+                    ) from e
+                logger.info(f"Session loaded from snapshot: {session_id} (frame={last_frame})")
+            else:
+                logger.info(f"Creating session: map={self._config.map_name}")
+                actual_bot_type = BOT_TYPE_MAP.get(self._config.bot_type, self._config.bot_type)
+                # Enemy must join as dummy (passive — waits for connection that
+                # never comes) when no bot_type specified. This keeps the player
+                # slot filled so pre-placed buildings spawn, but no AI runs.
+                # Using invalid types leaves the slot empty → no enemy actors.
+                if not actual_bot_type:
+                    actual_bot_type = "dummy"
+                bots = f"Multi1:rl-agent,{self._config.ai_slot}:{actual_bot_type}"
+                try:
+                    session_id = self._bridge.create_session(
+                        map_name=self._config.map_name,
+                        bots=bots,
+                        seed=self._config.seed or 0,
+                    )
+                except Exception as e:
+                    self._broken = True
+                    raise RuntimeError(
+                        f"create_session failed (map={self._config.map_name}): {e}. "
+                        f"Environment marked as broken — subsequent calls will fail fast."
+                    ) from e
+                logger.info(f"Session created: {session_id}")
 
             # Wait for session to be ready (game world created and paused).
             # With 20+ concurrent sessions, world creation is serialized by
