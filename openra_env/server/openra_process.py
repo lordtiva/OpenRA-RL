@@ -92,6 +92,18 @@ class OpenRAProcessManager:
         # Pass gRPC port so each OpenRA process binds a unique port
         env["RL_GRPC_PORT"] = str(self.config.grpc_port)
 
+        # Ensure the subprocess can find `dotnet`. Depending on how the Python
+        # parent was launched (nohup, systemd, docker exec, etc.), the shell's
+        # .bashrc-exported PATH may not be inherited. Detect a DOTNET_ROOT
+        # install and prepend it to the subprocess PATH so the OpenRA
+        # launcher always resolves the CLR.
+        dotnet_root = env.get("DOTNET_ROOT") or str(Path.home() / ".dotnet")
+        if (Path(dotnet_root) / "dotnet").exists():
+            env["DOTNET_ROOT"] = dotnet_root
+            existing_path = env.get("PATH", "/usr/local/bin:/usr/bin:/bin")
+            if dotnet_root not in existing_path.split(":"):
+                env["PATH"] = f"{dotnet_root}:{existing_path}"
+
         self._process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
