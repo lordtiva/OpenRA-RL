@@ -34,6 +34,7 @@ def cmd_play(
     provider: Optional[str] = None,
     model: Optional[str] = None,
     api_key: Optional[str] = None,
+    benchmark: Optional[str] = None,
     difficulty: str = "normal",
     verbose: bool = False,
     port: int = 8000,
@@ -74,6 +75,20 @@ def cmd_play(
         config = load_saved_config() or {}
     else:
         config = run_wizard()
+
+    if benchmark:
+        from openra_env.benchmarks import get_benchmark
+        preset = get_benchmark(benchmark)
+        _deep_merge_dict(config, preset.config_overrides())
+        if use_docker and image_version is None and benchmark == "backwater-hanxin":
+            if docker.image_exists("backwater-local"):
+                image_version = "backwater-local"
+                info("Using local Docker image tag 'backwater-local' for backwater-hanxin.")
+            else:
+                warn(
+                    "Benchmark backwater-hanxin selected, but local Docker image "
+                    "'backwater-local' was not found. Build it or pass --version backwater-local."
+                )
 
     # Validate we have enough config to proceed
     llm_cfg = config.get("llm", {})
@@ -121,7 +136,20 @@ def cmd_play(
             sys.exit(1)
     elif use_docker:
         if docker.is_running():
-            info(f"Server already running on port {port}.")
+            running_version = docker.get_running_image_tag()
+            if image_version and running_version != image_version:
+                warn(
+                    f"Server is running image '{running_version}', but this run needs "
+                    f"'{image_version}'. Restarting server."
+                )
+                docker.stop_server()
+                if not docker.start_server(port=port, difficulty=difficulty, version=image_version):
+                    sys.exit(1)
+                we_started_server = True
+                if not docker.wait_for_health(port=port):
+                    sys.exit(1)
+            else:
+                info(f"Server already running on port {port}.")
         else:
             if not docker.start_server(port=port, difficulty=difficulty, version=image_version):
                 sys.exit(1)
@@ -133,6 +161,8 @@ def cmd_play(
     header("Starting LLM agent...")
     provider_name = config.get("provider", "custom")
     info(f"Model: {llm_cfg.get('model', '?')} via {provider_name}")
+    if benchmark:
+        info(f"Benchmark: {benchmark}")
     print()
 
     try:
@@ -145,6 +175,9 @@ def cmd_play(
         info("Check: openra-rl doctor")
     except Exception as e:
         error(f"Agent error: {e}")
+        if verbose:
+            import traceback
+            traceback.print_exc()
         info("Run with --verbose for full details, or check: openra-rl doctor")
 
     # 5. Auto-copy replays from Docker
@@ -184,10 +217,7 @@ def _run_llm_agent(config: dict, server_url: str, verbose: bool) -> None:
     from openra_env.config import load_config
 
     # Build overrides from saved config
-    cli_overrides: dict = {}
-    llm_cfg = config.get("llm", {})
-    if llm_cfg:
-        cli_overrides["llm"] = llm_cfg
+    cli_overrides: dict = _copy_config_sections(config)
     cli_overrides.setdefault("agent", {})["server_url"] = server_url
     if verbose:
         cli_overrides.setdefault("agent", {})["verbose"] = True
@@ -196,6 +226,35 @@ def _run_llm_agent(config: dict, server_url: str, verbose: bool) -> None:
 
     from openra_env.agent import run_agent
     asyncio.run(run_agent(app_config, verbose))
+
+
+def _deep_merge_dict(base: dict, override: dict) -> None:
+    """Recursively merge override into base in place."""
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge_dict(base[key], value)
+        else:
+            base[key] = value
+
+
+def _copy_config_sections(config: dict) -> dict:
+    """Return only sections understood by OpenRARLConfig."""
+    return {
+        key: value
+        for key, value in config.items()
+        if key in {
+            "game",
+            "opponent",
+            "planning",
+            "reward",
+            "reward_vector",
+            "tools",
+            "alerts",
+            "llm",
+            "agent",
+            "prompts",
+        }
+    }
 
 
 def cmd_config() -> None:

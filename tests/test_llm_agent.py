@@ -2,7 +2,13 @@
 
 import pytest
 
-from openra_env.agent import _bench_export_policy, _format_llm_api_error, _sanitize_messages
+from openra_env.agent import (
+    _bench_export_policy,
+    _compact_messages_for_context,
+    _format_llm_api_error,
+    _sanitize_messages,
+    compose_pregame_briefing,
+)
 from openra_env.config import LLMConfig
 
 
@@ -122,6 +128,67 @@ class TestSanitizeMessages:
         assert roles == ["system", "user", "assistant", "tool", "assistant", "user"]
         assert result[4]["role"] == "assistant"  # bridge
         assert result[5]["content"] == "TURN BRIEFING: tick 500"
+
+
+class TestContextCompaction:
+    def test_compacts_large_tool_result(self):
+        huge = {
+            "tick": 123,
+            "economy": {"cash": 1000},
+            "production": [f"e1@{i}%" for i in range(100)],
+            "spatial_map": "x" * 100_000,
+        }
+        msgs = [
+            {"role": "system", "content": "sys"},
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "content": __import__("json").dumps(huge), "tool_call_id": "c1"},
+        ]
+
+        compacted = _compact_messages_for_context(msgs, max_total_chars=5000)
+
+        assert len(str(compacted)) < 5000
+        assert compacted[1]["tool_calls"][0]["id"] == "c1"
+        assert compacted[2]["tool_call_id"] == "c1"
+        assert "spatial_map" not in compacted[2]["content"]
+
+    def test_drops_old_messages_to_fit_budget(self):
+        msgs = [{"role": "system", "content": "sys"}]
+        for i in range(50):
+            msgs.extend([
+                {"role": "user", "content": f"briefing {i} " + ("x" * 1000)},
+                {"role": "assistant", "content": "", "tool_calls": [{"id": f"c{i}"}]},
+                {"role": "tool", "content": '{"tick": 1, "done": false}', "tool_call_id": f"c{i}"},
+            ])
+
+        compacted = _compact_messages_for_context(msgs, max_total_chars=8000)
+
+        assert len(str(compacted)) < 9000
+        assert compacted[0]["role"] == "system"
+        assert compacted[1]["role"] == "user"
+        assert "Context trimmed" in compacted[1]["content"]
+
+
+class TestBackwaterBriefing:
+    def test_backwater_briefing_prioritizes_rear_building_raid(self):
+        briefing = compose_pregame_briefing({
+            "map": {"map_name": "backwater-battle-hanxin", "width": 64, "height": 64},
+            "faction": "england",
+            "buildings_summary": [{"type": "fact", "cell_x": 16, "cell_y": 43}],
+            "units_summary": [
+                {"id": 101, "type": "1tnk", "cell_x": 47, "cell_y": 12},
+                {"id": 102, "type": "jeep", "cell_x": 50, "cell_y": 16},
+                {"id": 201, "type": "e1", "cell_x": 24, "cell_y": 35},
+            ],
+            "available_production": ["e1", "1tnk"],
+            "building_types": ["fact", "weap", "tent"],
+        })
+
+        assert "Backwater / Jingxing Battle Objective" in briefing
+        assert "Rear raider unit ids near Zhao backfield: 101, 102" in briefing
+        assert "destroy Zhao camp buildings" in briefing
+        assert "bait Zhao out of camp" in briefing
+        assert "mountain ambush corridor around (28,39)-(31,42)" in briefing
+        assert "Do not fight them head-on with infantry" in briefing
 
 
 class TestFormatLLMApiError:

@@ -3119,7 +3119,21 @@ class OpenRAEnvironment(MCPEnvironment):
                 logger.error("Session failed to become ready")
             else:
                 alive = self._process.is_alive()
+                stdout = self._process.get_stdout()[-4000:]
+                stderr = self._process.get_stderr()[-4000:]
                 logger.error(f"Bridge failed to start. Process alive={alive}")
+                if stdout:
+                    logger.error(f"OpenRA stdout tail:\n{stdout}")
+                if stderr:
+                    logger.error(f"OpenRA stderr tail:\n{stderr}")
+                details = []
+                if stdout:
+                    details.append(f"stdout:\n{stdout}")
+                if stderr:
+                    details.append(f"stderr:\n{stderr}")
+                detail_text = "\n".join(details)
+                suffix = f"\n{detail_text}" if detail_text else ""
+                raise RuntimeError(f"OpenRA gRPC bridge failed to start{suffix}")
             raise RuntimeError("OpenRA gRPC bridge failed to start")
 
         # Get faction info from GameState (unary RPC — game stays paused).

@@ -164,6 +164,10 @@ class TestFactionData:
         assert len(result["available_units"]) > 5
         assert len(result["available_buildings"]) > 5
 
+    def test_get_faction_info_accepts_side_aliases(self):
+        assert get_faction_info("allies")["side"] == "allied"
+        assert get_faction_info("soviets")["side"] == "soviet"
+
     def test_get_faction_info_not_found(self):
         assert get_faction_info("nonexistent") is None
 

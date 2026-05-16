@@ -230,3 +230,8 @@ Lesson2: Build refinery by t=1000."""
         reflection, lessons = parse_reflection_response("")
         assert reflection == ""
         assert lessons == []
+
+    def test_parse_response_none(self):
+        reflection, lessons = parse_reflection_response(None)
+        assert reflection == ""
+        assert lessons == []

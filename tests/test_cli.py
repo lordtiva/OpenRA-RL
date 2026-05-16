@@ -418,6 +418,56 @@ class TestCommands:
         with pytest.raises(SystemExit):
             cmd_play()
 
+    @patch("openra_env.cli.commands._run_llm_agent")
+    @patch("openra_env.cli.commands.docker")
+    @patch("openra_env.cli.commands.load_saved_config")
+    @patch("builtins.input", return_value="n")
+    def test_cmd_play_backwater_uses_local_image_when_available(self, mock_input, mock_config, mock_docker, mock_agent):
+        from openra_env.cli.commands import cmd_play
+
+        mock_docker.check_docker.return_value = True
+        mock_docker.list_local_versions.return_value = ["latest", "backwater-local"]
+        mock_docker.image_exists.return_value = True
+        mock_docker.is_running.side_effect = [False, False]
+        mock_docker.start_server.return_value = True
+        mock_docker.wait_for_health.return_value = True
+        mock_docker.copy_replays.return_value = []
+        mock_config.return_value = {
+            "provider": "openrouter",
+            "llm": {"base_url": "https://openrouter.ai/api/v1/chat/completions", "api_key": "k", "model": "m"},
+        }
+
+        cmd_play(benchmark="backwater-hanxin", provider="openrouter", model="m", api_key="k")
+
+        mock_docker.start_server.assert_called_once()
+        assert mock_docker.start_server.call_args.kwargs["version"] == "backwater-local"
+
+    @patch("openra_env.cli.commands._run_llm_agent")
+    @patch("openra_env.cli.commands.docker")
+    @patch("openra_env.cli.commands.load_saved_config")
+    @patch("builtins.input", return_value="n")
+    def test_cmd_play_restarts_mismatched_running_image(self, mock_input, mock_config, mock_docker, mock_agent):
+        from openra_env.cli.commands import cmd_play
+
+        mock_docker.check_docker.return_value = True
+        mock_docker.list_local_versions.return_value = ["latest", "backwater-local"]
+        mock_docker.image_exists.return_value = True
+        mock_docker.is_running.side_effect = [True, True]
+        mock_docker.get_running_image_tag.return_value = "latest"
+        mock_docker.stop_server.return_value = True
+        mock_docker.start_server.return_value = True
+        mock_docker.wait_for_health.return_value = True
+        mock_docker.copy_replays.return_value = []
+        mock_config.return_value = {
+            "provider": "openrouter",
+            "llm": {"base_url": "https://openrouter.ai/api/v1/chat/completions", "api_key": "k", "model": "m"},
+        }
+
+        cmd_play(benchmark="backwater-hanxin", provider="openrouter", model="m", api_key="k")
+
+        mock_docker.stop_server.assert_called_once()
+        assert mock_docker.start_server.call_args.kwargs["version"] == "backwater-local"
+
 
 # ── Main Entry Point ───────────────────────────────────────────────
 
@@ -491,10 +541,33 @@ class TestMain:
             provider="ollama",
             model="qwen3:32b",
             api_key=None,
+            benchmark=None,
             difficulty="normal",
             verbose=True,
             port=9000,
             server_url=None,
+            local=False,
+            image_version=None,
+        )
+
+    @patch("openra_env.cli.commands.cmd_play")
+    def test_main_play_with_benchmark(self, mock_play):
+        from openra_env.cli.main import main
+        with patch("sys.argv", [
+            "openra-rl", "play",
+            "--benchmark", "backwater-hanxin",
+            "--server-url", "http://localhost:8000",
+        ]):
+            main()
+        mock_play.assert_called_once_with(
+            provider=None,
+            model=None,
+            api_key=None,
+            benchmark="backwater-hanxin",
+            difficulty="normal",
+            verbose=False,
+            port=8000,
+            server_url="http://localhost:8000",
             local=False,
             image_version=None,
         )

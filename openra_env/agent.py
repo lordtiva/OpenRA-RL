@@ -15,6 +15,7 @@ from typing import Any
 
 import httpx
 from openra_env.arena_data import new_run_id, sanitize_config_snapshot, save_run_artifact
+from openra_env.backwater_rubric import compute_backwater_score
 from openra_env.config import LLMConfig
 from openra_env.game_data import get_building_stats, get_faction_info, get_tech_tree, get_unit_stats
 from openra_env.mcp_ws_client import OpenRAMCPClient
@@ -276,6 +277,40 @@ def compose_pregame_briefing(state: dict) -> str:
         "Available buildings:",
         *bldg_lines,
     ]
+    if map_name == "backwater-battle-hanxin":
+        rear_units = [
+            u for u in units
+            if u.get("type") in {"1tnk", "jeep"} and u.get("cell_x", 0) >= 40 and u.get("cell_y", 0) <= 20
+        ]
+        bait_units = [
+            u for u in units
+            if u.get("type") in {"e1", "e3", "2tnk", "jeep"}
+            and 22 <= u.get("cell_x", 0) <= 32
+            and 33 <= u.get("cell_y", 0) <= 38
+        ]
+        rear_ids = ", ".join(str(u.get("id")) for u in rear_units if u.get("id") is not None)
+        bait_ids = ", ".join(str(u.get("id")) for u in bait_units if u.get("id") is not None)
+        parts.extend([
+            "",
+            "## Backwater / Jingxing Battle Objective",
+            "This is a lure-and-pincer scenario, not a normal base-building match.",
+            "The historical plan is: bait Zhao out of camp, raid the empty camp, then collapse Zhao in the mountain pass.",
+            "Zhao's main tanks have already been pulled into the central pass. Do not fight them head-on with infantry.",
+            (
+                f"Bait/main force ids near the pass: {bait_ids}. Pull them back into the mountain ambush corridor around (28,39)-(31,42), not all the way to base."
+                if bait_ids else
+                "Use the forward Han force as bait: retreat into the mountain ambush corridor around (28,39)-(31,42), do not charge Zhao tanks."
+            ),
+            "Han's decisive advantage is positional: hidden rear cavalry/light tanks around Zhao camp.",
+            (
+                f"Rear raider unit ids near Zhao backfield: {rear_ids}."
+                if rear_ids else
+                "Rear raiders start north of Zhao's base; identify their ids from the unit list."
+            ),
+            "Use rear light tanks/jeeps to immediately destroy Zhao camp buildings: weap, fact, proc, powr, barr/tent.",
+            "After Zhao camp buildings fall, attack Zhao's pass army from both sides inside the mountains: bait force from west/south, raiders from north/east.",
+            "Benchmark time is short: act immediately. Do not spend turns on economy, naval yards, or long tech planning.",
+        ])
     return "\n".join(parts)
 
 
@@ -467,6 +502,176 @@ def _append_traced_message(
     _trace_message(trace, phase=phase, turn=turn, message=message)
 
 
+def _assistant_choice(response: dict) -> tuple[dict, dict]:
+    """Return a normalized (choice, assistant message) pair from an LLM response."""
+    choices = response.get("choices") if isinstance(response, dict) else None
+    if not isinstance(choices, list) or not choices:
+        return {"finish_reason": "invalid_response"}, {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [],
+        }
+
+    choice = choices[0] if isinstance(choices[0], dict) else {}
+    message = choice.get("message") if isinstance(choice, dict) else None
+    if not isinstance(message, dict):
+        message = {"role": "assistant", "content": "", "tool_calls": []}
+
+    message.setdefault("role", "assistant")
+    if message.get("content") is None:
+        message["content"] = ""
+    elif not isinstance(message.get("content"), str):
+        message["content"] = json.dumps(message.get("content"))
+    if not isinstance(message.get("tool_calls"), list):
+        message["tool_calls"] = []
+    return choice, message
+
+
+def _parse_tool_call(tc: Any) -> tuple[str | None, dict, str, dict | None]:
+    """Parse an OpenAI tool call, returning an error dict for malformed calls."""
+    if not isinstance(tc, dict):
+        return None, {}, "malformed-tool-call", {"error": "Malformed tool call: expected an object."}
+
+    tool_call_id = tc.get("id") or "malformed-tool-call"
+    function_call = tc.get("function")
+    if not isinstance(function_call, dict) or not function_call.get("name"):
+        return None, {}, tool_call_id, {
+            "error": (
+                "Malformed tool call: missing function.name. "
+                "Call one available tool with valid JSON arguments."
+            )
+        }
+
+    try:
+        fn_args = json.loads(function_call.get("arguments", "{}"))
+    except (json.JSONDecodeError, TypeError):
+        fn_args = {}
+    if not isinstance(fn_args, dict):
+        fn_args = {}
+    if list(fn_args.keys()) == [""] and isinstance(fn_args[""], dict):
+        fn_args = fn_args[""]
+
+    return function_call["name"], fn_args, tool_call_id, None
+
+
+def _actions_from_plain_json_content(content: Any) -> list[dict[str, Any]]:
+    """Extract action dicts when a model emits {"actions": [...]} as text."""
+    if not isinstance(content, str):
+        return []
+    text = content.strip()
+    if not text.startswith("{"):
+        return []
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(payload, dict):
+        return []
+
+    actions = payload.get("actions")
+    if not isinstance(actions, list) or not actions:
+        return []
+    if not all(isinstance(action, dict) and isinstance(action.get("tool"), str) for action in actions):
+        return []
+    return actions
+
+
+def _tool_calls_from_plain_json_actions(content: Any) -> list[dict[str, Any]]:
+    """Recover a batch tool call when a model emits JSON actions as text."""
+    actions = _actions_from_plain_json_content(content)
+    if not actions:
+        return []
+    return [{
+        "id": "plain-json-actions",
+        "type": "function",
+        "function": {
+            "name": "batch",
+            "arguments": json.dumps({"actions": actions}),
+        },
+    }]
+
+
+def _attach_recovered_tool_calls_to_last_message(
+    messages: list[dict[str, Any]],
+    trace: list[dict[str, Any]],
+    tool_calls: list[dict[str, Any]],
+) -> None:
+    """Keep chat history valid after recovering text JSON as tool calls."""
+    if messages and messages[-1].get("role") == "assistant":
+        messages[-1]["tool_calls"] = deepcopy(tool_calls)
+    if trace and trace[-1].get("role") == "assistant":
+        trace[-1]["tool_calls"] = deepcopy(tool_calls)
+
+
+def _repair_batch_args(
+    fn_name: str | None,
+    fn_args: dict,
+    assistant_content: Any,
+) -> tuple[dict, dict | None]:
+    """Repair or reject malformed batch() arguments before calling the tool."""
+    if fn_name != "batch":
+        return fn_args, None
+
+    actions = fn_args.get("actions")
+    if isinstance(actions, list) and actions:
+        return fn_args, None
+
+    recovered = _actions_from_plain_json_content(assistant_content)
+    if recovered:
+        return {"actions": recovered}, None
+
+    return fn_args, {
+        "error": (
+            "Malformed batch call: missing required 'actions' list. "
+            "Call batch with {\"actions\": [{\"tool\": \"attack_move\", ...}]} "
+            "or call a single tool directly."
+        ),
+        "expected_shape": {"actions": [{"tool": "attack_move", "unit_ids": "all_combat", "target_x": 48, "target_y": 27}]},
+    }
+
+
+def _prevalidate_tool_args(fn_name: str | None, fn_args: dict) -> dict | None:
+    """Catch common empty required-argument calls with clearer feedback."""
+    if fn_name == "assign_group" and not fn_args:
+        return {
+            "error": (
+                "Malformed assign_group call: missing 'group_name' and 'unit_ids'. "
+                "Use assign_group(group_name='raiders', unit_ids=[...]) or skip grouping and command units directly."
+            ),
+            "expected_shape": {"group_name": "raiders", "unit_ids": [101, 102, 103]},
+        }
+    return None
+
+
+def _should_auto_advance(fn_name: str | None, result: Any) -> bool:
+    """Whether an action tool should be followed by a short automatic advance."""
+    if not isinstance(result, dict) or result.get("done") or result.get("error"):
+        return False
+    action_tools = {
+        "batch",
+        "plan",
+        "attack_move",
+        "attack_target",
+        "move_units",
+        "build_unit",
+        "build_structure",
+        "build_and_place",
+        "place_building",
+        "deploy_unit",
+        "set_rally_point",
+        "set_stance",
+        "guard_target",
+        "command_group",
+    }
+    return fn_name in action_tools
+
+
+def _should_advance_after_turn(tool_calls: list[dict[str, Any]], turn_advanced: bool, game_done: bool) -> bool:
+    """Ensure every gameplay turn records some simulation time."""
+    return bool(tool_calls) and not turn_advanced and not game_done
+
+
 def _sanitize_messages(messages: list[dict], prompts=None) -> list[dict]:
     """Merge consecutive same-role messages for strict-alternation models (e.g. Mistral).
 
@@ -494,6 +699,110 @@ def _sanitize_messages(messages: list[dict], prompts=None) -> list[dict]:
     return merged
 
 
+def _truncate_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    keep_head = max_chars - 240
+    return f"{text[:keep_head]}\n...[truncated {len(text) - max_chars} chars]...\n{text[-200:]}"
+
+
+def _compact_tool_content(content: Any, max_chars: int = 1600) -> Any:
+    """Shrink bulky tool JSON while preserving the information the LLM needs."""
+    if not isinstance(content, str):
+        return content
+    try:
+        data = json.loads(content)
+    except (json.JSONDecodeError, TypeError):
+        return _truncate_text(content, max_chars)
+    if not isinstance(data, dict):
+        return _truncate_text(content, max_chars)
+
+    compact: dict[str, Any] = {}
+    for key in (
+        "error",
+        "tick",
+        "done",
+        "result",
+        "economy",
+        "military",
+        "own_units",
+        "own_buildings",
+        "visible_enemies",
+        "visible_enemy_units",
+        "visible_enemy_buildings",
+        "explored_percent",
+        "reward",
+        "note",
+        "actions",
+        "alerts",
+    ):
+        if key in data:
+            compact[key] = data[key]
+
+    production = data.get("production")
+    if isinstance(production, list):
+        compact["production"] = production[:12]
+        if len(production) > 12:
+            compact["production_more"] = len(production) - 12
+
+    text = json.dumps(compact or data)
+    return _truncate_text(text, max_chars)
+
+
+def _message_chars(messages: list[dict[str, Any]]) -> int:
+    total = 0
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total += len(content)
+        elif content is not None:
+            total += len(json.dumps(content))
+        if msg.get("tool_calls"):
+            total += len(json.dumps(msg["tool_calls"]))
+    return total
+
+
+def _compact_messages_for_context(
+    messages: list[dict],
+    *,
+    max_total_chars: int = 260_000,
+) -> list[dict]:
+    """Final payload compaction before provider calls.
+
+    compress_history() preserves game semantics, but a long latest window can
+    still exceed provider limits. This trims bulky payloads and then drops older
+    messages on safe role boundaries if needed.
+    """
+    compacted: list[dict[str, Any]] = []
+    for i, msg in enumerate(messages):
+        entry = deepcopy(msg)
+        role = entry.get("role")
+        if role == "tool":
+            entry["content"] = _compact_tool_content(entry.get("content", ""))
+        elif isinstance(entry.get("content"), str) and role != "system":
+            # Keep the newest few turn briefings intact; trim older prose/briefings.
+            cap = 9000 if i >= len(messages) - 6 else 3500
+            entry["content"] = _truncate_text(entry["content"], cap)
+        compacted.append(entry)
+
+    if _message_chars(compacted) <= max_total_chars:
+        return compacted
+
+    system = compacted[0]
+    cut = 1
+    while cut < len(compacted) - 2 and _message_chars([system, *compacted[cut:]]) > max_total_chars:
+        cut += 1
+        while cut < len(compacted) - 2 and compacted[cut].get("role") == "tool":
+            cut += 1
+
+    recent = compacted[cut:]
+    summary = f"[Context trimmed: {cut - 1} older messages removed to fit model context.]"
+    if recent and recent[0].get("role") == "user" and isinstance(recent[0].get("content"), str):
+        recent[0] = {**recent[0], "content": f"{summary}\n\n{recent[0]['content']}"}
+        return [system, *recent]
+    return [system, {"role": "user", "content": summary}, *recent]
+
+
 async def chat_completion(
     messages: list[dict],
     tools: list[dict],
@@ -506,7 +815,10 @@ async def chat_completion(
     Works with OpenRouter, Ollama, LM Studio, or any endpoint
     implementing the OpenAI Chat Completions spec with tool calling.
     """
-    clean_messages = _sanitize_messages(messages, prompts=prompts)
+    clean_messages = _compact_messages_for_context(
+        _sanitize_messages(messages, prompts=prompts),
+        max_total_chars=260_000 if "openrouter.ai" in llm_config.base_url.lower() else 400_000,
+    )
     payload = {
         "model": llm_config.model,
         "messages": clean_messages,
@@ -732,7 +1044,13 @@ async def run_agent(config, verbose: bool = False):
 
     async with OpenRAMCPClient(base_url=url, message_timeout_s=300.0) as env:
         print("Resetting environment (launching OpenRA)...")
-        await env.reset()
+        reset_options = {}
+        if config.game.map_name != "singles.oramap":
+            reset_options["map_name"] = config.game.map_name
+            reset_options["bot_type"] = config.opponent.bot_type
+        elif config.opponent.bot_type != "beginner":
+            reset_options["bot_type"] = config.opponent.bot_type
+        await env.reset(**reset_options)
 
         # Discover and convert tools
         mcp_tools = await env.list_tools()
@@ -821,8 +1139,7 @@ async def run_agent(config, verbose: bool = False):
                     if response is None:
                         break
 
-                    choice = response["choices"][0]
-                    assistant_msg = choice["message"]
+                    choice, assistant_msg = _assistant_choice(response)
                     _append_traced_message(
                         messages,
                         trace_messages,
@@ -849,11 +1166,20 @@ async def run_agent(config, verbose: bool = False):
                         continue
 
                     for tc in tool_calls:
-                        fn_name = tc["function"]["name"]
-                        try:
-                            fn_args = json.loads(tc["function"].get("arguments", "{}"))
-                        except (json.JSONDecodeError, TypeError):
-                            fn_args = {}
+                        fn_name, fn_args, tool_call_id, malformed_result = _parse_tool_call(tc)
+                        if malformed_result is not None:
+                            _append_traced_message(
+                                messages,
+                                trace_messages,
+                                phase="planning",
+                                turn=planning_turn + 1,
+                                message={
+                                    "role": "tool",
+                                    "tool_call_id": tool_call_id,
+                                    "content": json.dumps(malformed_result),
+                                },
+                            )
+                            continue
 
                         if verbose:
                             args_str = json.dumps(fn_args)
@@ -873,7 +1199,7 @@ async def run_agent(config, verbose: bool = False):
                             turn=planning_turn + 1,
                             message={
                                 "role": "tool",
-                                "tool_call_id": tc["id"],
+                                "tool_call_id": tool_call_id,
                                 "content": json.dumps(result) if not isinstance(result, str) else result,
                             },
                         )
@@ -1097,8 +1423,7 @@ async def run_agent(config, verbose: bool = False):
                 break
 
             total_api_calls += 1
-            choice = response["choices"][0]
-            assistant_msg = choice["message"]
+            choice, assistant_msg = _assistant_choice(response)
 
             # Add assistant response to history
             _append_traced_message(
@@ -1123,10 +1448,27 @@ async def run_agent(config, verbose: bool = False):
             # Handle tool calls
             tool_calls = assistant_msg.get("tool_calls", [])
             if not tool_calls:
+                tool_calls = _tool_calls_from_plain_json_actions(assistant_msg.get("content"))
+                if tool_calls:
+                    assistant_msg["tool_calls"] = deepcopy(tool_calls)
+                    _attach_recovered_tool_calls_to_last_message(messages, trace_messages, tool_calls)
+                    if verbose:
+                        print("  [LLM] Recovered plain JSON actions as batch tool call.")
+            if not tool_calls:
                 # No tool calls — prompt to act
                 if verbose:
                     content = assistant_msg.get("content", "(no content)")
                     print(f"  [LLM] No tool calls. Response: {content[:100]}")
+                try:
+                    advanced = await env.call_tool("advance", ticks=75)
+                    if verbose and isinstance(advanced, dict):
+                        print(f"  [Auto] advanced replay to tick {advanced.get('tick', '?')} after no tool call")
+                    if isinstance(advanced, dict) and advanced.get("done"):
+                        game_done = True
+                        print(f"\n  GAME OVER: {advanced.get('result', '?').upper()} at tick {advanced.get('tick', '?')}")
+                except Exception as e:
+                    if verbose:
+                        print(f"  [Auto] advance failed after no tool call: {e}")
                 _append_traced_message(
                     messages,
                     trace_messages,
@@ -1137,15 +1479,63 @@ async def run_agent(config, verbose: bool = False):
                         "content": config.prompts.no_tool_nudge,
                     },
                 )
+                if game_done:
+                    break
                 continue
 
             # Execute each tool call
+            turn_advanced = False
             for tc in tool_calls:
-                fn_name = tc["function"]["name"]
-                try:
-                    fn_args = json.loads(tc["function"].get("arguments", "{}"))
-                except (json.JSONDecodeError, TypeError):
-                    fn_args = {}
+                fn_name, fn_args, tool_call_id, malformed_result = _parse_tool_call(tc)
+                if malformed_result is not None:
+                    _append_traced_message(
+                        messages,
+                        trace_messages,
+                        phase="gameplay",
+                        turn=turn,
+                        message={
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": json.dumps(malformed_result),
+                        },
+                    )
+                    continue
+
+                fn_args, batch_error = _repair_batch_args(fn_name, fn_args, assistant_msg.get("content"))
+                if batch_error is not None:
+                    _append_traced_message(
+                        messages,
+                        trace_messages,
+                        phase="gameplay",
+                        turn=turn,
+                        message={
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": json.dumps(batch_error),
+                        },
+                    )
+                    if verbose:
+                        print(f"  [Tool] {fn_name}({json.dumps(fn_args)})")
+                        print(f"  [Result] {json.dumps(batch_error)}")
+                    continue
+
+                arg_error = _prevalidate_tool_args(fn_name, fn_args)
+                if arg_error is not None:
+                    _append_traced_message(
+                        messages,
+                        trace_messages,
+                        phase="gameplay",
+                        turn=turn,
+                        message={
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": json.dumps(arg_error),
+                        },
+                    )
+                    if verbose:
+                        print(f"  [Tool] {fn_name}({json.dumps(fn_args)})")
+                        print(f"  [Result] {json.dumps(arg_error)}")
+                    continue
 
                 total_tool_calls += 1
 
@@ -1162,6 +1552,18 @@ async def run_agent(config, verbose: bool = False):
                     if event_tracker and isinstance(result, dict):
                         _tick = result.get("tick", 0)
                         event_tracker.update_from_tool_result(fn_name, fn_args, result, _tick)
+                    if _should_auto_advance(fn_name, result):
+                        advanced = await env.call_tool("advance", ticks=75)
+                        if isinstance(advanced, dict):
+                            turn_advanced = True
+                            result["auto_advanced"] = {
+                                "ticks": 75,
+                                "to_tick": advanced.get("tick"),
+                                "done": advanced.get("done", False),
+                                "result": advanced.get("result", ""),
+                            }
+                            if advanced.get("done"):
+                                result = advanced
                 except Exception as e:
                     result = {"error": str(e)}
                     # Suggest similar tools for unknown tool errors
@@ -1195,7 +1597,7 @@ async def run_agent(config, verbose: bool = False):
                     turn=turn,
                     message={
                         "role": "tool",
-                        "tool_call_id": tc["id"],
+                        "tool_call_id": tool_call_id,
                         "content": result_str,
                     },
                 )
@@ -1210,6 +1612,18 @@ async def run_agent(config, verbose: bool = False):
                     if len(result_preview) > 500:
                         result_preview = result_preview[:500] + "..."
                     print(f"  [Result] {result_preview}")
+
+            if _should_advance_after_turn(tool_calls, turn_advanced, game_done):
+                try:
+                    advanced = await env.call_tool("advance", ticks=75)
+                    if verbose and isinstance(advanced, dict):
+                        print(f"  [Auto] advanced replay to tick {advanced.get('tick', '?')} after query-only turn")
+                    if isinstance(advanced, dict) and advanced.get("done"):
+                        game_done = True
+                        print(f"\n  GAME OVER: {advanced.get('result', '?').upper()} at tick {advanced.get('tick', '?')}")
+                except Exception as e:
+                    if verbose:
+                        print(f"  [Auto] advance failed after query-only turn: {e}")
 
             # Status update
             if total_api_calls % 5 == 0 or game_done:
@@ -1339,7 +1753,8 @@ async def run_agent(config, verbose: bool = False):
                     prompts=config.prompts,
                 )
                 if _ref_response:
-                    _ref_text = _ref_response["choices"][0]["message"].get("content", "")
+                    _, _ref_message = _assistant_choice(_ref_response)
+                    _ref_text = _ref_message.get("content", "")
                     _reflection, _lessons = parse_reflection_response(_ref_text)
                     _events = event_tracker.summary() if event_tracker else []
                     memory.add_episode(
@@ -1372,6 +1787,25 @@ async def run_agent(config, verbose: bool = False):
         should_export, should_upload, skip_reason = _bench_export_policy(encountered_agent_error)
         bench_export_path = ""
         resolved_name = config.agent.agent_name or llm_config.model
+        events_summary = event_tracker.summary() if event_tracker else []
+        backwater_rubric = None
+        if config.game.map_name == "backwater-battle-hanxin" or match_map_name == "backwater-battle-hanxin":
+            backwater_rubric = compute_backwater_score(
+                result=final.get("result", ""),
+                ticks=final.get("tick", 0),
+                kills_cost=mil.get("kills_cost", 0),
+                deaths_cost=mil.get("deaths_cost", 0),
+                assets_value=mil.get("assets_value", 0),
+                explored_percent=final.get("explored_percent", 0),
+                buildings_killed=mil.get("buildings_killed", 0),
+                buildings_lost=mil.get("buildings_lost", 0),
+                own_units=final.get("own_units", 0),
+                own_buildings=final.get("own_buildings", 0),
+                events=events_summary,
+                messages=trace_messages,
+                encountered_agent_error=encountered_agent_error,
+            )
+            print(f"Backwater score: {backwater_rubric['score']}/100")
         try:
             from datetime import datetime, timezone
             from pathlib import Path
@@ -1395,6 +1829,10 @@ async def run_agent(config, verbose: bool = False):
                 "replay_path": replay.get("path", ""),
                 "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
+            if backwater_rubric:
+                sub["benchmark"] = "backwater-hanxin"
+                sub["backwater_score"] = backwater_rubric["score"]
+                sub["backwater_rubric"] = backwater_rubric
             # Include HF token for verified bench submissions (not saved locally)
             hf_token = config.agent.hf_token
             if hf_token:
@@ -1464,6 +1902,8 @@ async def run_agent(config, verbose: bool = False):
                 "api_calls": total_api_calls,
                 "duration_s": round(elapsed, 2),
             }
+            if backwater_rubric:
+                summary["backwater_score"] = backwater_rubric["score"]
             start_state = {
                 "map": match_map_name,
                 "seed": getattr(config.game, "seed", None),
@@ -1504,7 +1944,10 @@ async def run_agent(config, verbose: bool = False):
                 },
                 "start_state": start_state,
                 "summary": summary,
-                "events": event_tracker.summary() if event_tracker else [],
+                "rubric": {
+                    "backwater": backwater_rubric,
+                } if backwater_rubric else {},
+                "events": events_summary,
                 "messages": trace_messages,
                 "bench_export_path": bench_export_path,
                 "config": sanitize_config_snapshot(config),

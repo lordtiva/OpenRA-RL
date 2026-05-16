@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from openra_env.backwater_rubric import compute_backwater_score
+
 
 def build_bench_export(
     obs: Any,
@@ -35,6 +37,10 @@ def build_bench_export(
     replay_path: str = "",
     hf_token: str = "",
     export_dir: Optional[Path] = None,
+    benchmark: str = "",
+    events: Optional[list[dict[str, Any]]] = None,
+    messages: Optional[list[dict[str, Any]]] = None,
+    encountered_agent_error: bool = False,
 ) -> Dict[str, Any]:
     """Build and save a bench export JSON from a final observation.
 
@@ -48,6 +54,11 @@ def build_bench_export(
         replay_path: Optional path to .orarep replay file.
         hf_token: Optional HuggingFace token for verified bench submissions.
         export_dir: Where to save the JSON (default: ~/.openra-rl/bench-exports/).
+        benchmark: Optional benchmark id. Use "backwater-hanxin" to attach
+            the Backwater rubric score.
+        events: Optional event timeline from the run.
+        messages: Optional LLM/tool trace from the run.
+        encountered_agent_error: Whether the run hit an agent runtime error.
 
     Returns:
         Dict with all submission fields plus "path" pointing to the saved file.
@@ -82,6 +93,26 @@ def build_bench_export(
         "replay_path": replay_path,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
+    if benchmark:
+        sub["benchmark"] = benchmark
+    if benchmark == "backwater-hanxin":
+        rubric = compute_backwater_score(
+            result=obs_dict.get("result", ""),
+            ticks=obs_dict.get("tick", 0),
+            kills_cost=kills,
+            deaths_cost=deaths,
+            assets_value=mil.get("assets_value", 0),
+            explored_percent=obs_dict.get("explored_percent", 0),
+            buildings_killed=mil.get("buildings_killed", 0),
+            buildings_lost=mil.get("buildings_lost", 0),
+            own_units=obs_dict.get("own_units", len(obs_dict.get("units", []))),
+            own_buildings=obs_dict.get("own_buildings", len(obs_dict.get("buildings", []))),
+            events=events or [],
+            messages=messages or [],
+            encountered_agent_error=encountered_agent_error,
+        )
+        sub["backwater_score"] = rubric["score"]
+        sub["backwater_rubric"] = rubric
     if hf_token:
         sub["hf_token"] = hf_token
 

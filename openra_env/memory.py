@@ -358,12 +358,17 @@ Lesson2: <specific lesson with timing target>
 Lesson3: <specific lesson (optional)>"""
 
 
-def parse_reflection_response(text: str) -> tuple[str, list[str]]:
+def parse_reflection_response(text: str | None) -> tuple[str, list[str]]:
     """Parse the LLM's reflection response into reflection text and lessons.
 
     Returns:
         (reflection_text, lessons_list)
     """
+    if text is None:
+        text = ""
+    elif not isinstance(text, str):
+        text = str(text)
+
     reflection = ""
     lessons = []
 

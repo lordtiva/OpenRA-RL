@@ -17,5 +17,8 @@ tests/
 docs/
 *.pdf
 .claude/
-# OpenRA submodule (cloned from GitHub during Docker build)
-OpenRA/
+# Keep the local OpenRA tree in the Docker context so local benchmark maps and
+# engine/proto changes are included in locally built images.
+OpenRA/**/bin/
+OpenRA/**/obj/
+OpenRA/.git/

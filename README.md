@@ -50,6 +50,12 @@ openra-rl play --local --provider ollama --model qwen3:32b
 openra-rl config
 ```
 
+### Scenario Benchmarks
+
+For the Han Xin Backwater benchmark workflow, including local Docker rebuilds,
+OpenRouter `inception/mercury-2`, result locations, and direct OpenRA replay
+watching, see [`docs/backwater-benchmark.md`](docs/backwater-benchmark.md).
+
 ### Prerequisites
 
 - **Docker** — the game server runs in a container

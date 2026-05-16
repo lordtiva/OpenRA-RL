@@ -3,6 +3,8 @@
 import argparse
 import sys
 
+from openra_env.benchmarks import benchmark_ids
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
@@ -25,6 +27,11 @@ def main() -> None:
     )
     play_parser.add_argument("--model", help="Model ID")
     play_parser.add_argument("--api-key", help="API key for LLM endpoint")
+    play_parser.add_argument(
+        "--benchmark",
+        choices=benchmark_ids(),
+        help="Named benchmark scenario preset",
+    )
     play_parser.add_argument(
         "--difficulty", choices=["easy", "normal", "hard"], default="normal",
         help="AI opponent difficulty (default: normal)",
@@ -167,6 +174,7 @@ def main() -> None:
             provider=args.provider,
             model=args.model,
             api_key=args.api_key,
+            benchmark=args.benchmark,
             difficulty=args.difficulty,
             verbose=args.verbose,
             port=args.port,

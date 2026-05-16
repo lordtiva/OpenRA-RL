@@ -923,6 +923,10 @@ def get_tech_tree(faction: Optional[str] = None) -> dict:
 def get_faction_info(faction: str) -> Optional[dict]:
     """Get faction info including available units and buildings."""
     faction = faction.lower()
+    if faction == "allies":
+        faction = "england"
+    elif faction == "soviets":
+        faction = "russia"
     info = RA_FACTIONS.get(faction)
     if info is None:
         return None
