@@ -307,7 +307,7 @@ class ShapedReward:
         if self._margin_paid:
             return 0.0
         res = (result or "").lower()
-        if res == "win":
+        if res == "win" or res == "win_early":
             r_win, r_margin = self._win_terms(self._last_mil)
             self.last_components["win"] += r_win
             self.last_components["margin"] += r_margin
@@ -334,7 +334,7 @@ class ShapedReward:
 
     def _pay_declared(self, obs, mil):
         res = (getattr(obs, "result", "") or "").lower()
-        if res == "win":
+        if res == "win" or res == "win_early":
             r_win, r_margin = self._win_terms(mil)
             self._margin_paid = True
             return r_win, r_margin

@@ -352,7 +352,7 @@ async def amain(args):
 
         for o in outcomes:
             total += 1
-            wins += 1 if o["result"] == "win" else 0
+            wins += 1 if str(o["result"]).startswith("win") else 0
 
         # Descomposición MEDIA del reward de esta tanda por componente:
         # combate / assets / buildings / new_types / margin. Si el reward
@@ -383,7 +383,7 @@ async def amain(args):
             # winrate rodante: últimas 20 partidas (reacciona más rápido
             # que el global acumulado)
             recent_results.extend(o["result"] for o in outcomes)
-            rolling = sum(1 for r in recent_results[-20:] if r == "win") \
+            rolling = sum(1 for r in recent_results[-20:] if str(r).startswith("win")) \
                 / min(len(recent_results), 20)
             # Modo macro: ticks avanzados vía advance() + interrupciones
             adv_total = sum(o.get("advanced_ticks", 0) for o in outcomes)
