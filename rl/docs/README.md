@@ -18,14 +18,15 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | **09** | `08-avance-run2.md` | **Avance Run2: salto Run1→Run2 (U-Net/BPTT/máscaras), tabla comparativa, diagnóstico coloso pacifista** | **Congela Run2 (2026-08-27)** |
 | **10** | `09-fullstack-run3.md` | **Full-stack Run3: SCALAR 21 + auto_support + eradicate_v4 (w_raze 2.0, w_timeout 1.0) — coloso con remate** | **Run3 listo para lanzar (2026-08-27)** |
 | **11** | `10-benchmark-alphastar-openai-five.md` | **Benchmark: dónde estás vs AlphaStar/OpenAI Five — qué ya tenés y las 3 brechas (self-play, imitation, annealing)** | **Posicionamiento — mapa de familia** |
-| **12** | `11-revision-quisquillosa.md` | **Contra-benchmark quisquilloso: dónde infla la tabla, 6 brechas no contadas y veredicto recalibrado (chasis vs motor)** | **Nuevo — termómetro de nivel** |
-| **13** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Consolida análisis `ai.yaml` + teoría RL** |
-| **14** | `07-operacion.md` | **Comandos PowerShell (contenedor / train / dashboard), reglas de run limpio, criterios de promoción** | **Nuevo** |
+| **12** | `11-revision-quisquillosa.md` | **Contra-benchmark quisquilloso: dónde infla la tabla, 6 brechas no contadas y veredicto recalibrado (chasis vs motor)** | **Termómetro de nivel** |
+| **13** | `12-plan-4-capas-siguiente-nivel.md` | **Plan 4 capas para tu hardware (2070+5600X): Capa 0 win posible + Capa 1 BC/SIL + Capa 2 transformer/scatter + Capa 3 self-play + throughput** | **Nuevo — roadmap 6-12 meses (orden por ROI)** |
+| **14** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Consolida análisis `ai.yaml` + teoría RL** |
+| **15** | `07-operacion.md` | **Comandos PowerShell (contenedor / train / dashboard), reglas de run limpio, criterios de promoción** | **Nuevo** |
 
 ## Cómo leer esto
 
-1. **Si entrás por primera vez:** `roadmap-agente.md` → `parche-grande-2026-08.md` §1-5 → `08-avance-run2.md` → `09-fullstack-run3.md` → `10-benchmark-alphastar-openai-five.md` + `11-revision-quisquillosa.md` (mapa + termómetro).
-2. **Si vas a tocar reward:** `08-avance-run2.md` §3 + `09-fullstack-run3.md` §1-2 + `11-revision-quisquillosa.md` §4-5 (riesgo garrison/annealing) + `parche-grande-2026-08.md` §5 + `06-filosofia-rl.md` §2-3 + `reward_shaping.py` como fuente.
+1. **Si entrás por primera vez:** `roadmap-agente.md` → `parche-grande-2026-08.md` §1-5 → `08-avance-run2.md` → `09-fullstack-run3.md` → `10-benchmark-alphastar-openai-five.md` + `11-revision-quisquillosa.md` + `12-plan-4-capas-siguiente-nivel.md` (mapa + termómetro + plan).
+2. **Si vas a tocar reward:** `08-avance-run2.md` §3 + `09-fullstack-run3.md` §1-2 + `11-revision-quisquillosa.md` §4-5 + `12-plan-4-capas-siguiente-nivel.md` Capa 0 (riesgo garrison/annealing) + `06-filosofia-rl.md` §2-3 + `reward_shaping.py` como fuente.
 3. **Si vas a tocar arquitectura:** `diseno-advance-macro.md` + `parche-grande-2026-08.md` §3 (CoordConv/U-Net/broadcast GRU).
 4. **Si vas a lanzar un run:** `07-operacion.md` (3 comandos).
 
