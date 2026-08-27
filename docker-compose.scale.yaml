@@ -1,0 +1,54 @@
+# Escalado horizontal: 2 daemons extra del mismo juego.
+# Cada proceso OpenRA tickea sus sesiones en UN hilo -> ~1 nucleo por
+# contenedor. Tres contenedores = ~3x throughput de simulacion agregado.
+#
+# Uso:  docker compose -f docker-compose.yaml -f docker-compose.scale.yaml up -d
+
+services:
+  openra-rl-2:
+    image: openra-rl:local
+    ports:
+      - "8010:8000"
+      - "19999:9999"
+    environment:
+      - OPENRA_PATH=/opt/openra
+      - DISPLAY=:99
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - MESA_GL_VERSION_OVERRIDE=3.3
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 6G
+    shm_size: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
+  openra-rl-3:
+    image: openra-rl:local
+    ports:
+      - "8020:8000"
+      - "29999:9999"
+    environment:
+      - OPENRA_PATH=/opt/openra
+      - DISPLAY=:99
+      - LIBGL_ALWAYS_SOFTWARE=1
+      - MESA_GL_VERSION_OVERRIDE=3.3
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 6G
+    shm_size: 256m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3

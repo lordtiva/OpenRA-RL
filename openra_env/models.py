@@ -39,6 +39,9 @@ class ActionType(str, Enum):
     POWER_DOWN = "power_down"
     SET_PRIMARY = "set_primary"
     SURRENDER = "surrender"
+    FAST_ADVANCE = "fast_advance"
+    PATROL = "patrol"
+    ARMY_ATTACK_MOVE = "army_attack_move"
 
 
 class CommandModel(Action):

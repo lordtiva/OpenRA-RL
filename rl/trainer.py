@@ -1,0 +1,158 @@
+"""PPO trainer para el agente OpenRA.
+
+Diseño (lecciones alto-truco/Imperium aplicadas):
+    - old_log_prob y old_value se GUARDAN en el rollout y se congelan:
+      recalcularlos con pesos actuales haría ratio≡1 (PPO sin señal)
+    - Ventajas: el escalado depende de --adv-mode en train.py
+      ('episode' centra por episodio; 'global' z-scorea el batch completo;
+      'none' no toca nada). F8 (auditoría 2026-08-24): ESTA clase ya NO
+      re-normaliza — antes z-scoreaba siempre y con adv-mode=global la
+      normalización era doble (el comentario "no doble normalización" era
+      falso). El escalado vive en UN solo lugar: process_results.
+    - Clip ε=0.2, grad clip 0.5, value clipping + Huber
+    - Coeficiente de entropía dinámico calculado on-device (sin .item()
+      dentro del grafo)
+"""
+
+import time
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+
+class PPOTrainer:
+    def __init__(self, net, lr: float = 3e-4, device: str = "cpu",
+                 clip_eps: float = 0.2, vf_coef: float = 0.5,
+                 ent_lo: float = 0.01, ent_hi: float = 0.04,
+                 max_grad_norm: float = 0.5, bptt_len: int = 32):
+        self.net = net.to(device)
+        self.opt = torch.optim.Adam(self.net.parameters(), lr=lr)
+        self.device = device
+        self.clip_eps = clip_eps
+        self.vf_coef = vf_coef
+        self.ent_lo = ent_lo
+        self.ent_hi = ent_hi
+        self.max_grad_norm = max_grad_norm
+        self.bptt_len = bptt_len  # longitud de segmento para BPTT truncado
+
+    def update(self, samples: list, epochs: int = 2, batch_size: int = 32):
+        """PPO recurrente con BPTT truncado por segmentos.
+
+        Antes: las transiciones se aplanaban y se mezclaban al azar; el h_in
+        se trataba como constante y el gradiente NUNCA viajaba h_t→h_{t+1}
+        (memoria temporal rota). Ahora: se entrenan SEGMENTOS de hasta
+        bptt_len pasos consecutivos del mismo episodio (_ep), propagando el
+        GRU sin detach (evaluate_actions_seq) → la red aprende qué guardar
+        en el hidden. El shuffle es a nivel de segmento, preservando la
+        secuencia.
+        """
+        if not samples:
+            return {}
+
+        # 1) Construir segmentos: bloques de ≤ bptt_len pasos consecutivos,
+        #    cortando cuando cambia el episodio (_ep).
+        ep0 = samples[0].get("_ep", 0)
+        segs, run = [], [samples[0]]
+        for s in samples[1:]:
+            if s.get("_ep", ep0) != run[0].get("_ep", ep0) or len(run) >= self.bptt_len:
+                segs.append(run)
+                run = [s]
+            else:
+                run.append(s)
+        if run:
+            segs.append(run)
+        if not segs:
+            return {}
+
+        seg_idx = np.arange(len(segs))
+        segs_per_batch = max(1, int(round(batch_size / self.bptt_len)))
+        stats = {"pi_loss": [], "v_loss": [], "entropy": [],
+                 "clip_frac": [], "kl": []}
+        gn = 0.0
+
+        for _ in range(epochs):
+            np.random.shuffle(seg_idx)
+            for start in range(0, len(segs), segs_per_batch):
+                mb = [segs[i] for i in seg_idx[start:start + segs_per_batch]]
+
+                # backward por segmento (acumula grad en params): 1 grafo a la
+                # vez → memoria SÓLO del segmento actual, no de todo el batch.
+                self.net.zero_grad(set_to_none=True)
+                coef = None
+                for seg in mb:
+                    lp_new, entropy, value = self.net.evaluate_actions_seq(
+                        seg, self.device)
+                    if coef is None:
+                        coef = self.ent_lo + self.ent_hi * max(
+                            0.0, 1.0 - float(entropy.mean().item()) / 2.0)
+
+                    lp_old = torch.cat(
+                        [s["action"]["log_prob"] for s in seg]).to(self.device)
+                    v_old = torch.tensor(
+                        [s["value_pred"] for s in seg], device=self.device)
+                    mb_adv = torch.tensor(
+                        [s["adv"] for s in seg], device=self.device)
+                    mb_ret = torch.tensor(
+                        [s["ret"] for s in seg], device=self.device)
+
+                    ratio = torch.exp(lp_new - lp_old)
+                    surr1 = ratio * mb_adv
+                    surr2 = torch.clamp(ratio, 1 - self.clip_eps,
+                                        1 + self.clip_eps) * mb_adv
+                    pi_loss = -torch.min(surr1, surr2).mean()
+
+                    v_clipped = v_old + torch.clamp(value - v_old,
+                                                    -self.clip_eps, self.clip_eps)
+                    v_loss = torch.max(F.smooth_l1_loss(value, mb_ret),
+                                       F.smooth_l1_loss(v_clipped, mb_ret))
+                    entropy_mean = entropy.mean()
+                    loss = ((pi_loss + self.vf_coef * v_loss
+                             - coef * entropy_mean) / len(mb))
+                    # divide por nº de segmentos para NO escalar el grad con
+                    # len(mb)>1 (si no, la lr efectiva se duplica con 2 seg)
+                    loss.backward()
+
+                    with torch.no_grad():
+                        clip_frac = ((ratio - 1).abs() > self.clip_eps).float().mean()
+                        kl = (lp_new - lp_old).mean().clamp(min=0)
+                        stats["pi_loss"].append(float(pi_loss.item()))
+                        stats["v_loss"].append(float(v_loss.item()))
+                        stats["entropy"].append(float(entropy_mean.item()))
+                        stats["clip_frac"].append(float(clip_frac.item()))
+                        stats["kl"].append(float(kl.item()))
+
+                gn = torch.nn.utils.clip_grad_norm_(
+                    self.net.parameters(), self.max_grad_norm).item()
+                self.opt.step()
+
+        out = {k: round(float(np.mean(v)), 5) for k, v in stats.items()}
+        out |= {"grad_norm": round(gn, 4),
+                "adv_mean": round(float(np.mean(
+                    [s["adv"] for s in samples])), 5), "n": len(samples)}
+        return out
+
+
+def save_checkpoint(path: str, net, opt, iteration: int, extra: dict | None = None):
+    ckpt = {"net": net.state_dict(), "opt": opt.state_dict(),
+            "iteration": iteration, "time": time.time()}
+    if extra:
+        ckpt.update(extra)
+    torch.save(ckpt, path)
+
+
+def load_checkpoint(path: str, net, opt=None, vocab=None):
+    """Restaura red/opt/iteración y — si el checkpoint lo trae — el VOCAB.
+
+    F2 (auditoría 2026-08-24): antes se ignoraba ckpt["vocab"] y cada resume
+    reconstruía el vocabulario en orden de aparición → los ids de la cabeza
+    de ítems podían quedar BARAJADOS respecto a los pesos guardados (parte
+    del fracaso del incentivo minero tras los reinicios del ritual).
+    """
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    net.load_state_dict(ckpt["net"])
+    if opt is not None and "opt" in ckpt:
+        opt.load_state_dict(ckpt["opt"])
+    if vocab is not None and isinstance(ckpt.get("vocab"), dict):
+        vocab.type_to_id = dict(ckpt["vocab"])
+    return ckpt.get("iteration", 0)

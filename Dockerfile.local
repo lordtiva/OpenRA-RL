@@ -1,0 +1,173 @@
+# ==============================================================================
+# Dockerfile.local — compila el submodule OpenRA LOCAL (pinned por openra-rl)
+# en lugar de clonar la rama bleed (que puede estar rota respecto a los stubs).
+#
+# Uso:  docker compose -f docker-compose.yaml build openra-rl
+#       (con build.dockerfile: Dockerfile.local en el servicio)
+#
+# Difiere del Dockerfile original en:
+#   1. COPY del submodule local en vez de git clone --branch bleed
+#   2. Normalización CRLF->LF de TODOS los tipos de archivo de texto
+#      (checkout Windows deja \r hasta en Makefile/.cs/.yaml, lo que rompe
+#       make y MiniYaml dentro del contenedor Linux)
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# Stage 1: Build OpenRA from source (C#/.NET 8.0)
+# ------------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/sdk:8.0-bookworm-slim AS openra-build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    make \
+    git \
+    libsdl2-dev \
+    libopenal-dev \
+    libfreetype-dev \
+    liblua5.1-0-dev \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Submodule local, consistente con los stubs gRPC chequeados y el paquete Python
+COPY OpenRA/ /src/openra/
+WORKDIR /src/openra
+
+# Fix CRLF de Windows en TODOS los archivos de texto relevantes
+# (.sh solo alcanza para un clone Linux; un checkout Windows mete \r en
+#  Makefile, .cs, .yaml, etc.)
+RUN find . -type f \( \
+        -name '*.sh' -o -name 'Makefile' -o -name '*.mk' \
+        -o -name '*.cs' -o -name '*.csproj' -o -name '*.props' \
+        -o -name '*.targets' -o -name '*.sln' -o -name '*.yaml' \
+        -o -name '*.yml' -o -name '*.json' -o -name '*.lua' \
+        -o -name '*.cmd' -o -name '*.ps1' -o -name '*.md' \
+        -o -name '*.frag' -o -name '*.vert' \) \
+        -exec sed -i 's/\r$//' {} + && \
+    find . -name '*.sh' -exec chmod +x {} +
+
+# NO setear SKIP_PROTOC: los stubs Generated/ chequeados están VIEJOS respecto
+# al rl_bridge.proto de este commit (le faltan interrupt_reason,
+# actual_ticks_advanced, etc. -> CS1061 al compilar ExternalBotBridge).
+# Con la variable ausente, Grpc.Tools regenera los stubs en el build.
+# El crash de protoc documentado era específico de linux_arm64 (GH200);
+# en linux/amd64 funciona.
+RUN make TARGETPLATFORM=unix-generic CONFIGURATION=Release
+
+# Verify critical output (includes Null platform for headless RL operation)
+RUN test -f bin/OpenRA.dll && \
+    test -f bin/OpenRA.Game.dll && \
+    test -f bin/OpenRA.Mods.Common.dll && \
+    test -f bin/OpenRA.Platforms.Null.dll
+
+# ------------------------------------------------------------------------------
+# Stage 2: Install Python dependencies (idéntico al Dockerfile original)
+# ------------------------------------------------------------------------------
+FROM python:3.11-slim-bookworm AS python-build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml /app/
+COPY openra_env/ /app/openra_env/
+COPY proto/ /app/proto/
+COPY README.md /app/
+
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir .
+
+# ------------------------------------------------------------------------------
+# Stage 3: Runtime image (idéntico al Dockerfile original)
+# ------------------------------------------------------------------------------
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-bookworm-slim AS dotnet-runtime
+
+FROM python:3.11-slim-bookworm
+
+LABEL maintainer="OpenRA-RL"
+LABEL description="OpenRA RL Environment - headless game engine with gRPC bridge + OpenEnv API"
+
+# Copy ASP.NET Core runtime from official Microsoft image
+COPY --from=dotnet-runtime /usr/share/dotnet /usr/share/dotnet
+RUN ln -s /usr/share/dotnet/dotnet /usr/bin/dotnet
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    xvfb \
+    libgl1-mesa-dri \
+    libgl1-mesa-glx \
+    libegl-mesa0 \
+    mesa-vulkan-drivers \
+    libvulkan1 \
+    libsdl2-2.0-0 \
+    libopenal1 \
+    libfreetype6 \
+    liblua5.1-0 \
+    libicu72 \
+    curl procps \
+    x11vnc novnc websockify \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Python packages from builder
+COPY --from=python-build /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
+COPY --from=python-build /usr/local/bin /usr/local/bin
+
+# Copy built OpenRA (bin, mods, glsl shaders, and global mix database for content resolution)
+COPY --from=openra-build /src/openra/bin /opt/openra/bin
+COPY --from=openra-build /src/openra/mods /opt/openra/mods
+COPY --from=openra-build /src/openra/glsl /opt/openra/glsl
+COPY --from=openra-build ["/src/openra/global mix database.dat", "/opt/openra/global mix database.dat"]
+
+# Create native library symlinks that OpenRA expects
+RUN LIBDIR=$( [ "$(dpkg --print-architecture)" = "arm64" ] && echo "/usr/lib/aarch64-linux-gnu" || echo "/usr/lib/x86_64-linux-gnu" ) && \
+    ln -sf "$LIBDIR/libSDL2-2.0.so.0" /opt/openra/bin/SDL2.so && \
+    ln -sf "$LIBDIR/libopenal.so.1" /opt/openra/bin/soft_oal.so && \
+    ln -sf "$LIBDIR/libfreetype.so.6" /opt/openra/bin/freetype6.so && \
+    ln -sf "$LIBDIR/liblua5.1.so.0" /opt/openra/bin/lua51.so
+
+# Copy Python application code
+COPY openra_env/ /app/openra_env/
+COPY proto/ /app/proto/
+COPY pyproject.toml /app/
+
+# Create OpenRA support directory and pre-install RA game content (best-effort).
+# Only needed for the replay viewer (Game.Platform=Default with full UI).
+# The RL environment works without this content (headless mode).
+RUN mkdir -p /root/.config/openra/Content/ra/v2/expand /root/.config/openra/Content/ra/v2/cnc && \
+    ( curl -sfL --max-time 30 -o /tmp/ra-quickinstall.zip \
+        https://openra.baxxster.no/openra/ra-quickinstall.zip && \
+    apt-get update && apt-get install -y --no-install-recommends unzip && \
+    unzip -o /tmp/ra-quickinstall.zip -d /tmp/ra-content && \
+    cp /tmp/ra-content/*.mix /root/.config/openra/Content/ra/v2/ && \
+    cp /tmp/ra-content/expand/* /root/.config/openra/Content/ra/v2/expand/ && \
+    cp /tmp/ra-content/cnc/* /root/.config/openra/Content/ra/v2/cnc/ && \
+    rm -rf /tmp/ra-quickinstall.zip /tmp/ra-content && \
+    apt-get purge -y unzip && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \
+    ) || echo "WARNING: RA content download failed (replay viewer will be unavailable)"
+
+# Copy entrypoints (fix Windows CRLF line endings)
+COPY docker/entrypoint.sh /entrypoint.sh
+COPY docker/replay-viewer.sh /replay-viewer.sh
+RUN sed -i 's/\r$//' /entrypoint.sh /replay-viewer.sh && \
+    chmod +x /entrypoint.sh /replay-viewer.sh
+
+# Environment
+ENV OPENRA_PATH=/opt/openra
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV DISPLAY=:99
+ENV DOTNET_CLI_TELEMETRY_OPTOUT=1
+ENV DOTNET_ROLL_FORWARD=LatestMajor
+ENV LIBGL_ALWAYS_SOFTWARE=1
+ENV MESA_GL_VERSION_OVERRIDE=3.3
+# Game configuration (override at runtime with -e)
+ENV AI_SLOT=Multi0
+ENV BOT_TYPE=beginner
+ENV RECORD_REPLAYS=true
+
+EXPOSE 8000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+ENTRYPOINT ["/entrypoint.sh"]
+CMD ["python", "-m", "openra_env.server.app"]

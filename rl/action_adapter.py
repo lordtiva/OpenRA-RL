@@ -1,0 +1,360 @@
+"""Traducción entre índices de la red y CommandModel del engine.
+
+Responsabilidades:
+    - Construir ActionIndex: máscaras legales por cabeza para una observación
+    - Convertir la elección de la red en OpenRAAction ejecutable
+
+Lecciones de la primera corrida real (crash C# "Exception was thrown by
+handler"):
+    - TRAIN con un tipo de EDIFICIO revienta el handler -> los ítems se
+      separan en unidades vs edificios usando can_produce de nuestros propios
+      edificios de producción (dato que ya viene en la observación)
+    - ATTACK sin enemigo visible cerca -> target_actor_id=0 -> NRE en C# ->
+      se degrada a ATTACK_MOVE hacia la celda (siempre seguro)
+    - Acciones que apuntan a EDIFICIOS (sell/repair/rally/power_down/
+      set_primary) quedan fuera de la v0.1: requerirían una cabeza de slots
+      de edificios; se agregará cuando el núcleo sea estable
+"""
+
+import numpy as np
+import torch
+
+from openra_env.models import ActionType, CommandModel, OpenRAAction
+from rl.network import TYPE_TO_IDX, build_type_masks
+from rl.obs_encoding import MAX_UNITS
+
+# Tipos habilitados en v0.1 (el resto ni entra en la máscara)
+ENABLED_TYPES = {
+    "no_op", "move", "attack_move", "attack", "stop", "harvest",
+    "set_stance", "deploy", "train", "build", "place_building",
+    "cancel_production", "army_attack_move",
+}
+
+UNIT_ACTION_TYPES = {"move", "attack_move", "attack", "stop", "set_stance",
+                     "harvest"}
+
+
+# Techo del vocabulario de tipos de actor (debe == n_item_types de
+# AlphaLiteNet). El embedding es fijo; si id_of() asignara ids >= n el
+# lookup haría device-side assert en CUDA (ocurrió en Fase 2: el mapa con
+# base completa desbloquea TODO el árbol de RA y superó 64 tipos).
+MAX_ITEM_TYPES = 128   # RA completo supera 64 (3tnk era el #65 al explotar)
+
+
+class Vocab:
+    """Vocabulario estable de ROLES funcionales (agnóstico a facción).
+
+    La cabeza de ítems ya no indexa nombres de actor concretos (1tnk, e1...)
+    que cambian por facción, sino ROLES (rl.roles: 'tank_medium', 'power'...).
+    El vocab se puede SEMBRAR con todos los roles del catálogo para que los ids
+    sean estables entre reinicios/facciones (traductor universal).
+    """
+
+    def __init__(self):
+        self.type_to_id = {}
+
+    def seed_roles(self):
+        """Pre-asigna un id estable a cada rol del catálogo RA."""
+        from rl.roles import ROLE_OF_ITEM
+        roles = sorted(set(ROLE_OF_ITEM.values()))
+        for rol in roles:
+            self.id_of(rol)
+        return self.type_to_id
+
+    def id_of(self, type_str: str) -> int:
+        i = self.type_to_id.get(type_str)
+        if i is None:
+            if len(self.type_to_id) >= MAX_ITEM_TYPES:
+                raise RuntimeError(
+                    f"vocab lleno ({MAX_ITEM_TYPES} tipos): '{type_str}' sin "
+                    f"id libre. Ampliar n_item_types en network.py Y "
+                    f"MAX_ITEM_TYPES juntos.")
+            i = len(self.type_to_id)
+            self.type_to_id[type_str] = i
+        return i
+
+
+# Edificios conocidos del mod RA (nombres internos del engine).
+# Clasificación ESTÁTICA: el can_produce del cuartel de mando lista tanto
+# unidades como edificios, así que la lógica vieja (intersección con la
+# unión de can_produce) mandaba las refinerías al cubo equivocado y dejaba
+# la acción 'build' casi siempre enmascarada.
+BUILDING_ITEM_TYPES = {
+    # economía
+    "proc", "silo",
+    # energía
+    "powr", "apwr",
+    # producción militar
+    "barr", "tent", "kenn", "weap", "hpad", "dome", "fix", "atek", "stek",
+    # defensa y navales
+    "gun", "ftur", "tsla", "agun", "pbox", "hbox", "sam", "gap",
+    "spen", "syrd",
+}
+
+
+def _split_production(obs):
+    """Separa available_production en (roles de entrenables, roles de
+    construibles) + mapa rol->item concreto.
+
+    TRAductor universal (agnóstico a facción): la cabeza de ítems indexa ROLES
+    estables (rl.roles), no nombres internos que varían por facción. Cada
+    rol->[items concretos disponibles]. Al armar el comando, el adapter elige
+    el item concreto de la facción actual para el rol muestreado.
+    """
+    available = set(obs.available_production or [])
+    buildables = available & BUILDING_ITEM_TYPES
+    trainables = available - buildables
+    # roles disponibles + su mejor item concreto (estable, más barato primero)
+    def _roles(items):
+        from rl.roles import role_of
+        por_rol: dict[str, list[str]] = {}
+        for it in sorted(items):
+            por_rol.setdefault(role_of(it), []).append(it)
+        return por_rol
+
+    train_por_rol = _roles(trainables)
+    build_por_rol = _roles(buildables)
+    train_roles = sorted(train_por_rol)
+    build_roles = sorted(build_por_rol)
+    # rol -> ítem concreto preferido de la facción actual
+    rol_a_concreto = {r: items[0] for r, items in train_por_rol.items()}
+    for r, items in build_por_rol.items():
+        rol_a_concreto[r] = items[0]
+    return train_roles, build_roles, rol_a_concreto
+
+
+class ActionIndex:
+    """Todo lo que la red necesita para decidir sobre una observación."""
+
+    __slots__ = ("type_mask", "unit_valid", "cell_mask", "item_indices",
+                 "item_mask", "unit_ids", "items", "train_items",
+                 "build_items", "rol_a_concreto", "h", "w",
+                 "train_slot_mask", "build_slot_mask")
+
+    def __init__(self, obs, vocab: Vocab, device="cpu"):
+        self.h = max(obs.map_info.height, 1)
+        self.w = max(obs.map_info.width, 1)
+
+        # Cabeza 1: tipos legales, acotados a los habilitados en v0.1
+        raw_mask = build_type_masks(obs)
+        m = np.zeros_like(raw_mask.numpy())
+        for name in ENABLED_TYPES:
+            m[TYPE_TO_IDX[name]] = raw_mask[TYPE_TO_IDX[name]]
+        # harvest solo si hay cosechadoras
+        if obs.economy.harvester_count <= 0:
+            m[TYPE_TO_IDX["harvest"]] = False
+        # train/build requieren ítems de su categoría
+        self.train_items, self.build_items, self.rol_a_concreto = \
+            _split_production(obs)
+        if not self.train_items:
+            m[TYPE_TO_IDX["train"]] = False
+        if not self.build_items:
+            m[TYPE_TO_IDX["build"]] = False
+        self.type_mask = torch.from_numpy(m)
+
+        # Cabeza 2: slots de unidades propias móviles
+        units = sorted(obs.units, key=lambda u: u.actor_id)[:MAX_UNITS]
+        self.unit_ids = [u.actor_id for u in units]
+        self.unit_valid = torch.zeros(MAX_UNITS, dtype=torch.bool)
+        for i in range(len(self.unit_ids)):
+            self.unit_valid[i] = True
+
+        # Cabeza 3: mapa completo como candidatos de celda
+        self.cell_mask = torch.ones(self.h * self.w, dtype=torch.bool)
+
+        # Cabeza 4: ROLES disponibles (traductor universal agnóstico a facción).
+        # items = roles (train + build), estables entre facciones.
+        items = self.train_items + self.build_items
+        self.items = items
+        # Tamaño FIJO = MAX_ITEM_TYPES: el vocab crece dinamicamente y si los
+        # tensores cambiaran de largo entre episodios el torch.cat del update
+        # explota ("Expected size 64 but got 65"). Padding estable siempre.
+        n_vocab = MAX_ITEM_TYPES
+        self.item_indices = torch.zeros(n_vocab, dtype=torch.long)
+        self.item_mask = torch.zeros(n_vocab, dtype=torch.bool)
+        for slot, it in enumerate(items[:n_vocab]):
+            self.item_indices[slot] = vocab.id_of(it)
+            self.item_mask[slot] = True
+        # Enmascaramiento jerárquico ESTRICTO: máscaras de slots por categoría
+        # de producción, para que la cabeza de ítems SOLO pueda elegir dentro
+        # de la categoría del tipo (train->train_roles, build->build_roles).
+        # Esto elimina las coerciones post-hoc del adapter.
+        self.train_slot_mask = torch.zeros(n_vocab, dtype=torch.bool)
+        self.build_slot_mask = torch.zeros(n_vocab, dtype=torch.bool)
+        n_train = len(self.train_items)
+        for slot in range(min(n_train, n_vocab)):
+            self.train_slot_mask[slot] = True
+        for slot in range(n_train, min(n_vocab, n_train + len(self.build_items))):
+            self.build_slot_mask[slot] = True
+
+
+def index_to_command(obs, chosen_type: int, unit_slot: int, cell_flat: int,
+                     item_slot: int, aidx: ActionIndex) -> OpenRAAction:
+    """Convierte la salida cruda de la red en un comando válido y SEGURO."""
+    action, _ = index_to_command_effective(
+        obs, chosen_type, unit_slot, cell_flat, item_slot, aidx)
+    return action
+
+
+def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
+                               cell_flat: int, item_slot: int,
+                               aidx: ActionIndex):
+    """Igual que index_to_command pero TAMBIÉN devuelve los índices EFECTIVOS.
+
+    Las correcciones de seguridad mutan la acción muestreada (ej. 'train'
+    con ítem de edificio -> primer entrenable). Guardar el log_prob de la
+    acción MUESTREADA cuando se ejecutó otra viola el teorema del gradiente
+    de política (revisión externa 2026-08-24): con los índices efectivos el
+    rollout puede recalcular log π(a_ejecutada|s) y atribuir el crédito a lo
+    que realmente ocurrió.
+    """
+    idx_to_type = {v: k for k, v in TYPE_TO_IDX.items()}
+    t_name = idx_to_type.get(chosen_type, "no_op")
+    if t_name not in ENABLED_TYPES:
+        t_name = "no_op"
+
+    actor_id = aidx.unit_ids[unit_slot] if unit_slot < len(aidx.unit_ids) else 0
+
+    cx, cy = 0, 0
+    if cell_flat < aidx.h * aidx.w:
+        cy, cx = divmod(int(cell_flat), aidx.w)
+
+    item_type = aidx.items[item_slot] if item_slot < len(aidx.items) else ""
+    train_set, build_set = set(aidx.train_items), set(aidx.build_items)
+
+    # --- Correcciones de seguridad (determinísticas, mantienen índices) ---
+    if t_name == "train":
+        if item_type not in train_set:
+            # elegimos un ítem de edificio: usar el primer entrenable
+            if aidx.train_items:
+                item_type = aidx.train_items[0]
+            else:
+                t_name = "no_op"
+    elif t_name == "build":
+        if item_type not in build_set:
+            if aidx.build_items:
+                item_type = aidx.build_items[0]
+            elif aidx.train_items:
+                t_name, _ = "train", None
+                item_type = aidx.train_items[0]
+            else:
+                t_name = "no_op"
+    elif t_name == "place_building":
+        pending = _pending_building_type(obs)
+        if not pending:
+            t_name = "no_op"
+        else:
+            item_type = pending
+    elif t_name == "cancel_production":
+        if not obs.production:
+            t_name = "no_op"
+        else:
+            item_type = obs.production[0].item
+
+    if t_name in UNIT_ACTION_TYPES and actor_id == 0:
+        t_name = "no_op"  # acción de unidad sin unidad válida
+
+    # F1 (auditoría): attack SIN enemigo resolvible se degrada a attack_move
+    # AQUÍ, antes de computar los índices efectivos — así el tipo efectivo
+    # refleja la acción realmente ejecutada (antes quedaba "attack" y el
+    # buffer atribuía el crédito al tipo equivocado).
+    if t_name == "attack" and _nearest_enemy_at_cell(obs, cx, cy) is None:
+        t_name = "attack_move"
+
+    # Índices EFECTIVOS tras las correcciones (para el log_prob honesto).
+    # Se computan ANTES de armar el comando, reflejando cada mutación.
+    eff_type = TYPE_TO_IDX.get(t_name, chosen_type)
+    eff_unit_slot = unit_slot if 0 <= unit_slot < len(aidx.unit_ids) else 0
+    eff_item_slot = (item_slot if 0 <= item_slot < len(aidx.items)
+                     else 0)
+    if t_name in ("train", "build", "place_building", "cancel_production"):
+        # item_type pudo ser corregido arriba -> localizar su slot real
+        if item_type in aidx.items:
+            eff_item_slot = aidx.items.index(item_type)
+    if t_name == "harvest":
+        h_id = _any_harvester(obs)
+        if h_id and h_id in aidx.unit_ids:
+            eff_unit_slot = aidx.unit_ids.index(h_id)
+    elif t_name == "deploy":
+        m_id = _any_mcv(obs)
+        if m_id and m_id in aidx.unit_ids:
+            eff_unit_slot = aidx.unit_ids.index(m_id)
+
+    cmd = None
+    t = ActionType(t_name)
+    if t == ActionType.NO_OP:
+        cmd = CommandModel(action=t)
+    elif t in (ActionType.MOVE, ActionType.ATTACK_MOVE):
+        cmd = CommandModel(action=t, actor_id=actor_id,
+                           target_x=cx, target_y=cy)
+    elif t == ActionType.ARMY_ATTACK_MOVE:
+        # Fase 2: sin actor_id — el C# itera TODAS las unidades de combate
+        # propias y les emite AttackMove hacia la celda.
+        cmd = CommandModel(action=t, target_x=cx, target_y=cy)
+    elif t == ActionType.ATTACK:
+        # Con la degradación temprana F1, acá solo se llega CON enemigo
+        # resolvible; el if queda como defensa en profundidad.
+        target = _nearest_enemy_at_cell(obs, cx, cy)
+        if target is None:
+            cmd = CommandModel(action=ActionType.ATTACK_MOVE,
+                               actor_id=actor_id, target_x=cx, target_y=cy)
+        else:
+            cmd = CommandModel(action=t, actor_id=actor_id,
+                               target_actor_id=target,
+                               target_x=cx, target_y=cy)
+    elif t in (ActionType.STOP, ActionType.SET_STANCE):
+        cmd = CommandModel(action=t, actor_id=actor_id)
+    elif t == ActionType.HARVEST:
+        cmd = CommandModel(action=t, actor_id=_any_harvester(obs) or actor_id)
+    elif t == ActionType.DEPLOY:
+        cmd = CommandModel(action=t, actor_id=_any_mcv(obs) or actor_id)
+    elif t == ActionType.TRAIN:
+        cmd = CommandModel(action=t,
+                           item_type=aidx.rol_a_concreto.get(item_type,
+                                                             item_type))
+    elif t == ActionType.BUILD:
+        cmd = CommandModel(action=t,
+                           item_type=aidx.rol_a_concreto.get(item_type,
+                                                             item_type))
+    elif t == ActionType.PLACE_BUILDING:
+        cmd = CommandModel(action=t, item_type=item_type,
+                           target_x=cx, target_y=cy)
+    elif t == ActionType.CANCEL_PRODUCTION:
+        cmd = CommandModel(action=t, item_type=item_type)
+    else:
+        cmd = CommandModel(action=ActionType.NO_OP)
+    return OpenRAAction(commands=[cmd]), (eff_type, eff_unit_slot,
+                                          eff_item_slot)
+
+
+def _nearest_enemy_at_cell(obs, cx: int, cy: int):
+    """ID del enemigo visible más cercano a la celda (para attack)."""
+    best, best_d = None, float("inf")
+    candidates = list(obs.visible_enemies) + list(obs.visible_enemy_buildings)
+    for e in candidates:
+        d = (e.cell_x - cx) ** 2 + (e.cell_y - cy) ** 2
+        if d < best_d:
+            best, best_d = e.actor_id, d
+    return best
+
+
+def _pending_building_type(obs):
+    """Tipo del edificio terminado esperando colocación."""
+    for p in obs.production:
+        if p.queue_type == "Building" and p.progress >= 1.0:
+            return p.item
+    return None
+
+
+def _any_harvester(obs):
+    for u in obs.units:
+        if "harv" in u.type.lower():
+            return u.actor_id
+    return None
+
+
+def _any_mcv(obs):
+    for u in obs.units:
+        if "mcv" in u.type.lower():
+            return u.actor_id
+    return None

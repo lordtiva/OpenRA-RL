@@ -2,6 +2,9 @@
 set -e
 
 # Start Xvfb (virtual framebuffer) for headless display
+# Limpiar lock/socket huerfanos del display (recreaciones abruptas dejan
+# /tmp/.X99-lock y el arranque falla con "Server is already active").
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99 2>/dev/null || true
 echo "Starting Xvfb on display :99..."
 Xvfb :99 -screen 0 1024x768x24 -ac +extension GLX +render -noreset &
 XVFB_PID=$!

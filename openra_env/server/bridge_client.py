@@ -329,10 +329,27 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
         "spatial_channels": obs.spatial_channels,
         "explored_percent": obs.explored_percent,
         # Server-side interrupt detection fields
-        "interrupted": obs.interrupted,
-        "interrupt_reason": obs.interrupt_reason,
-        "actual_ticks_advanced": obs.actual_ticks_advanced,
-    }
+                "interrupted": obs.interrupted,
+                "interrupt_reason": obs.interrupt_reason,
+                "actual_ticks_advanced": obs.actual_ticks_advanced,
+                # Resumen espectador por bando (economy_race / supremacía)
+                                "global_summary": {
+                                                    "own": {
+                                                        "cash": obs.global_summary.own.cash,
+                                                        "unit_value": obs.global_summary.own.unit_value,
+                                                        "building_value": obs.global_summary.own.building_value,
+                                                        "n_buildings": obs.global_summary.own.n_buildings,
+                                                        "earned": obs.global_summary.own.earned,
+                                                    },
+                                                    "enemy": {
+                                                        "cash": obs.global_summary.enemy.cash,
+                                                        "unit_value": obs.global_summary.enemy.unit_value,
+                                                        "building_value": obs.global_summary.enemy.building_value,
+                                                        "n_buildings": obs.global_summary.enemy.n_buildings,
+                                                        "earned": obs.global_summary.enemy.earned,
+                                                    },
+                                                },
+                            }
 
 
 def commands_to_proto(commands: list[dict]) -> rl_bridge_pb2.AgentAction:

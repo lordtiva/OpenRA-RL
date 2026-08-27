@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>OpenRA PPO — Dashboard</title>
+<style>
+  :root {
+    --bg: #0b0e14; --card: #141922; --border: #232b38;
+    --fg: #e6edf3; --muted: #8b98a9;
+    --green: #3fb950; --red: #f85149; --blue: #58a6ff;
+    --amber: #d29922; --purple: #bc8cff; --cyan: #39c5cf;
+    --orange: #f0883e;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    padding: 24px; max-width: 1100px; margin: 0 auto;
+  }
+  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; }
+  h1 { font-size: 20px; font-weight: 600; }
+  .live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .live::before {
+    content: ''; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--green); animation: pulse 1.6s infinite;
+  }
+  @keyframes pulse { 0%,100% {opacity: 1;} 50% {opacity: .3;} }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 12px; }
+  .cards.secondary { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 6px; }
+  .card .value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .card.small .value { font-size: 18px; }
+.card.accent-raze { border-left: 3px solid var(--orange); box-shadow: inset 0 1px rgba(240,136,62,.08); }
+.card.accent-raze .label { color: var(--orange); }
+.card.accent-win  { border-left: 3px solid var(--green); box-shadow: inset 0 1px rgba(63,185,80,.08); }
+.card.accent-win  .label { color: var(--green); }
+.pill {
+  display: inline-block; padding: 1px 8px; border-radius: 20px;
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  background: rgba(240,136,62,.12); color: var(--orange);
+  border: 1px solid rgba(240,136,62,.35); vertical-align: middle;
+  font-weight: 600;
+}
+  .card .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+  .chart-card h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 10px; }
+  canvas { width: 100%; height: 130px; display: block; }
+  .outcomes { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 600;
+    border: 1px solid var(--border);
+  }
+  .chip.win     { color: var(--green); border-color: var(--green); background: rgba(63,185,80,.08); }
+  .chip.lose    { color: var(--red);   border-color: var(--red);   background: rgba(248,81,73,.08); }
+  .chip.draw    { color: var(--amber); border-color: var(--amber); background: rgba(210,153,34,.08); }
+  .chip.other   { color: var(--muted); }
+  .sup-bar {
+    position: relative; display: flex; height: 30px;
+    border-radius: 8px; overflow: hidden; border: 1px solid var(--border); margin-bottom: 4px;
+  }
+  #bar-ours   { background: linear-gradient(180deg, #3fb950, #2ea043); width: 50%; transition: width .9s ease; min-width: 0; }
+  #bar-theirs { background: linear-gradient(180deg, #f85149, #da3633); flex: 1; }
+  #bar-label {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.8);
+    font-variant-numeric: tabular-nums; letter-spacing: .02em;
+  }
+  footer { margin-top: 18px; font-size: 12px; color: var(--muted); line-height: 1.7; }
+  footer code { background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-size: 11px; }
+  .empty { text-align: center; color: var(--muted); padding: 60px 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OpenRA PPO</h1>
+  <span class="live">monitoreando rl/ckpts/metrics.jsonl</span>
+</header>
+
+<div id="content" class="empty">Esperando la primera iteración…</div>
+
+<div id="dash" style="display:none">
+  <div class="cards">
+    <div class="card"><div class="label">Winrate global</div><div class="value" id="c-win" style="color:var(--green)">—</div><div class="sub" id="c-win-sub"></div></div>
+    <div class="card"><div class="label">Winrate últimas 20</div><div class="value" id="c-roll" style="color:var(--cyan)">—</div><div class="sub">reacciona antes que el global</div></div>
+    <div class="card"><div class="label">Transcurrido</div><div class="value" id="c-elapsed" style="color:var(--blue)">—</div><div class="sub" id="c-iter-sub"></div></div>
+    <div class="card"><div class="label">Restante (ETA)</div><div class="value" id="c-eta" style="color:var(--amber)">—</div><div class="sub">estimado EMA</div></div>
+    <div class="card"><div class="label">Reward medio/ep</div><div class="value" id="c-reward" style="color:var(--purple)">—</div><div class="sub">señal de optimización</div></div>
+    <div class="card"><div class="label">Ventaja material</div><div class="value" id="c-adv" style="color:var(--green)">—</div><div class="sub" id="c-adv-sub"></div></div>
+  </div>
+
+  <div class="cards secondary">
+    <div class="card small"><div class="label">Entropía</div><div class="value" id="c-ent">—</div></div>
+    <div class="card small"><div class="label">KL aprox</div><div class="value" id="c-kl">—</div></div>
+    <div class="card small"><div class="label">Clip frac</div><div class="value" id="c-clip">—</div></div>
+    <div class="card small"><div class="label">Ticks/s sim</div><div class="value" id="c-tps">—</div></div>
+    <div class="card small"><div class="label">Muestras/iter</div><div class="value" id="c-samp">—</div></div>
+    <div class="card small"><div class="label">Tiempo/iter</div><div class="value" id="c-time">—</div></div>
+    <div class="card small accent-raze"><div class="label">🔥 Raze/ep</div><div class="value" id="c-raze">—</div><div class="sub">edificios enem. destruidos</div></div>
+    <div class="card small accent-win"><div class="label">🏆 Win/ep</div><div class="value" id="c-win-badge">—</div><div class="sub">reward objetivo (+8)</div></div>
+  </div>
+
+  <div class="chart-card"><h2>Winrate (global + rodante 20)</h2><canvas id="ch-win"></canvas></div>
+  <div class="chart-card"><h2>Reward medio por episodio</h2><canvas id="ch-reward"></canvas></div>
+  <div class="chart-card"><h2>Componentes del reward — régimen <span class="pill" id="comp-preset">eradicate</span></h2><canvas id="ch-comp"></canvas></div>
+  <div class="chart-card"><h2>Supremacía actual (estilo motor de ajedrez)</h2>
+    <div class="sup-bar"><div id="bar-ours"></div><div id="bar-theirs"></div><span id="bar-label">—</span></div>
+  </div>
+  <div class="chart-card"><h2>Valor económico medio por episodio — nosotros vs enemigo</h2><canvas id="ch-sup"></canvas></div>
+  <div class="chart-card"><h2>Carrera económica — recaudación bruta y riqueza neta ($/kt)</h2><canvas id="ch-eco"></canvas></div>
+  <div class="chart-card"><h2>Acciones por iter — qué hace la política (conteos)</h2><canvas id="ch-acc"></canvas></div>
+  <div class="chart-card"><h2>Tasa de resolución — win / lose / incomplete por iter</h2><canvas id="ch-res"></canvas></div>
+  <div class="chart-card"><h2>Edificios de cada bando al cierre — raze (conteos)</h2><canvas id="ch-raze"></canvas></div>
+  <div class="chart-card"><h2>Ticks por episodio (≈51800 = expira al tope del motor)</h2><canvas id="ch-ticks"></canvas></div>
+  <div class="chart-card"><h2>P(win) heurístico — calibrador L3 a la espera de primeras victorias</h2><canvas id="ch-pwin"></canvas></div>
+  <div class="chart-card"><h2>Entropía de la política</h2><canvas id="ch-ent"></canvas></div>
+  <div class="chart-card"><h2>KL aproximada (drift por iteración)</h2><canvas id="ch-kl"></canvas></div>
+  <div class="chart-card"><h2>Últimos resultados</h2><div class="outcomes" id="chips"></div></div>
+
+  <footer>
+    Lanzar más episodios: <code>python -m rl.train --iters 200 --episodes 8 --concurrency 4</code>
+    · GPU: <code>nvidia-smi -l 2</code> · Este panel se actualiza cada 2 s.
+  </footer>
+</div>
+
+<script>
+// Servir con: python -m http.server 8501 (desde la raíz del repo) -> http://localhost:8501/dashboard.html
+const URL = 'rl/ckpts/metrics.jsonl';
+
+function money(v) {
+  if (v == null) return '—';
+  const a = Math.abs(v);
+  const body = a >= 10000 ? `${(a / 1000).toFixed(0)}k`
+             : a >= 1000  ? `${(a / 1000).toFixed(1)}k`
+             :              `${Math.round(a)}`;
+  return (v < 0 ? '-$' : '$') + body;
+}
+
+function fmtDur(s) {
+  if (s == null) return '—';
+  s = Math.round(s);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m`
+       : m > 0  ? `${m}m ${String(s % 60).padStart(2, '0')}s`
+       :          `${s}s`;
+}
+
+async function load() {
+  let rows = [];
+  try {
+    const r = await fetch(URL + '?t=' + Date.now(), {cache: 'no-store'});
+    if (!r.ok) throw new Error(r.status);
+    const text = await r.text();
+    for (const line of text.trim().split('\n')) {
+      // Solo líneas de métrica reales (ignora marcadores {"note":...})
+      if (line.trim()) {
+        try {
+          const j = JSON.parse(line);
+          if (j && typeof j.iter === 'number') rows.push(j);
+        } catch {}
+      }
+    }
+  } catch (e) {
+    document.getElementById('content').textContent =
+      'Sin datos aún (¿ya arrancó el entrenamiento?). Reintentando…';
+    return;
+  }
+  if (!rows.length) return;
+
+  document.getElementById('content').style.display = 'none';
+  document.getElementById('dash').style.display = '';
+  const last = rows[rows.length - 1];
+
+  document.getElementById('c-win').textContent = Math.round(last.winrate * 100) + '%';
+  document.getElementById('c-win-sub').textContent = `${last.wins} de ${last.total} episodios`;
+  document.getElementById('c-roll').textContent =
+    Math.round((last.winrate_rolling20 ?? last.winrate) * 100) + '%';
+  document.getElementById('c-elapsed').textContent = fmtDur(last.elapsed_s);
+  document.getElementById('c-iter-sub').textContent = `iteración ${last.iter} · +${last.samples} muestras`;
+  document.getElementById('c-eta').textContent = fmtDur((last.eta_min ?? 0) * 60);
+  document.getElementById('c-reward').textContent =
+    (last.mean_episode_reward ?? 0).toFixed(2);
+  document.getElementById('c-ent').textContent = (last.entropy ?? 0).toFixed(3);
+  document.getElementById('c-kl').textContent = (last.kl ?? 0).toFixed(4);
+  document.getElementById('c-clip').textContent = (last.clip_frac ?? 0).toFixed(3);
+  document.getElementById('c-tps').textContent = last.sim_ticks_per_s ?? '—';
+  document.getElementById('c-samp').textContent = last.samples;
+  document.getElementById('c-time').textContent =
+    fmtDur((last.collect_s ?? 0) + (last.update_s ?? 0));
+
+  // Métricas nuevas del régimen eradicate: raze (edificios enem destruidos)
+  // y win (reward objetivo). Infiere el régimen por los componentes presentes.
+  const rc0 = (rows.find(r => r.reward_components) ?? {}).reward_components ?? {};
+  const preset = ('raze' in rc0 || 'timeout' in rc0) ? 'eradicate' : 'legacy';
+  const pill = document.getElementById('comp-preset');
+  if (pill) pill.textContent = preset;
+  const rcLast = last.reward_components ?? {};
+  document.getElementById('c-raze').textContent = (rcLast.raze ?? 0).toFixed(2);
+  document.getElementById('c-win-badge').textContent =
+    rcLast.win != null && rcLast.win !== 0 ? '+' + rcLast.win.toFixed(2) : '0.00';
+  document.getElementById('c-win-badge').style.color =
+    rcLast.win > 0 ? 'var(--green)' : 'var(--muted)';
+
+  drawTwo('ch-win',
+          rows.map(r => r.winrate * 100), '#3fb950', 'global',
+          rows.map(r => (r.winrate_rolling20 ?? r.winrate) * 100), '#39c5cf', 'últ. 20');
+  drawChart('ch-reward', rows.map(r => r.mean_episode_reward ?? 0), '', '#bc8cff');
+  drawChart('ch-ent', rows.map(r => r.entropy), '', '#d29922');
+  drawChart('ch-kl', rows.map(r => r.kl ?? 0), '', '#f85149');
+
+  // Componentes del reward en régimen eradicate_v2 (gradiente denso):
+  // combate asimétrico + raze + defensa (defense_loss/hold_zero) + spread +
+  // produce + win. Se ocultan las series planas en 0 (p. ej. win hasta la
+  // primera victoria; hold_zero si nunca queda sin núcleo).
+  const COMP_DEFS = [['combat', '#f85149'], ['raze', '#f0883e'],
+                     ['defense_loss', '#ff7b72'], ['spread', '#39c5cf'],
+                     ['hold_zero', '#8b98a9'], ['produce', '#3fb950'],
+                     ['mining', '#a5d6ff'], ['win', '#2ea043'],
+                     ['margin', '#bc8cff'], ['timeout', '#d29922']];
+  const compSeries = COMP_DEFS
+    .map(([k, col]) => ({ name: k, color: col,
+        values: rows.map(r => (r.reward_components ?? {})[k] ?? null) }))
+    .filter(s => s.values.some(v => v != null && v !== 0));
+  if (compSeries.length) {
+    // Rellenar huecos de filas viejas con el último valor válido de la serie
+    for (const s of compSeries) {
+      let lastV = 0;
+      s.values = s.values.map(v => { lastV = v != null ? v : lastV; return lastV; });
+    }
+    drawMulti('ch-comp', compSeries);
+  } else {
+    const cv = document.getElementById('ch-comp');
+    cv.width = cv.clientWidth; cv.height = cv.clientHeight;
+    const ctx = cv.getContext('2d');
+    ctx.font = '12px system-ui';
+    ctx.fillStyle = '#8b98a9';
+    ctx.fillText('Sin datos de componentes todavía — aparecen al reiniciar el trainer con este parche', 12, 26);
+  }
+
+  // Supremacía (evaluador estilo ajedrez L1). Series desde la primera iter con dato.
+  const supFirst = rows.findIndex(r => r.supremacy);
+  if (last.supremacy) {
+    const sv = last.supremacy;
+    const advEl = document.getElementById('c-adv');
+    advEl.textContent = money(sv.diff);
+    advEl.style.color = sv.diff >= 0 ? 'var(--green)' : 'var(--red)';
+    document.getElementById('c-adv-sub').textContent = `P(win)≈${Math.round(sv.p_win_est * 100)}%`;
+    document.getElementById('bar-ours').style.width = (sv.p_win_est * 100).toFixed(1) + '%';
+    document.getElementById('bar-label').textContent =
+      `nosotros ${money(sv.own)}  ·  enemigo ${money(sv.enemy)}`;
+  }
+  if (supFirst >= 0) {
+    // Series COMPLETAS (longitud = rows) con nulls en filas sin dato: así
+    // compartimos el eje X temporal — una serie que aparezca tarde se dibuja
+    // truncada a la izquierda pero alineada con las que cubren todo.
+    drawMulti('ch-sup', [
+      { name: 'nuestros', color: '#3fb950', values: rows.map(r => r.supremacy ? r.supremacy.own : null) },
+      { name: 'enemigo',  color: '#f85149', values: rows.map(r => r.supremacy ? r.supremacy.enemy : null) },
+    ]);
+    drawChart('ch-pwin', rows.map(r => r.supremacy ? r.supremacy.p_win_est : null), '', '#39c5cf');
+  }
+
+  // Acciones efectivas por iter (conteos): ver qué hace la política y si el
+  // remate (army_attack_move) aparece alguna vez frente a train/no_op.
+  const AC_DEFS = [['attack_move', '#f0883e'], ['attack', '#f85149'],
+                   ['train', '#3fb950'], ['no_op', '#8b98a9'],
+                   ['build', '#58a6ff'], ['move', '#39c5cf'],
+                   ['cancel_production', '#6e7681']];
+  const accSeries = AC_DEFS
+    .map(([k, col]) => ({ name: k, color: col,
+        values: rows.map(r => (r.action_hist ?? {})[k] ?? null) }))
+    .filter(s => s.values.some(v => v != null));
+  if (accSeries.length) {
+    drawMulti('ch-acc', accSeries);
+  } else {
+    const cv = document.getElementById('ch-acc');
+    cv.width = cv.clientWidth; cv.height = cv.clientHeight;
+    const ctx = cv.getContext('2d');
+    ctx.font = '12px system-ui'; ctx.fillStyle = '#8b98a9';
+    ctx.fillText('Sin datos de acciones — reiniciar el trainer con este parche', 12, 26);
+  }
+
+  // Tasa de resolución: conteo win/lose/incomplete por iter (la suma = nº de episodios).
+  drawMulti('ch-res', [['win', '#3fb950'], ['lose', '#f85149'], ['incomplete', '#8b98a9']]
+    .map(([k, col]) => ({ name: k, color: col,
+        values: rows.map(r => (r.outcomes ?? []).filter(o => o === k).length) })));
+
+  // Edificios de cada bando al cierre (el rival baja cuando raseamos su base).
+  drawTwo('ch-raze',
+          rows.map(r => (r.n_buildings ?? {}).own ?? null), '#3fb950', 'nosotros',
+          rows.map(r => (r.n_buildings ?? {}).enemy ?? null), '#f85149', 'enemigo');
+
+  // Ticks por episodio (media) — ≈51800 es señal de expirar al tope del motor.
+  drawChart('ch-ticks', rows.map(r => r.ticks && r.ticks.length
+      ? r.ticks.reduce((a, b) => a + b, 0) / r.ticks.length : null), '', '#39c5cf');
+
+  // Carrera económica: RECAUDACIÓN bruta del motor ($/kt) como principal
+  // (siempre positiva, inmune a muertes) + riqueza neta como secundaria.
+  const ecoFirst = rows.findIndex(r => r.economy_race);
+  if (ecoFirst >= 0) {
+    // Series completas (longitud = rows) con nulls: alineadas en el eje X.
+    drawMulti('ch-eco', [
+      { name: 'cosecha nosotros', color: '#3fb950',
+        values: rows.map(r => r.economy_race ? r.economy_race.own_harvest_per_1k : null) },
+      { name: 'cosecha rival', color: '#f85149',
+        values: rows.map(r => r.economy_race ? r.economy_race.enemy_harvest_per_1k : null) },
+    ]);
+  }
+
+  const chips = document.getElementById('chips');
+  chips.innerHTML = '';
+  const allOut = [];
+  for (const r of rows.slice(-3)) allOut.push(...r.outcomes);
+  for (const o of allOut.slice(-18)) {
+    const s = document.createElement('span');
+    const key = o === 'win' ? 'win' : o === 'lose' ? 'lose' :
+                o === 'draw' ? 'draw' : 'other';
+    s.className = 'chip ' + key;
+    s.textContent = o === 'incomplete' ? 'inc' : o || '?';
+    chips.appendChild(s);
+  }
+}
+
+function drawChart(id, values, unit, color) {
+  drawTwo(id, values, color, null, null, null, null, unit);
+}
+
+// N series en un mismo eje (para la descomposición del reward)
+function drawMulti(id, series) {
+  const cv = document.getElementById(id);
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  if (!series.length) return;
+
+  // Margen derecho reservado a la leyenda (antes 44px -> truncaba nombres
+  // como "new_types"; ahora 96px deja legibles "buildings 3.04").
+  const pad = 10;
+  const allVals = series.flatMap(s => s.values.filter(v => v != null));
+  if (allVals.length < 2) return;
+  const mn = Math.min(...allVals), mx = Math.max(...allVals);
+  const span = (mx - mn) || 1;
+  const n = series[0].values.length;
+  // Leyenda lateral con ancho DINÁMICO: mide el label más largo con
+  // measureText para NO truncar ningún "nombre + valor" (ej. 'cosecha
+  // nosotros 424.12'). RHS se reserva a la derecha para esa leyenda.
+  const rowH = 15, top = 8;
+  ctx.font = '600 11px system-ui';
+  const labels = series.map(s => {
+    let lv = s.values[n - 1];
+    if (lv == null) for (let j = n - 1; j >= 0; j--) if (s.values[j] != null) { lv = s.values[j]; break; }
+    return `${s.name} ${(lv != null ? lv : 0).toFixed(2)}`;
+  });
+  const RHS = Math.ceil(Math.max(...labels.map(t => ctx.measureText(t).width), 96)) + 30;
+  const X = i => pad + (w - 2 * pad - RHS) * i / (n - 1);
+  const Y = v => h - pad - (h - 2 * pad) * (v - mn) / span;
+
+  for (const s of series) {
+    // Trazo que SALTA huecos: una serie nueva (nulls al inicio) no se dibuja
+    // desde x=0 sino desde su primer dato real, alineada en el eje X temporal
+    // con las demás (que cubren todo rows). Mismo criterio para huecos internos.
+    ctx.beginPath();
+    let started = false;
+    s.values.forEach((v, i) => {
+      if (v == null) { started = false; return; }
+      const px = X(i), py = Y(v);
+      if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
+    });
+    ctx.strokeStyle = s.color; ctx.lineWidth = 2; ctx.stroke();
+
+    // punto del último valor real (respeta huecos)
+    let li = -1, lv = null;
+    for (let i = s.values.length - 1; i >= 0; i--) if (s.values[i] != null) { lv = s.values[i]; li = i; break; }
+    if (li >= 0) { ctx.beginPath(); ctx.arc(X(li), Y(lv), 3.5, 0, 7); ctx.fillStyle = s.color; ctx.fill(); }
+  }
+
+  // Leyenda en COLUMNA derecha (ancho dinámico: el RHS ya cubre el label más
+    // largo, así ninguno se trunca). Cada etiqueta = "nombre valor" + swatch.
+    series.forEach((s, i) => {
+    const ty = top + i * rowH;
+    const lx2 = w - RHS + 4;
+    ctx.fillStyle = s.color;
+    ctx.fillRect(lx2, ty + 1, 10, 3);
+    ctx.fillText(labels[i], lx2 + 14, ty + 4);
+  });
+
+  ctx.font = '10px system-ui';
+  ctx.fillStyle = '#8b98a9';
+  ctx.fillText(mx.toFixed(1), 4, 12);
+  ctx.fillText(mn.toFixed(1), 4, h - 2);
+}
+
+function drawTwo(id, valsA, colA, nameA, valsB, colB, nameB, unit = '') {
+  const cv = document.getElementById(id);
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+
+  const series = [[valsA, colA, 0], [valsB, colB, 1]].filter(s => s[0] && s[0].length > 1);
+  if (!series.length) return;
+
+  // Misma columna derecha que drawMulti (96px): todos los paneles alinean
+  // su valor final en la misma posición horizontal, con el mismo ancho.
+  const RHS = 96;
+  const pad = 10;
+  const allVals = series.flatMap(s => s[0]);
+  const mn = Math.min(...allVals), mx = Math.max(...allVals);
+  const span = (mx - mn) || 1;
+  const X = (i, n) => pad + (w - 2*pad - RHS) * i / (n - 1);
+  const Y = v => h - pad - (h - 2*pad) * (v - mn) / span;
+
+  for (let si = 0; si < series.length; si++) {
+    const [values, color, idx] = series[si];
+    const n = values.length;
+    const firstIdx = values.findIndex(v => v != null);
+    const lastIdx = (() => { for (let i = n - 1; i >= 0; i--) if (values[i] != null) return i; return -1; })();
+
+    // Área bajo la curva, TRUNCADA a los datos reales: una serie nueva (nulls
+    // al inicio) no baja el relleno a x=0, arranca en su primer dato (alineado
+    // en el eje X temporal con las demás).
+    if (firstIdx >= 0) {
+      const grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, color + '30'); grad.addColorStop(1, color + '00');
+      ctx.beginPath();
+      ctx.moveTo(X(firstIdx, n), h - pad);
+      for (let i = firstIdx; i <= lastIdx; i++) if (values[i] != null) ctx.lineTo(X(i, n), Y(values[i]));
+      ctx.lineTo(X(lastIdx, n), h - pad);
+      ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+    }
+
+    // línea (salta huecos: empieza en el primer dato real, alineado en X)
+    ctx.beginPath();
+    let started = false;
+    values.forEach((v, i) => {
+      if (v == null) { started = false; return; }
+      const px = X(i, n), py = Y(v);
+      if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
+    });
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+
+    // último punto real
+    if (lastIdx >= 0) { ctx.beginPath(); ctx.arc(X(lastIdx, n), Y(values[lastIdx]), 3.5, 0, 7); ctx.fillStyle = color; ctx.fill(); }
+  }
+
+  // Columna derecha, UN valor por serie (misma fila que en drawMulti).
+  const rowH = 15, top = 8;
+  series.forEach(([values, color, idx], i) => {
+    const ty = top + i * rowH;
+    const lx2 = w - RHS + 4;
+    ctx.fillStyle = color;
+    ctx.fillRect(w - RHS + 4, ty + 1, 10, 3);
+    ctx.font = '600 11px system-ui';
+    let v = values[values.length - 1];
+    if (v == null) for (let j = values.length - 1; j >= 0; j--) if (values[j] != null) { v = values[j]; break; }
+    ctx.fillText((v != null ? v : 0).toFixed(2) + unit, lx2 + 14, ty + 4);
+  });
+
+  // escala (no drawMulti la pinta así, pero los charts de 1-2 series la usan)
+  ctx.font = '10px system-ui'; ctx.fillStyle = '#8b98a9';
+  ctx.fillText(mx.toFixed(1), 4, 12);
+  ctx.fillText(mn.toFixed(1), 4, h - 2);
+}
+
+load();
+setInterval(load, 2000);
+</script>
+</body>
+</html>

@@ -2,6 +2,13 @@
 
 Provides the EnvClient subclass for connecting to the OpenRA-RL
 environment server over WebSocket.
+
+Sobre advance():
+  El modo macro (rollout v4) avanza el bloque via el tool MCP `advance`
+  del server (openra_env/server/openra_environment.py:1427), hablando
+  JSON-RPC MCP sobre LA MISMA conexion /ws que reset/step (cada conexion
+  es su propia sesion de juego). Devuelve el resumen con
+  interrupted/interrupt_reason/actual_ticks_advanced.
 """
 
 import os
@@ -11,6 +18,7 @@ from openenv.core.client_types import StepResult
 from openenv.core.env_client import EnvClient
 from websockets.asyncio.client import connect as ws_connect
 
+from openra_env.mcp_ws_client import OpenRAMCPClient
 from openra_env.models import (
     BuildingInfoModel,
     EconomyInfo,
@@ -107,6 +115,26 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
             reward=data.get("reward", obs_data.get("reward")),
             done=data.get("done", obs_data.get("done", False)),
         )
+
+    async def advance(self, ticks: int) -> dict:
+        """Avanza hasta N ticks (clamp server: 50/llamada) vía el tool MCP
+        `advance` sobre la MISMA sesion /ws (reset/step/advance comparten
+        conexion). Devuelve el resumen con interrupted/interrupt_reason/
+        actual_ticks_advanced que el rollout usa para cerrar el bloque macro.
+        Se habla JSON-RPC MCP ({"type":"mcp",...}) igual que mcp_ws_client.
+        """
+        self._rpc_advance = getattr(self, "_rpc_advance", 0) + 1
+        rpc_request = {
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {"name": "advance", "arguments": {"ticks": int(ticks)}},
+            "id": f"adv{self._rpc_advance}",
+        }
+        response = await self._send_and_receive({"type": "mcp", "data": rpc_request})
+        data = response.get("data", {})
+        result = data.get("result", {})
+        return (OpenRAMCPClient._unwrap_mcp_result(result)
+                if isinstance(result, dict) else result)
 
     def _parse_state(self, data: Dict[str, Any]) -> OpenRAState:
         """Parse state response into OpenRAState."""

@@ -17,5 +17,5 @@ tests/
 docs/
 *.pdf
 .claude/
-# OpenRA submodule (cloned from GitHub during Docker build)
-OpenRA/
+# OpenRA submodule incluido en el contexto (Dockerfile.local lo copia)
+#OpenRA/

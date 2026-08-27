@@ -1513,10 +1513,12 @@ class OpenRAEnvironment(MCPEnvironment):
                 "map": {"width": obs_dict.get("map_width", 0),
                         "height": obs_dict.get("map_height", 0)},
                 # Server-side interrupt detection results
-                "interrupted": obs_dict.get("interrupted", False),
-                "interrupt_reason": obs_dict.get("interrupt_reason", ""),
-                "actual_ticks_advanced": obs_dict.get("actual_ticks_advanced", 0),
-            }
+                                "interrupted": obs_dict.get("interrupted", False),
+                                "interrupt_reason": obs_dict.get("interrupt_reason", ""),
+                                "actual_ticks_advanced": obs_dict.get("actual_ticks_advanced", 0),
+                                # Resumen espectador por bando (economy_race del agente / dashboard)
+                                "global_summary": obs_dict.get("global_summary", {}),
+                            }
             if requested > 500:
                 result["note"] = f"Clamped from {requested} to 500 ticks (max per call)."
             return result

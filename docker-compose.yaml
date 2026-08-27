@@ -10,10 +10,10 @@
 
 services:
   openra-rl:
-    image: ${OPENRA_RL_IMAGE:-ghcr.io/yxc20089/openra-rl:latest}
+    image: ${OPENRA_RL_IMAGE:-openra-rl:local}
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.local
     ports:
       - "8000:8000"   # OpenEnv HTTP API
       - "9999:9999"   # gRPC bridge (direct access)
@@ -23,10 +23,13 @@ services:
       - LIBGL_ALWAYS_SOFTWARE=1
       - MESA_GL_VERSION_OVERRIDE=3.3
     deploy:
-      resources:
-        limits:
-          cpus: "4"
-          memory: 4G
+          resources:
+            limits:
+              cpus: "9"
+              # 6G: el fix de fuga (DestroySession → GC.Collect) mantiene el daemon
+              # en meseta, así que no hace falta margen gigante. 12G dejaba al host
+              # sin RAM para el resto del sistema.
+              memory: 6G
     shm_size: 256m
     restart: unless-stopped
     healthcheck:
