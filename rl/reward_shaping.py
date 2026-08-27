@@ -15,7 +15,7 @@ Presets disponibles (elegir UNO por run: un cambio de regimen por vez):
 import math
 
 
-PRESETS = ("legacy", "eradicate", "eradicate_v2", "eradicate_v3")
+PRESETS = ("legacy", "eradicate", "eradicate_v2", "eradicate_v3", "eradicate_v4")
 
 
 def _preset_kwargs(preset: str) -> dict:
@@ -82,6 +82,26 @@ def _preset_kwargs(preset: str) -> dict:
                         w_mining_rate=0.04, mining_rate_scale=1000.0, w_harvester_idle=0.01,
                         w_margin=1.0, margin_scale=3000.0, margin_on_truncate=False,
                         w_win=8.0, w_lose=2.5, w_timeout=0.0,
+                    )
+    if preset == "eradicate_v4":
+        # Run3 — Coloso con remate: v3 + gradiente ofensivo calibrado + full-stack infra
+        # w_raze 1.0->2.0 (2x, no 3x para no tapar minería), w_timeout 0->1.0
+        # (rankea win > incomplete > lose sin reintroducir pesimismo).
+        # SCALAR 21 (military_ratio + tech_tier) y auto_support van por fuera
+        # del preset pero se entrenan juntos en este run (congelado acá).
+        return dict(
+            w_kills=0.15, w_deaths=0.05, combat_scale=1000.0,
+            w_assets=0.0, w_building=0.0, w_new_type=0.0,
+            w_refinery=1.0, w_harvester=0.25, harvester_cap=4,
+            w_raze=2.0, raze_cap=0, raze_value_scale=2000.0,
+            w_defense_loss=0.25, defense_value_scale=2000.0, w_defense_first=3.0,
+            w_hold_zero=0.06, w_spread=0.002, spread_scale=1000.0, w_produce=0.0,
+                        w_cancel=0.15, w_refinery_early=2.0, refinery_target_tick=6000,
+                        w_first_ore=1.5,
+                        w_garrison=0.005, w_naked_base=0.005,
+                        w_mining_rate=0.04, mining_rate_scale=1000.0, w_harvester_idle=0.01,
+                        w_margin=1.0, margin_scale=3000.0, margin_on_truncate=False,
+                        w_win=8.0, w_lose=2.5, w_timeout=1.0,
                     )
     raise ValueError(f"preset desconocido: {preset!r} (validos: {PRESETS})")
 

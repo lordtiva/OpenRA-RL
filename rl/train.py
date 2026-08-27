@@ -220,7 +220,8 @@ async def amain(args):
                                 max_steps=args.max_steps,
                                 macro_ticks=args.macro_ticks,
                                 reset_kwargs=reset_kwargs,
-                                shaper_preset=args.shaper_preset)
+                                shaper_preset=args.shaper_preset,
+                                auto_support=args.auto_support)
                             break
                         except RuntimeError as e:
                             msg = str(e)
@@ -528,6 +529,9 @@ def main():
                     help="Régimen de reward: 'eradicate' (combate asimétrico + "
                          "raze, objetivo Fase 2) o 'legacy' (SimCity histórico). "
                          "Un cambio de régimen por run.")
+    ap.add_argument("--auto-support", action="store_true",
+                    help="Pilar B: autonomía de soporte (repair hp<35%% + power_down) — "
+                         "0 decisiones, gratis para PPO. Activo en Run3/v4.")
     args = ap.parse_args()
 
     try:

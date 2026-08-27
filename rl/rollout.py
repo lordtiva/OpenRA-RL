@@ -27,6 +27,7 @@ from rl.obs_encoding import BEACON_BY_MAP
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
 from rl.economy_race import EconomyRace
+from rl.auto_support import support_commands
 
 
 def _batch_of(obs, vocab, device):
@@ -72,7 +73,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                               telemetry: list | None = None,
                               macro_ticks: int = 0,
                               reset_kwargs: dict | None = None,
-                              shaper_preset: str = "eradicate"):
+                              shaper_preset: str = "eradicate",
+                              auto_support: bool = False):
     """Juega UNA partida completa; devuelve (trayectoria, resumen).
 
     max_steps limita los env.step (cada uno avanza 2 ticks del juego):
@@ -195,6 +197,10 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 if c.target_x >= ep_dims[1] or c.target_y >= ep_dims[0]:
                     c.target_x = min(c.target_x, ep_dims[1] - 1)
                     c.target_y = min(c.target_y, ep_dims[0] - 1)
+            # Pilar B: autonomía de soporte (0 decisiones, gratis para PPO)
+            if auto_support:
+                for cmd in support_commands(obs):
+                    action.commands.append(cmd)
             pending_cmd = action
             # F1: al buffer van los ÍNDICES EFECTIVOS (los de la acción que
             # realmente se ejecutó), emparejados con SU log_prob. El ratio de

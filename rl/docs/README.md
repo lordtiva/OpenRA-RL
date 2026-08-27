@@ -15,14 +15,15 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | 06 | `fase2-curriculum.md` | Curriculum militar Escenario A (base pre-construida→juego completo) + escalera A→D | Diseño verificado |
 | 07 | `sonda-horizonte.md` | Sonda: ¿cuánto tarda un `win/lose` declarado en Escenario A? + `horizonte 624` | Medido |
 | 08 | `parche-grande-2026-08.md` | Parche grande 2026-08: fin de partida + `RlGlobalSummary.earned` + CoordConv/U-Net + BPTT + `eradicate_v3` | Aplicado 2026-08-26 |
-| **09** | `08-avance-run2.md` | **Avance Run2: salto Run1→Run2 (U-Net/BPTT/máscaras), tabla comparativa, diagnóstico coloso pacifista** | **Nuevo — congela Run2 (2026-08-27)** |
-| **10** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Nuevo — consolida análisis `ai.yaml` + teoría RL** |
-| **11** | `07-operacion.md` | **Comandos PowerShell (contenedor / train / dashboard), reglas de run limpio, criterios de promoción** | **Nuevo** |
+| **09** | `08-avance-run2.md` | **Avance Run2: salto Run1→Run2 (U-Net/BPTT/máscaras), tabla comparativa, diagnóstico coloso pacifista** | **Congela Run2 (2026-08-27)** |
+| **10** | `09-fullstack-run3.md` | **Full-stack Run3: SCALAR 21 + auto_support + eradicate_v4 (w_raze 2.0, w_timeout 1.0) — coloso con remate** | **Nuevo — Run3 listo para lanzar** |
+| **11** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Consolida análisis `ai.yaml` + teoría RL** |
+| **12** | `07-operacion.md` | **Comandos PowerShell (contenedor / train / dashboard), reglas de run limpio, criterios de promoción** | **Nuevo** |
 
 ## Cómo leer esto
 
-1. **Si entrás por primera vez:** `roadmap-agente.md` → `parche-grande-2026-08.md` §1-5 → `06-filosofia-rl.md`.
-2. **Si vas a tocar reward:** `parche-grande-2026-08.md` §5 + `06-filosofia-rl.md` §2-3 (riesgos de `w_mass`/`w_tech`) + `reward_shaping.py` como fuente.
+1. **Si entrás por primera vez:** `roadmap-agente.md` → `parche-grande-2026-08.md` §1-5 → `08-avance-run2.md` → `09-fullstack-run3.md`.
+2. **Si vas a tocar reward:** `08-avance-run2.md` §3 + `09-fullstack-run3.md` §1-2 + `parche-grande-2026-08.md` §5 + `06-filosofia-rl.md` §2-3 (riesgos de `w_mass`/`w_tech`) + `reward_shaping.py` como fuente.
 3. **Si vas a tocar arquitectura:** `diseno-advance-macro.md` + `parche-grande-2026-08.md` §3 (CoordConv/U-Net/broadcast GRU).
 4. **Si vas a lanzar un run:** `07-operacion.md` (3 comandos).
 
@@ -32,13 +33,13 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 |-----|---------------|----------------|
 | `advance()` macro | `openra_env/server/bridge_client.py`, `openra_env/server/openra_environment.py`, `openra_env/generated/rl_bridge*` | `proto/rl_bridge.proto` `GlobalSummary` |
 | Auditoría F1-F10 | `rl/rollout.py`, `rl/network.py`, `rl/trainer.py`, `rl/economy_race.py` | `rl/tools/verify_offline.py` (30 checks) |
-| Reward `eradicate_v3` | `rl/reward_shaping.py` (`w_refinery_early`, `w_first_ore`, `w_garrison`) | `rl/obs_encoding.py` `SCALAR_DIM=19` |
+| Reward `eradicate_v4` | `rl/reward_shaping.py` (`w_raze 2.0`, `w_timeout 1.0`) + `rl/auto_support.py` | `rl/obs_encoding.py` `SCALAR_DIM=21` |
 | Red | `rl/network.py` `AlphaLiteNet` (CoordConv 11ch, U-Net, GRU 416, 4 cabezas) | `rl/obs_encoding.py` `SPATIAL_CHANNELS=9` |
 | Bot rival | `openra_env/server/openra_process.py` `BOT_TYPE_MAP` | `OpenRA/mods/ra/rules/ai.yaml` |
 
 ## Convenciones
 
 - **Un cambio de régimen por vez** (incluye estado latente: no cambiar reward+red+vocab en el mismo resume).
-- **SCALAR_DIM 19** (desde 2026-08-27): `has_refinery`, `can_afford_proc`, `garrison_ratio`. Ckpts con 16 son incompatibles — run limpio obligatorio.
+- **SCALAR_DIM 21** (desde Run3): `has_refinery`, `can_afford_proc`, `garrison_ratio`, `military_ratio`, `tech_tier`. Ckpts con 19/16 son incompatibles — run limpio obligatorio.
 - **Métrica norte:** `winrate` vs `beginner` en Escenario A. Reward medio y `P(win)` son diagnóstico.
 - **Escala:** antes de tocar red, verificar que el cuello no sea señal/entorno (lección de la era económica).

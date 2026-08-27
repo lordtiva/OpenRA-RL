@@ -41,6 +41,10 @@ BEACON_BY_MAP = {
     # a_short / amin160: misma base bot (~95,11)
     "fase2_a_short.oramap": (95, 11),
     "fase2_a_minus_short.oramap": (95, 11),
+    # Run2/Runs generales (sin sufijo _short) — mismo spawn
+    "fase2_a.oramap": (95, 11),
+    "fase2_amin160.oramap": (96, 10),
+    "fase2_a_minus.oramap": (95, 11),
 }
 
 
@@ -87,7 +91,7 @@ def apply_beacon(spatial, cx: int, cy: int, height: int, width: int,
     return spatial
 
 
-SCALAR_DIM = 19
+SCALAR_DIM = 21
 
 
 def scalar_features(obs) -> np.ndarray:
@@ -128,6 +132,23 @@ def scalar_features(obs) -> np.ndarray:
                     garrison_count += 1
     garrison_ratio = min(garrison_count / 2.0, 1.0)
 
+    # 3. Full-stack Run3: conciencia Lanchester + tier tecnológico (congelado acá)
+    own_val = float(getattr(mil, "army_value", 0) or 0)
+    ene_est = n_enemies * 400 + n_enemy_bldgs * 1000
+    military_ratio = min(own_val / max(ene_est, 300), 3.0) / 3.0
+    btypes = {getattr(b, "type", "") for b in obs.buildings}
+    if "stek" in btypes:
+        tier = 4
+    elif "atek" in btypes:
+        tier = 3
+    elif "weap" in btypes:
+        tier = 2
+    elif "barr" in btypes or "tent" in btypes:
+        tier = 1
+    else:
+        tier = 0
+    tech_tier = tier / 4.0
+
     return np.array([
         cash_norm,
         ore_norm,
@@ -148,6 +169,8 @@ def scalar_features(obs) -> np.ndarray:
         has_refinery,
         can_afford_proc,
         garrison_ratio,
+        military_ratio,
+        tech_tier,
     ], dtype=np.float32)
 
 
