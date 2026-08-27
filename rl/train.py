@@ -211,6 +211,9 @@ async def amain(args):
                     # Reset con reintentos: el daemon .NET agotado falla en
                     # reset ("bridge failed to start") aunque los healthchecks
                     # HTTP pasen. Reintenta y aborta limpio si es persistente.
+                    # Además, DEADLINE_EXCEEDED del FastAdvance deja la sesión
+                    # envenenada: el reset sobre el mismo /ws también puede
+                    # colgar — en ese caso recrear la conexión WS.
                     for intento in range(3):
                         try:
                             traj, outcome = await collect_one_episode(
@@ -223,18 +226,61 @@ async def amain(args):
                                 shaper_preset=args.shaper_preset,
                                 auto_support=args.auto_support)
                             break
-                        except RuntimeError as e:
+                        except Exception as e:
                             msg = str(e)
-                            if "bridge failed to start" not in msg \
-                                    and "Session failed" not in msg:
-                                raise
-                            print(f"  [reset] reintento {intento + 1}/3 "
-                                  f"tras: {msg[:80]}")
+                            is_deadline = "DEADLINE" in msg or "Deadline" in msg
+                            is_bridge = ("bridge failed to start" in msg
+                                         or "Session failed" in msg)
+                            if is_deadline:
+                                print(f"  [reset] DEADLINE en worker {idx} "
+                                      f"intento {intento+1}/3 — recreando WS")
+                                try:
+                                    await pool[idx].close()
+                                except Exception:
+                                    pass
+                                # Recrear la entrada del pool con nueva conexión
+                                base_url = urls[idx % len(urls)]
+                                pool[idx] = OpenRAEnv(base_url=base_url,
+                                                      message_timeout_s=ws_timeout)
+                                try:
+                                    await pool[idx].connect()
+                                except Exception as ce:
+                                    print(f"  [reset] reconnect falló: {ce}")
+                                    continue
+                                # Reintentar el episodio con la nueva sesión
+                                continue
+                            if is_bridge:
+                                print(f"  [reset] reintento {intento + 1}/3 "
+                                      f"tras: {msg[:80]}")
+                                continue
+                            raise
                     if outcome is None:
                         print("  [reset] 3 fallos seguidos -> abortando run "
                               "(contenedores probablemente agotados)")
                         raise RuntimeError("reset persistente: recrear "
                                            "contenedores")
+                    # Si el episodio abortó por DEADLINE (engine_error con
+                    # outcome_error), la sesión pudo quedar envenenada aunque
+                    # collect_one_episode ya intentó destroy. Forzar un reset
+                    # de saneamiento best-effort antes del próximo episodio
+                    # del mismo worker para no arrastrar el envenenamiento.
+                    if outcome.get("result") == "engine_error":
+                        try:
+                            await asyncio.wait_for(
+                                pool[idx].reset(**reset_kwargs), timeout=30)
+                        except Exception:
+                            # Si el saneamiento cuelga, recrear WS como arriba
+                            try:
+                                await pool[idx].close()
+                            except Exception:
+                                pass
+                            base_url = urls[idx % len(urls)]
+                            pool[idx] = OpenRAEnv(base_url=base_url,
+                                                  message_timeout_s=ws_timeout)
+                            try:
+                                await pool[idx].connect()
+                            except Exception:
+                                pass
                     results.append((traj, outcome))
 
             await asyncio.gather(*(worker(i, n)

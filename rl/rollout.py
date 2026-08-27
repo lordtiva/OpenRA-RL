@@ -321,10 +321,36 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                              own_cash=getattr(obs.economy, "cash", 0),
                              own_wealth=own_w, enemy_wealth=ene_w)
             except Exception as e:
-                # Mismo criterio que step(): crash del handler C# o timeout → degradar;
-                # demasiados seguidos → abortar conservando la trayectoria.
+                msg = str(e)
+                is_deadline = "DEADLINE" in msg or "Deadline" in msg
+                # DEADLINE_EXCEEDED = sesión envenenada (World.Tick() colgado).
+                # El retry sobre el mismo session_id solo reproduce el cuelgue.
+                # Romper rápido, marcar el episodio como timeout y dejar el
+                # env en estado que el caller (train.py::worker) saneará con
+                # un reset fresco en el próximo episodio del pool.
+                if is_deadline:
+                    print(f"  [engine] advance {step}: DEADLINE_EXCEEDED "
+                          f"(ticks={macro_ticks}, batalla grande) — "
+                          f"sesión envenenada, abortando episodio")
+                    outcome_error = True
+                    # Best-effort: intentar cerrar la sesión colgada sin
+                    # bloquear el rollout; el próximo reset del pool la recrea.
+                    try:
+                        # destroy es best-effort; el daemon la GCea si no responde
+                        import grpc as _grpc
+                        _ = _grpc  # evita unused-import linter
+                        try:
+                            # Env puede exponer destroy_session vía bridge; si no, no-op
+                            br = getattr(env, "_bridge", None) or getattr(env, "bridge", None)
+                            if br is not None and hasattr(br, "destroy_session"):
+                                br.destroy_session()
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                    break
                 consec_errors += 1
-                print(f"  [engine] advance {step}: {str(e)[:120]} "
+                print(f"  [engine] advance {step}: {msg[:120]} "
                       f"(errores consecutivos: {consec_errors})")
                 if consec_errors >= 5:
                     outcome_error = True

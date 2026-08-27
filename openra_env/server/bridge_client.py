@@ -126,7 +126,12 @@ class BridgeClient:
         if enabled_interrupts:
             request.enabled_interrupts.extend(enabled_interrupts)
 
-        return self._stub.FastAdvance(request, timeout=120.0)
+        # Timeout adaptativo: batallas grandes (Run3: 600+ ataques) hacen que
+        # FastAdvance tarde mucho más que 50 ticks vacíos. 120s fijo mataba
+        # la sesión en coloso pacifista vs coloso. ticks*2.5 + 30s margen.
+        # Mínimo 120s para no romper partidas cortas.
+        timeout = max(120.0, ticks * 2.5 + 30.0)
+        return self._stub.FastAdvance(request, timeout=timeout)
 
     def get_state(self) -> rl_bridge_pb2.GameState:
         """Query current game state via unary RPC."""
