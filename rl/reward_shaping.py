@@ -150,8 +150,8 @@ class ShapedReward:
         self.w_garrison = cfg.get("w_garrison", 0.0)
         self.w_naked_base = cfg.get("w_naked_base", 0.0)
         self._first_ore_paid = False
-        # en v2/v3 el raze se paga por VALOR del global_summary (no counting)
-        self._raze_by_value = preset in ("eradicate_v2", "eradicate_v3")
+        # en v2/v3/v4 el raze se paga por VALOR del global_summary (no counting)
+        self._raze_by_value = preset in ("eradicate_v2", "eradicate_v3", "eradicate_v4")
         # Compat: tests/docs viejos leen w_combat como el peso simetrico.
         self.w_combat = self.w_kills
 
@@ -253,11 +253,11 @@ class ShapedReward:
         r_raze = self._raze_delta(obs, mil)
         r += r_raze
 
-        # gradiente denso del espectador (v2/v3). Reemplaza al raze counting.
+        # gradiente denso del espectador (v2/v3/v4). Reemplaza al raze counting.
         r_v2 = 0.0
         if self._raze_by_value:
             r_v2 = self._v2_dense(gs)
-            if self.preset == "eradicate_v3":
+            if self.preset in ("eradicate_v3", "eradicate_v4"):
                 r_v2 += self._v3_econ(obs, gs, action_type, closing)
 
         r += r_v2

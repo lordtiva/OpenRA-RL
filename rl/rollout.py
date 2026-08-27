@@ -301,7 +301,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     obs = result.observation
                     done = bool(result.done)
                     last_gs = getattr(race, "_last_gs", None)
-                    r_close = shaper.step(obs, done=done, gs=last_gs, action_type=atype)
+                    r_close = shaper.step(obs, done=done, gs=last_gs, action_type=atype, closing=True)
                     episode_reward += r_close
                     if pending_sample is not None:
                         pending_sample["reward"] = \
