@@ -15,8 +15,9 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | 06 | `fase2-curriculum.md` | Curriculum militar Escenario A (base pre-construida→juego completo) + escalera A→D | Diseño verificado |
 | 07 | `sonda-horizonte.md` | Sonda: ¿cuánto tarda un `win/lose` declarado en Escenario A? + `horizonte 624` | Medido |
 | 08 | `parche-grande-2026-08.md` | Parche grande 2026-08: fin de partida + `RlGlobalSummary.earned` + CoordConv/U-Net + BPTT + `eradicate_v3` | Aplicado 2026-08-26 |
-| **09** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Nuevo — consolida análisis `ai.yaml` + teoría RL** |
-| **10** | `07-operacion.md` | **Comandos PowerShell (contenedor / train / dashboard), reglas de run limpio, criterios de promoción** | **Nuevo** |
+| **09** | `08-avance-run2.md` | **Avance Run2: salto Run1→Run2 (U-Net/BPTT/máscaras), tabla comparativa, diagnóstico coloso pacifista** | **Nuevo — congela Run2 (2026-08-27)** |
+| **10** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Nuevo — consolida análisis `ai.yaml` + teoría RL** |
+| **11** | `07-operacion.md` | **Comandos PowerShell (contenedor / train / dashboard), reglas de run limpio, criterios de promoción** | **Nuevo** |
 
 ## Cómo leer esto
 
