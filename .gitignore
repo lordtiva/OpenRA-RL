@@ -17,3 +17,21 @@ venv/
 replays/
 documents/
 *.orarep
+
+# RL — pesos y métricas locales (no subir: 30-200 MB por ckpt)
+rl/ckpts/
+ckpts/
+*.pt
+*.pth
+*.onnx
+
+# Sync local generado por scripts (copia de openra_env)
+openra_env_local_sync/
+
+# Herramientas/sondas locales de un solo uso (no versionar)
+rl/tools/
+
+# Artefactos locales de experimentación
+wandb/
+runs/
+lightning_logs/
