@@ -154,7 +154,7 @@ class BridgeClient:
             bots=bots,
             seed=seed,
         )
-        response = self._stub.CreateSession(request, timeout=300.0, wait_for_ready=True)
+        response = self._stub.CreateSession(request, timeout=60.0, wait_for_ready=True)
         self.session_id = response.session_id
         logger.info(f"Created session {self.session_id} (map={map_name})")
         return response.session_id

@@ -20,7 +20,7 @@ import torch
 
 from openra_env.client import OpenRAEnv
 from openra_env.models import ActionType, CommandModel, OpenRAAction
-from rl.action_adapter import ActionIndex, Vocab, index_to_command_effective
+from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_command_effective
 from rl.network import ACTION_TYPES, HIDDEN_DIM
 from rl.obs_encoding import MAX_UNITS, decode_spatial, scalar_features, unit_slots
 from rl.obs_encoding import BEACON_BY_MAP
@@ -53,6 +53,10 @@ def _batch_of(obs, vocab, device):
         unit_valid = np.concatenate([unit_valid, np.zeros(pad, dtype=bool)])
 
     aidx = ActionIndex(obs, vocab)
+    # Channel 3 is passability (0/1). Mask illegal cells in the cell head so
+    # attack_move cannot sample south-water (y≳40 on Singles). Fallback inside
+    # apply_passability keeps all-true if the grid is empty (shell map).
+    apply_passability(aidx, spatial[3])
     return {
         "spatial": torch.from_numpy(spatial).unsqueeze(0).to(device),
         "scalars": torch.from_numpy(scalar_features(obs)).unsqueeze(0).to(device),
@@ -145,7 +149,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
             hidden = out["hidden"].detach()
 
             had_item = aidx.item_mask.any().view(1).to(device)
-            action, (eff_t, eff_u, eff_i) = index_to_command_effective(
+            action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
                 obs, int(out["type"]), int(out["unit_slot"]),
                 int(out["cell_flat"]), int(out["item_slot"]), aidx,
             )
@@ -159,16 +163,21 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
             # comparaba acciones distintas), (3) solo cubría mutaciones con
             # ítem (attack→attack_move, harvest, deploy quedaban fuera).
             sampled = (int(out["type"]), int(out["unit_slot"]),
-                       int(out["item_slot"]))
-            effective = (eff_t, eff_u, eff_i)
+                       int(out["item_slot"]), int(out["cell_flat"]))
+            effective = (eff_t, eff_u, eff_i, int(eff_c))
             log_prob = out["log_prob"]
+            cell_t = out["cell_flat"]
+            if int(cell_t) != int(eff_c):
+                cell_t = torch.tensor([int(eff_c)], device=device,
+                                      dtype=out["cell_flat"].dtype)
             if sampled != effective:
                 with torch.no_grad():
                     re_lp, _, _ = net.evaluate_actions(
                         batch, h_in, {
                             "type": torch.tensor([eff_t], device=device),
                             "unit_slot": torch.tensor([eff_u], device=device),
-                            "cell_flat": out["cell_flat"],
+                            "cell_flat": cell_t if torch.is_tensor(cell_t) else
+                            torch.tensor([int(eff_c)], device=device),
                             "item_slot": torch.tensor([eff_i], device=device),
                             "had_item": had_item,
                         })
@@ -217,7 +226,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 "action": {
                     "type": torch.tensor([effective[0]]),
                     "unit_slot": torch.tensor([effective[1]]),
-                    "cell_flat": out["cell_flat"].cpu(),
+                    "cell_flat": (cell_t.detach().cpu() if torch.is_tensor(cell_t)
+                                  else torch.tensor([int(eff_c)])),
                     "item_slot": torch.tensor([effective[2]]),
                     "had_item": had_item.cpu(),
                     # CONGELADOS: la referencia contra la que PPO mide el drift

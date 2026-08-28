@@ -26,7 +26,19 @@ from openra_env.models import ActionType, CommandModel
 _POWER_DOWN_TYPES = {"dome", "tsla", "mslo", "atag", "stag"}
 _NON_COMBAT = ("harv", "mcv")
 
+def _place_near_base(obs):
+    """A cell next to the construction yard / any own building (not a spawn rewrite)."""
+    for b in getattr(obs, "buildings", None) or []:
+        t = str(getattr(b, "type", "")).lower()
+        if t in ("fact", "proc", "powr", "apwr", "barr", "tent"):
+            return int(b.cell_x) + 4, int(b.cell_y) + 2
+    for u in getattr(obs, "units", None) or []:
+        return int(u.cell_x) + 3, int(u.cell_y) + 1
+    return 0, 0
+
+
 def support_commands(obs, last_push=None, max_repairs: int = 2):
+
     """Lista de CommandModel de soporte para esta observación.
 
     Llamar con la obs que ve la red ANTES de ejecutar el step. Devuelve [] si
@@ -49,18 +61,36 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
                 out.append(CommandModel(action=ActionType.HARVEST, actor_id=int(u.actor_id)))
                 break  # uno por bloque (no spamear)
 
-    # 0b) Auto-proc — si no hay proc, hay cash y hay fact/barr para producirlo, pedirlo.
-    #     Evita el starve infinito del iter100 (6 edificios sin refinería → cap 0 → ore 0).
-    #     Gratis, igual que harvest: el shaper ya premia proc, esto solo rompe el deadlock.
-    if not has_proc and cash >= 1400:
-        has_fact = any(getattr(b, "type", "") == "fact" for b in blds)
-        # available_production viene de obs.available_production (si la red puede ver proc)
-        avail = set(getattr(obs, "available_production", []) or [])
-        can_build_proc = "proc" in avail or has_fact  # fact puede producir proc
-        if can_build_proc and not any(getattr(p, "item", "") == "proc" for p in getattr(obs, "production", []) or []):
-            # emitir BUILD proc (el engine lo encola, luego place_building vendrá de la red o de otro tick)
+    # 0b) Auto-proc + auto-harv — push the economy if the policy is rifle-spamming.
+    #     Missing proc: BUILD if it is in available_production (do not deadlock
+    #     BUILD/PLACE of proc — those stay unmasked even when we cannot build yet).
+    #     Proc ready in the queue: PLACE near the conyard. Has proc but no harvester:
+    #     TRAIN harv if the war factory lists it.
+    avail = set(getattr(obs, "available_production", []) or [])
+    prod = list(getattr(obs, "production", []) or [])
+    proc_queued = any(str(getattr(p, "item", "")).lower() == "proc" for p in prod)
+    proc_ready = any(
+        str(getattr(p, "item", "")).lower() == "proc"
+        and float(getattr(p, "progress", 0) or 0) >= 1.0
+        for p in prod
+    )
+    if not has_proc:
+        if proc_ready:
+            ax, ay = _place_near_base(obs)
+            out.append(CommandModel(
+                action=ActionType.PLACE_BUILDING, item_type="proc",
+                target_x=ax, target_y=ay))
+        elif (not proc_queued) and "proc" in avail and cash >= 2000:
             out.append(CommandModel(action=ActionType.BUILD, item_type="proc"))
-            # no break: puede coexistir con harvest (pero harvest no dispara sin proc, así que ok)
+    else:
+        has_harv = False
+        if eco is not None and int(getattr(eco, "harvester_count", 0) or 0) > 0:
+            has_harv = True
+        if not has_harv:
+            has_harv = any("harv" in str(getattr(u, "type", "")).lower() for u in units)
+        harv_queued = any("harv" in str(getattr(p, "item", "")).lower() for p in prod)
+        if (not has_harv) and (not harv_queued) and "harv" in avail:
+            out.append(CommandModel(action=ActionType.TRAIN, item_type="harv"))
 
     # 1) Auto-repair — umbral hard (35%)
     if cash > 500:

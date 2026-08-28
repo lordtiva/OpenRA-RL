@@ -3,11 +3,9 @@
 Arquitectura v0.2 (uso real del hardware):
     - Pool de conexiones WebSocket persistente (sin reconectar por iteración)
     - Episodios en PARALELO sobre el pool (el daemon .NET los simula en paralelo)
-    - Update SÍNCRONO: la recolección k+1 arranca DESPUÉS de terminar el
-      update k (F10, auditoría 2026-08-24: un docstring anterior describía
-      solapamiento tipo APPO que nunca existió — el ensure_future no corre
-      hasta que el update termina porque bloquea el event loop. PPO on-policy
-      puro; correcto y más simple).
+    - Update en thread + infer_net congelado: launch_collection de k+1 corre
+      de verdad durante trainer.update(k). El event loop ya no se bloquea.
+      collect usa una copia de pesos (1 paso stale; el clip PPO lo cubre).
     - Escalado de ventajas en UN solo lugar (process_results, según --adv-mode)
 
 Requisitos: server corriendo (docker compose up openra-rl), PYTHONPATH limpio.
@@ -37,6 +35,7 @@ from rl.network import AlphaLiteNet
 from rl.rollout import (add_advantages, center_advantage_by_episode,
                         collect_one_episode, flatten_samples)
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
+from rl.best_ckpt import maybe_update_best
 
 
 def pick_device(requested: str) -> str:
@@ -147,8 +146,13 @@ async def amain(args):
               f"{len(vocab.type_to_id)} roles estables "
               f"(ids deterministas, agnóstico a facción)")
 
+    infer_net = AlphaLiteNet().to(device)
+    infer_net.load_state_dict(net.state_dict())
+    infer_net.eval()
+
     print(f"Device: {device} | params: "
           f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M")
+    print("Overlap: collect k+1 (infer_net) || update k (thread)")
     print(f"Server: {args.url} | {args.episodes} ep/iter, "
           f"k_skip={args.k_skip}, pool={args.concurrency}"
           + (f", MACRO {args.macro_ticks} t/decisión" if args.macro_ticks else ""))
@@ -214,10 +218,10 @@ async def amain(args):
                     # Además, DEADLINE_EXCEEDED del FastAdvance deja la sesión
                     # envenenada: el reset sobre el mismo /ws también puede
                     # colgar — en ese caso recrear la conexión WS.
-                    for intento in range(3):
+                    for intento in range(2):
                         try:
                             traj, outcome = await collect_one_episode(
-                                pool[idx], net, vocab, device,
+                                pool[idx], infer_net, vocab, device,
                                 k_skip=args.k_skip,
                                 temperature=args.temperature,
                                 max_steps=args.max_steps,
@@ -233,7 +237,7 @@ async def amain(args):
                                          or "Session failed" in msg)
                             if is_deadline:
                                 print(f"  [reset] DEADLINE en worker {idx} "
-                                      f"intento {intento+1}/3 — recreando WS")
+                                      f"intento {intento+1}/2 — recreando WS")
                                 try:
                                     await pool[idx].close()
                                 except Exception:
@@ -250,12 +254,12 @@ async def amain(args):
                                 # Reintentar el episodio con la nueva sesión
                                 continue
                             if is_bridge:
-                                print(f"  [reset] reintento {intento + 1}/3 "
+                                print(f"  [reset] reintento {intento + 1}/2 "
                                       f"tras: {msg[:80]}")
                                 continue
                             raise
                     if outcome is None:
-                        print("  [reset] 3 fallos seguidos -> abortando run "
+                        print("  [reset] 2 fallos seguidos -> abortando run "
                               "(contenedores probablemente agotados)")
                         raise RuntimeError("reset persistente: recrear "
                                            "contenedores")
@@ -329,19 +333,19 @@ async def amain(args):
             pending = launch_collection(None)
         results = await pending
 
-        # Procesar lo recogido y ARRANCAR la próxima recolección YA
-        # (usa los pesos pre-update: el drift queda acotado por el clip PPO;
-        # dentro de cada trayectoria los log_probs son consistentes porque
-        # salen del mismo forward que muestreó)
+        # Sync infer <- train (última update). Después arranca collect k+1
+        # con esos pesos y el update k corre en un thread: el event loop
+        # puede avanzar OpenRA. No tocar infer_net hasta el próximo await.
+        infer_net.load_state_dict(net.state_dict())
         samples, outcomes = process_results(results, args.gamma, args.lam,
                                             adv_mode=args.adv_mode)
         pending = launch_collection(pending)
 
         t1 = time.time()
-        stats = trainer.update(samples, epochs=args.epochs,
-                               batch_size=args.batch_size)
+        stats = await asyncio.to_thread(
+            trainer.update, samples, args.epochs, args.batch_size)
         dt_update = time.time() - t1
-        dt = t1 - t0 + dt_update  # collect+update solapados => dt total real
+        dt = time.time() - t0  # wall-clock real (collect k + update, con overlap)
         collect_s = t1 - t0
 
         ema_collect = collect_s if ema_collect is None else \
@@ -446,8 +450,7 @@ async def amain(args):
             if nbs:
                 nb_mean = {side: round(sum(b[side] for b in nbs) / len(nbs), 1)
                            for side in ("own", "enemy")}
-            with open(args.metrics, "a", encoding="utf-8") as f:
-                f.write(json.dumps({
+            metrics_row = {
                     "iter": it,
                     "elapsed_s": round(elapsed_s, 1),
                     "eta_min": round(max(eta_s, 0) / 60, 1),
@@ -462,6 +465,10 @@ async def amain(args):
                     "grad_norm": stats.get("grad_norm"),
                     "winrate": round(wins / total, 3) if total else 0.0,
                     "winrate_rolling20": round(rolling, 3),
+                    "iter_winrate": round(
+                        (sum(1 for o in outcomes
+                             if str(o.get("result", "")).startswith("win"))
+                         / len(outcomes)) if outcomes else 0.0, 3),
                     "mean_episode_reward": round(mean_ep_reward, 4),
                     "reward_components": comp_means,
                     "sim_ticks_per_s": round(sim_tps),
@@ -485,7 +492,10 @@ async def amain(args):
                             sum(sum(vc) for vc in vcs)
                             / sum(len(vc) for vc in vcs), 3)}
                        if vcs else {}),
-                }) + "\n")
+            }
+            with open(args.metrics, "a", encoding="utf-8") as f:
+                f.write(json.dumps(metrics_row) + "\n")
+            maybe_update_best(args.ckpt_dir, metrics_row, latest_path=ckpt_path)
 
         print(f"[iter {it:3d}] col {collect_s:5.1f}s upd {dt_update:5.1f}s "
               f"(ETA {eta_s/60:5.1f}m) | samples {stats.get('n', 0):4d} | "

@@ -7,6 +7,9 @@ auto_train.py — 1 comando que lanza rl.train y lo vigila (sin 2 ventanas).
   y lo relanza solo desde latest.pt (no vuelve a 100).
 - Si el train termina solo (crash/iters completados), también lo relanza.
 - Log en consola + rl/auto_train.log
+- train.py sigue escribiendo latest.pt (dashboard + live). Además, tras cada
+  iter, si el score es ESTRICTAMENTE mejor, copia latest.pt -> rl/ckpts/best.pt
+  (copy, no symlink) + sidecar best.json. Live más adelante: --ckpt rl/ckpts/best.pt
 
 Cuelgues — DOS orígenes distintos (no confundirlos):
   A) Cuelgue del PROCESO PYTHON (train): el .py se traba o muere. Lo cubre
@@ -23,34 +26,47 @@ Cuelgues — DOS orígenes distintos (no confundirlos):
 Uso:  .venv/Scripts/python.exe rl/auto_train.py
 Ctrl+C para parar todo.
 """
-import subprocess, sys, time, pathlib, signal, os, json, re
+import subprocess, sys, time, pathlib, signal, os, json, re, urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CKPT_DIR = ROOT / "rl" / "ckpts"
 METRICS = CKPT_DIR / "metrics.jsonl"
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
 LOGFILE = ROOT / "rl" / "auto_train.log"
-THRESHOLD_S = 300  # fallback 5 min si nvidia-smi no está
-CHECK_EVERY_S = 15  # más fino para pillar cuelgue rápido
-GPU_LOW_THRESHOLD = 15  # % util por debajo = colgado (sano 40-55%)
-GPU_LOW_NEEDED = 4  # 4 cheques seguidos = 60s bajo → mata (ahorra ~4 min)
+THRESHOLD_S = 300  # sin metrics 5 min = cuelgue real (un iter collect+update suele ser ~2-4 min)
+CHECK_EVERY_S = 15
+GPU_LOW_THRESHOLD = 15  # solo para el log: el collect deja la GPU en 1-5%, NO es cuelgue
 
-# Cuelgue Docker: servicio y contenedor del juego (docker-compose.yaml).
-DOCKER_SERVICE = "openra-rl"
-DOCKER_CONTAINER = "openra-rl-openra-rl-1"
+# Cuelgue Docker: cada URL de GAME_URLS tiene su servicio compose.
+# Recreate toca TODOS los daemons que estaban up, no solo openra-rl.
 # Marcas en los logs del contenedor que indican daemon podrido (no Python).
 DOCKER_DEAD_MARKERS = (
     "Session failed to become ready",
     "DEADLINE_EXCEEDED",
     "sesión envenenada",
     "session envenenada",
+    "gRPC bridge failed to start",
+    "OpenRA gRPC bridge failed to start",
+)
+
+# 8000 = daemon principal. 8010 = openra-rl-2 (docker-compose.scale.yaml).
+# El 5600X rinde 2 daemons x ~2 sesiones, no 8 en uno ni 3 contenedores.
+GAME_URLS = (
+    "http://localhost:8000",
+    "http://localhost:8010",
+)
+# url, compose files, service name
+DAEMONS = (
+    ("http://localhost:8000", ("docker-compose.yaml",), "openra-rl"),
+    ("http://localhost:8010",
+     ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
     "--iters", "200",
-    "--concurrency", "8",
+    "--concurrency", "4",
     "--max-steps", "624",
     "--macro-ticks", "80",
     "--lr", "1.5e-4",
@@ -72,6 +88,18 @@ def log(msg: str):
         with open(LOGFILE, "a", encoding="utf-8") as f:
             f.write(line + "\n")
     except: pass
+
+def live_game_urls() -> str:
+    """Usa cada daemon que responda /health. Si solo esta :8000, un server."""
+    ok = []
+    for u in GAME_URLS:
+        try:
+            urllib.request.urlopen(u + "/health", timeout=1.5)
+            ok.append(u)
+        except Exception:
+            pass
+    return ",".join(ok) if ok else GAME_URLS[0]
+
 
 def find_resume() -> str | None:
     """Resume latest.pt de la raíz de ckpts (lo que mira el dashboard).
@@ -101,7 +129,7 @@ def gpu_util() -> int | None:
     try:
         out = subprocess.check_output(
             ["nvidia-smi", "--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"],
-            text=True, timeout=5)
+            text=True, encoding="utf-8", errors="replace", timeout=5)
         # primera GPU si hay varias
         return int(out.strip().splitlines()[0].strip())
     except: return None
@@ -117,84 +145,160 @@ def docker_available() -> bool:
     except Exception:
         return False
 
-def _docker_logs_recent(n: int = 300) -> str:
-    """Últimas n líneas del contenedor del juego (stdout+stderr)."""
+def _compose(files) -> list:
+    cmd = ["docker", "compose"]
+    for f in files:
+        cmd += ["-f", f]
+    return cmd
+
+
+def daemons_up():
+    """Daemons cuyo /health responde ahora (los que auto_train estaría usando)."""
+    live = set(u.strip() for u in live_game_urls().split(",") if u.strip())
+    return [d for d in DAEMONS if d[0] in live] or [DAEMONS[0]]
+
+
+def _docker_logs_recent(files, service, n: int = 300) -> str:
+    """Últimas n líneas de un servicio compose (stdout+stderr)."""
     try:
         return subprocess.check_output(
-            ["docker", "logs", "--tail", str(n), DOCKER_CONTAINER],
-            text=True, stderr=subprocess.STDOUT, timeout=15)
+            _compose(files) + ["logs", "--tail", str(n), service],
+            cwd=str(ROOT),
+            text=True, encoding="utf-8", errors="replace",
+            stderr=subprocess.STDOUT, timeout=20)
     except Exception:
         return ""
 
-def docker_daemon_dead() -> bool:
-    """True si el daemon del juego está colgado (cuelgue Docker, no Python).
+def docker_dead_marker_count() -> int:
+    """Cuántos markers de daemon podrido hay en logs recientes.
 
-    El contenedor puede seguir 'healthy' (/health 200) pero sin poder crear
-    sesiones. Solo cuenta si el marker aparece en las líneas RECIENTES del
-    log (no en historia vieja de horas atrás).
+    Un solo 'Session failed' puede ser un retry de 20s; 3+ es cascada.
     """
     if not docker_available():
-        return False
-    logs = _docker_logs_recent(300)
-    if not logs:
-        return False
-    recent = logs.splitlines()[-150:]  # ~últimas 150 líneas
-    return any(m in line for line in recent for m in DOCKER_DEAD_MARKERS)
+        return 0
+    n = 0
+    for url, files, service in daemons_up():
+        logs = _docker_logs_recent(files, service, 300)
+        if not logs:
+            continue
+        recent = logs.splitlines()[-150:]
+        n += sum(1 for line in recent if any(m in line for m in DOCKER_DEAD_MARKERS))
+    return n
+
+def docker_daemon_dead() -> bool:
+    """True si hay cascada de markers (3+) en logs recientes."""
+    return docker_dead_marker_count() >= 3
+
+def kill_train(proc) -> None:
+    if proc is None:
+        return
+    try:
+        if proc.poll() is None:
+            proc.terminate()
+            time.sleep(3)
+            if proc.poll() is None:
+                proc.kill()
+    except Exception:
+        pass
+
+
+def sync_env_into_containers(targets) -> None:
+    """Host tree != image. docker cp al container id (no al service name)
+    y restart para recargar el Python del env."""
+    pairs = [
+        (ROOT / "openra_env" / "server" / "openra_environment.py",
+         "/app/openra_env/server/openra_environment.py"),
+        (ROOT / "openra_env" / "server" / "bridge_client.py",
+         "/app/openra_env/server/bridge_client.py"),
+    ]
+    for url, files, service in targets:
+        try:
+            cid = subprocess.check_output(
+                _compose(files) + ["ps", "-q", service],
+                cwd=str(ROOT), text=True, encoding="utf-8",
+                errors="replace", timeout=15).strip()
+        except Exception as e:
+            log(f"  no container id for {service}: {e}")
+            continue
+        if not cid:
+            log(f"  {service} no está up, skip cp")
+            continue
+        for src, dst in pairs:
+            if not src.exists():
+                continue
+            r = subprocess.run(
+                ["docker", "cp", str(src), f"{cid}:{dst}"],
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=30)
+            if r.returncode == 0:
+                log(f"  docker cp {src.name} -> {service} ({cid[:12]})")
+            else:
+                err = (r.stderr or r.stdout or "")[:160]
+                log(f"  docker cp FAIL {src.name} -> {service}: {err}")
+        subprocess.run(["docker", "restart", cid], timeout=60, check=False)
+        log(f"  restart {service} (env python recargado)")
+
 
 def recreate_docker() -> bool:
-    """Recrea el contenedor del juego (compose down/up) para sanear el daemon
-    podrido. Devuelve True si el recreate se intentó (el train de host
-    reconecta solo al nuevo daemon, pero lo relanzamos igual para limpiar el
-    pool de sesiones muertas)."""
+    """Recrea CADA daemon que estaba up (1 o 2), no solo openra-rl."""
     if not docker_available():
         log("docker no disponible — no puedo recrear el contenedor")
         return False
-    log("CUELGUE DOCKER detectado — recreando contenedor "
-        f"(compose down/up {DOCKER_SERVICE})...")
+    targets = daemons_up()
+    names = [s for _, _, s in targets]
+    log(f"CUELGUE DOCKER detectado — recreando {len(targets)} daemon(s): {names}")
     try:
-        subprocess.run(["docker", "compose", "down", DOCKER_SERVICE],
-                       cwd=str(ROOT), timeout=180, check=False)
-        subprocess.run(["docker", "compose", "up", "-d", DOCKER_SERVICE],
-                       cwd=str(ROOT), timeout=240, check=False)
+        for url, files, service in targets:
+            log(f"  force-recreate {service} ({url})")
+            subprocess.run(
+                _compose(files) + ["up", "-d", "--force-recreate", "--no-deps", service],
+                cwd=str(ROOT), timeout=240, check=False)
     except Exception as e:
         log(f"error recreando contenedor: {e}")
         return False
-    # Esperar a que el daemon recupere sesiones (start_period + margen).
-    log("esperando a que el daemon recupere sesiones (start_period ~90s)...")
-    time.sleep(90)
-    # Verificar que los logs recientes ya NO muestren markers de cuelgue.
-    for _ in range(12):
-        if not docker_daemon_dead():
-            log("contenedor recreado: daemon sin markers de cuelgue reciente")
+    sync_env_into_containers(targets)
+    log("esperando /health (max 45s, no 90s fijos)...")
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        ok = []
+        for u, _, _ in targets:
+            try:
+                urllib.request.urlopen(u + "/health", timeout=1.5)
+                ok.append(u)
+            except Exception:
+                pass
+        if len(ok) == len(targets):
+            log(f"daemons healthy: {','.join(ok)}")
             return True
-        time.sleep(10)
-    log("ADVERTENCIA: el daemon sigue con markers de cuelgue tras recrear")
+        time.sleep(5)
+    log(f"ADVERTENCIA: /health incompleto tras recreate, live={live_game_urls()}")
     return True
 
 def recover_from_docker_hang(proc) -> subprocess.Popen:
-    """Si el cuelgue es del daemon Docker, recrea el contenedor y relanza el
-    train (limpia el pool de sesiones muertas). Devuelve el nuevo proc."""
+    """Mata el train PRIMERO (evita 1012 mid-recreate), recrea daemons, relanza."""
+    log("matando train ANTES de recrear contenedores")
+    kill_train(proc)
     recreate_docker()
-    # El contenedor nuevo tiene daemon fresco; matar el train viejo y relanzar
-    # para que reconecte limpio (el pool de train reintenta las sesiones).
-    try:
-        proc.terminate()
-        time.sleep(3)
-        if proc.poll() is None:
-            proc.kill()
-    except Exception:
-        pass
-    time.sleep(5)
-    new_proc = launch_train()
-    return new_proc
+    time.sleep(2)
+    return launch_train()
 
 def launch_train() -> subprocess.Popen:
+    urls = live_game_urls()
+    n_srv = urls.count("http")
+    args = list(TRAIN_ARGS)
+    args[args.index("--url") + 1] = urls
+    log(f"servidores de juego: {urls}  ({n_srv} daemon(s); 2do = compose scale openra-rl-2)")
     resume = find_resume()
     if resume and pathlib.Path(resume).exists():
-        cmd = TRAIN_ARGS + ["--resume", resume]
-        log(f"LANZANDO train --resume {pathlib.Path(resume).name}  (iters {TRAIN_ARGS[TRAIN_ARGS.index('--iters')+1]}, preset {TRAIN_ARGS[TRAIN_ARGS.index('--shaper-preset')+1]})")
+        cmd = args + ["--resume", resume]
+        rel = pathlib.Path(resume)
+        try:
+            rel = rel.resolve().relative_to(ROOT)
+        except Exception:
+            pass
+        log(f"LANZANDO train --resume {rel}  (iters {TRAIN_ARGS[TRAIN_ARGS.index('--iters')+1]}, preset {TRAIN_ARGS[TRAIN_ARGS.index('--shaper-preset')+1]})")
     else:
-        cmd = TRAIN_ARGS
+        cmd = args
         log(f"LANZANDO train FROM SCRATCH (pesos aleatorios, sin --resume, iters {TRAIN_ARGS[TRAIN_ARGS.index('--iters')+1]})")
     # cwd=ROOT para que los paths relativos funcionen
     env = os.environ.copy()
@@ -202,8 +306,8 @@ def launch_train() -> subprocess.Popen:
     return subprocess.Popen(cmd, cwd=str(ROOT), env=env)
 
 def main():
-    log(f"auto_train iniciado — threshold {THRESHOLD_S}s, check {CHECK_EVERY_S}s (GPU<{GPU_LOW_THRESHOLD}% x{GPU_LOW_NEEDED} → 60s rápido)")
-    log(f"métricas={METRICS}  log={LOGFILE}  docker_svc={DOCKER_SERVICE}")
+    log(f"auto_train iniciado — threshold {THRESHOLD_S}s, check {CHECK_EVERY_S}s (GPU baja en collect NO mata)")
+    log(f"métricas={METRICS}  log={LOGFILE}  docker_svc=openra-rl[+openra-rl-2 si up]")
     if docker_available():
         log("docker disponible — se vigilará también el cuelgue del daemon")
     else:
@@ -272,51 +376,33 @@ def main():
                 gpu_low_streak = 0
                 continue
             idle = time.time() - last_progress
-            # fast-path GPU: 60s seguidos bajo + idle >60s → cuelgue real
-            # (sano nunca está <15% 60s seguidos; colgado está 1-5% fijo)
-            if gpu_low_streak >= GPU_LOW_NEEDED and idle >= 60:
-                log(f"CUELGUE GPU — idle {idle:.0f}s, GPU {gpu}%<{GPU_LOW_THRESHOLD}% x{gpu_low_streak} ({gpu_low_streak*CHECK_EVERY_S}s)")
-                # ¿Es el daemon Docker el que está podrido? Si sí, recrear
-                # contenedor (no basta con matar el train).
-                if docker_daemon_dead():
-                    log("cuelgue es del daemon Docker (no del train) — recreando contenedor")
-                    proc = recover_from_docker_hang(proc)
-                else:
-                    log("cuelgue parece de proceso Python — matando train y relanzando")
-                    try:
-                        proc.terminate()
-                        time.sleep(3)
-                        if proc.poll() is None:
-                            proc.kill()
-                    except: pass
-                    time.sleep(5)
-                    proc = launch_train()
+            # GPU baja en collect es NORMAL. Un marker suelto también
+            # (retry de 20s). Cascada de 3+ markers = daemon podrido:
+            # recrear YA, no esperar 300s con GPU al 1%.
+            score = docker_dead_marker_count()
+            if score >= 3:
+                log(f"daemon podrido — {score} markers, recreando YA (idle {idle:.0f}s){gpu_tag}")
+                proc = recover_from_docker_hang(proc)
                 last_mtime = metrics_mtime()
                 last_progress = time.time()
                 gpu_low_streak = 0
                 continue
             if idle >= THRESHOLD_S:
-                log(f"CUELGUE — idle {idle:.0f}s >= {THRESHOLD_S}s{gpu_tag}")
-                # ¿Es el daemon Docker el que está podrido? Si sí, recrear
-                # contenedor (no basta con matar el train).
-                if docker_daemon_dead():
+                log(f"CUELGUE — idle {idle:.0f}s >= {THRESHOLD_S}s{gpu_tag} markers={score}")
+                if score >= 1:
                     log("cuelgue es del daemon Docker (no del train) — recreando contenedor")
                     proc = recover_from_docker_hang(proc)
                 else:
                     log("cuelgue parece de proceso Python — matando train y relanzando")
-                    try:
-                        proc.terminate()
-                        time.sleep(3)
-                        if proc.poll() is None:
-                            proc.kill()
-                    except: pass
+                    kill_train(proc)
                     time.sleep(5)
                     proc = launch_train()
                 last_mtime = metrics_mtime()
                 last_progress = time.time()
                 gpu_low_streak = 0
             else:
-                log(f"esperando — idle {idle:.0f}s / {THRESHOLD_S}s{gpu_tag}  (GPU<{GPU_LOW_THRESHOLD}% x{gpu_low_streak}/{GPU_LOW_NEEDED})")
+                extra = f" markers={score}" if score else ""
+                log(f"esperando — idle {idle:.0f}s / {THRESHOLD_S}s{gpu_tag}{extra}")
     except KeyboardInterrupt:
         log("Ctrl+C — terminando train y saliendo")
         if proc and proc.poll() is None:

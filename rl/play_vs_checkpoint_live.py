@@ -98,8 +98,11 @@ def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str,
         "n_bld": len(obs.buildings or []),
         "n_ene_u": len(obs.visible_enemies or []),
         "n_ene_b": len(obs.visible_enemy_buildings or []),
-        "buildings": [{"x": b.cell_x, "y": b.cell_y, "hp": getattr(b, "hp_percent", 1.0)} for b in (obs.buildings or [])],
-        "units": [{"x": u.cell_x, "y": u.cell_y, "can_attack": getattr(u, "can_attack", True)} for u in (obs.units or [])],
+        "buildings": [{"x": b.cell_x, "y": b.cell_y, "hp": getattr(b, "hp_percent", 1.0),
+                         "type": str(getattr(b, "type", "") or "")} for b in (obs.buildings or [])],
+        "units": [{"x": u.cell_x, "y": u.cell_y,
+                    "type": str(getattr(u, "type", "") or ""),
+                    "can_attack": bool(getattr(u, "can_attack", False))} for u in (obs.units or [])],
         "ene_buildings": [{"x": b.cell_x, "y": b.cell_y} for b in (obs.visible_enemy_buildings or [])],
         "ene_units": [{"x": u.cell_x, "y": u.cell_y} for u in (obs.visible_enemies or [])],
         "resources": resources,
@@ -170,7 +173,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args, broadcaster
                 out = net.act(batch, hidden, temperature=args.temperature)
             hidden = out["hidden"].detach()
             had_item = aidx.item_mask.any().view(1).to(device)
-            action, (eff_t, eff_u, eff_i) = index_to_command_effective(
+            action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
                 obs, int(out["type"]), int(out["unit_slot"]), int(out["cell_flat"]), int(out["item_slot"]), aidx)
             # recalc log_prob si hubo coerción (igual que rollout, pero sin grad)
             sampled = (int(out["type"]), int(out["unit_slot"]), int(out["item_slot"]))
@@ -187,15 +190,24 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args, broadcaster
             atype_str = ACTION_TYPES[eff_t]
             hist[atype_str] = hist.get(atype_str, 0) + 1
             decs += 1
-            # texto acción
-            item_name = aidx.items[int(out["item_slot"])] if int(out["item_slot"]) < len(aidx.items) else "—"
-            last_action_str = f"{atype_str}  cell={int(out['cell_flat'])%aidx.w},{int(out['cell_flat'])//aidx.w}  item={item_name}  units={len(obs.units)} cash={obs.economy.cash}"
-            # clamp
+            # clamp first so last_action shows the cell actually issued
             ep_dims = (obs.map_info.height, obs.map_info.width)
             for c in action.commands:
                 if c.target_x >= ep_dims[1] or c.target_y >= ep_dims[0]:
                     c.target_x = min(c.target_x, ep_dims[1]-1)
                     c.target_y = min(c.target_y, ep_dims[0]-1)
+            # texto acción: the cell ACTUALLY issued (after water/OOB remap).
+            # TRAIN/BUILD ignore cell — show em-dash so live does not display south-water.
+            item_name = aidx.items[int(out["item_slot"])] if int(out["item_slot"]) < len(aidx.items) else "—"
+            if atype_str in ("train", "build", "no_op", "deploy", "harvest",
+                             "stop", "cancel_production"):
+                cell_txt = "cell=—"
+            elif action.commands:
+                c0 = action.commands[0]
+                cell_txt = f"cell={int(getattr(c0, 'target_x', 0))},{int(getattr(c0, 'target_y', 0))}"
+            else:
+                cell_txt = f"cell={int(eff_c) % aidx.w},{int(eff_c) // aidx.w}"
+            last_action_str = f"{atype_str}  {cell_txt}  item={item_name}  units={len(obs.units)} cash={obs.economy.cash}"
             # Pilar B: auto-harvest/repair gratis (no roba decisión PPO)
             if atype_str in ("army_attack_move", "attack_move") and action.commands:
                 c0 = action.commands[0]

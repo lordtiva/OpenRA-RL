@@ -21,7 +21,7 @@ import torch
 
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.network import TYPE_TO_IDX, build_type_masks
-from rl.obs_encoding import MAX_UNITS
+from rl.obs_encoding import BEACON_BY_MAP, MAX_UNITS
 
 # Tipos habilitados en v0.1 (el resto ni entra en la máscara)
 ENABLED_TYPES = {
@@ -91,6 +91,131 @@ BUILDING_ITEM_TYPES = {
     "spen", "syrd",
 }
 
+# Combat TRAIN roles: masked until proc + harvester. Without a standing
+# refinery we also mask ALL TRAIN (including harvester) and BUILD of
+# anything except power/refinery, so the 5000 cannot dump into harvs or
+# barracks before proc is placed.
+COMBAT_TRAIN_ROLES = {
+    "infantry_basic", "infantry_antiinf", "infantry_antiarmor",
+    "rocket_truck", "tank_light", "tank_medium", "tank_heavy",
+    "artillery", "scout", "specialist",
+    "air_fighter", "air_bomber", "heli", "transporter",
+    "ship_sub", "ship_combat", "ship_amphib",
+}
+ECONOMY_BUILD_ROLES = {"power", "refinery"}  # legal BUILD before proc exists
+MOVE_CELL_TYPES = {"move", "attack_move", "attack", "army_attack_move"}
+
+
+def owns_proc(obs) -> bool:
+    """True if a refinery (proc) is already standing."""
+    for b in getattr(obs, "buildings", None) or []:
+        if str(getattr(b, "type", "")).lower() == "proc":
+            return True
+    return False
+
+
+def economy_ready_for_combat(obs) -> bool:
+    """True once a refinery is standing AND a harvester exists or is queued."""
+    if not owns_proc(obs):
+        return False
+    eco = getattr(obs, "economy", None)
+    if int(getattr(eco, "harvester_count", 0) or 0) > 0:
+        return True
+    for u in getattr(obs, "units", None) or []:
+        if "harv" in str(getattr(u, "type", "")).lower():
+            return True
+    for p in getattr(obs, "production", None) or []:
+        if "harv" in str(getattr(p, "item", "")).lower():
+            return True
+    return False
+
+
+def apply_passability(aidx, pass_hw) -> None:
+    """Mask the cell head with spatial channel 3 (passable=1). No-op if empty."""
+    import numpy as _np
+    if pass_hw is None:
+        return
+    grid = _np.asarray(pass_hw)
+    if grid.ndim != 2 or grid.shape != (aidx.h, aidx.w):
+        return
+    legal = grid > 0.5
+    if not legal.any():
+        return  # keep all-true rather than deadlock the Categorical
+    aidx.pass_grid = legal
+    aidx.cell_mask = torch.from_numpy(_np.ascontiguousarray(legal.reshape(-1)))
+
+
+def nearest_passable(x: int, y: int, pass_grid, h: int, w: int, max_r: int = 16):
+    """Closest passable cell to (x,y). If no grid, just clamp to the map."""
+    x = int(max(0, min(w - 1, x)))
+    y = int(max(0, min(h - 1, y)))
+    if pass_grid is None:
+        return x, y
+    if 0 <= y < h and 0 <= x < w and bool(pass_grid[y, x]):
+        return x, y
+    for r in range(1, max_r + 1):
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                if abs(dx) != r and abs(dy) != r:
+                    continue
+                nx, ny = x + dx, y + dy
+                if 0 <= ny < h and 0 <= nx < w and bool(pass_grid[ny, nx]):
+                    return nx, ny
+    ys, xs = np.where(pass_grid)
+    if len(xs):
+        i = int(np.argmin((xs - x) ** 2 + (ys - y) ** 2))
+        return int(xs[i]), int(ys[i])
+    return x, y
+
+
+def remap_move_cell(obs, aidx, cx: int, cy: int, actor_id: int = 0):
+    """If (cx,cy) is water/OOB/unpathable, retarget: visible enemy, else beacon, else near unit.
+
+    Does NOT use a hardcoded y<40 water line — passability comes from obs/spatial.
+    If there is no passability grid, only OOB is illegal.
+    """
+    h, w = aidx.h, aidx.w
+    grid = getattr(aidx, "pass_grid", None)
+
+    def legal(x, y):
+        if not (0 <= x < w and 0 <= y < h):
+            return False
+        if grid is None:
+            return True
+        return bool(grid[y, x])
+
+    if legal(cx, cy):
+        return cx, cy
+
+    enemies = list(getattr(obs, "visible_enemies", None) or []) + list(
+        getattr(obs, "visible_enemy_buildings", None) or [])
+    if enemies:
+        e = min(enemies, key=lambda e: (int(e.cell_x) - cx) ** 2 + (int(e.cell_y) - cy) ** 2)
+        return nearest_passable(int(e.cell_x), int(e.cell_y), grid, h, w)
+
+    map_name = str(getattr(getattr(obs, "map_info", None), "map_name", "") or "")
+    beacon = BEACON_BY_MAP.get(map_name)
+    if beacon:
+        return nearest_passable(int(beacon[0]), int(beacon[1]), grid, h, w)
+
+    ux, uy = cx, cy
+    units = list(getattr(obs, "units", None) or [])
+    found = False
+    if actor_id:
+        for u in units:
+            if int(getattr(u, "actor_id", 0) or 0) == int(actor_id):
+                ux, uy = int(u.cell_x), int(u.cell_y)
+                found = True
+                break
+    if not found:
+        if units:
+            ux, uy = int(units[0].cell_x), int(units[0].cell_y)
+        else:
+            blds = list(getattr(obs, "buildings", None) or [])
+            if blds:
+                ux, uy = int(blds[0].cell_x), int(blds[0].cell_y)
+    return nearest_passable(ux, uy, grid, h, w)
+
 
 def _split_production(obs):
     """Separa available_production en (roles de entrenables, roles de
@@ -129,7 +254,7 @@ class ActionIndex:
     __slots__ = ("type_mask", "unit_valid", "cell_mask", "item_indices",
                  "item_mask", "unit_ids", "items", "train_items",
                  "build_items", "rol_a_concreto", "h", "w",
-                 "train_slot_mask", "build_slot_mask")
+                 "train_slot_mask", "build_slot_mask", "pass_grid")
 
     def __init__(self, obs, vocab: Vocab, device="cpu"):
         self.h = max(obs.map_info.height, 1)
@@ -186,6 +311,39 @@ class ActionIndex:
             self.train_slot_mask[slot] = True
         for slot in range(n_train, min(n_vocab, n_train + len(self.build_items))):
             self.build_slot_mask[slot] = True
+        self.pass_grid = None
+
+        # Hard constraint: no combat TRAIN until proc + harvester.
+        # Without a standing proc, also freeze ALL train (no harv spam) and
+        # BUILD of barracks/weap/etc. Power + refinery stay legal so we
+        # cannot deadlock. PLACE of a queued proc stays legal.
+        if not owns_proc(obs):
+            for slot, role in enumerate(self.train_items):
+                if slot >= n_vocab:
+                    break
+                self.train_slot_mask[slot] = False
+                self.item_mask[slot] = False
+            for slot, role in enumerate(self.build_items):
+                bslot = n_train + slot
+                if bslot >= n_vocab:
+                    break
+                if role not in ECONOMY_BUILD_ROLES:
+                    self.build_slot_mask[bslot] = False
+                    self.item_mask[bslot] = False
+            m[TYPE_TO_IDX["train"]] = False
+            if not bool(self.build_slot_mask.any()):
+                m[TYPE_TO_IDX["build"]] = False
+            self.type_mask = torch.from_numpy(m)
+        elif not economy_ready_for_combat(obs):
+            for slot, role in enumerate(self.train_items):
+                if slot >= n_vocab:
+                    break
+                if role in COMBAT_TRAIN_ROLES:
+                    self.train_slot_mask[slot] = False
+                    self.item_mask[slot] = False
+            if not bool(self.train_slot_mask.any()):
+                m[TYPE_TO_IDX["train"]] = False
+                self.type_mask = torch.from_numpy(m)
 
 
 def index_to_command(obs, chosen_type: int, unit_slot: int, cell_flat: int,
@@ -230,13 +388,24 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
                 item_type = aidx.train_items[0]
             else:
                 t_name = "no_op"
+        # Defensa: sin proc no se entrena NADA (ni harv). Con proc pero sin
+        # harv, los rifles se tiran a no_op (el support se encarga del harv).
+        if t_name == "train" and not owns_proc(obs):
+            t_name = "no_op"
+        elif t_name == "train" and not economy_ready_for_combat(obs):
+            if item_type in COMBAT_TRAIN_ROLES:
+                t_name = "no_op"
     elif t_name == "build":
         if item_type not in build_set:
             if aidx.build_items:
                 item_type = aidx.build_items[0]
-            elif aidx.train_items:
-                t_name, _ = "train", None
-                item_type = aidx.train_items[0]
+            else:
+                t_name = "no_op"
+        if t_name == "build" and not owns_proc(obs) and item_type not in ECONOMY_BUILD_ROLES:
+            if "refinery" in build_set:
+                item_type = "refinery"
+            elif "power" in build_set:
+                item_type = "power"
             else:
                 t_name = "no_op"
     elif t_name == "place_building":
@@ -261,12 +430,23 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     if t_name == "attack" and _nearest_enemy_at_cell(obs, cx, cy) is None:
         t_name = "attack_move"
 
+    if t_name == "train" and not owns_proc(obs):
+        t_name = "no_op"
+    elif t_name == "train" and not economy_ready_for_combat(obs):
+        if item_type in COMBAT_TRAIN_ROLES:
+            t_name = "no_op"
+
     # Índices EFECTIVOS tras las correcciones (para el log_prob honesto).
     # Se computan ANTES de armar el comando, reflejando cada mutación.
     eff_type = TYPE_TO_IDX.get(t_name, chosen_type)
     eff_unit_slot = unit_slot if 0 <= unit_slot < len(aidx.unit_ids) else 0
     eff_item_slot = (item_slot if 0 <= item_slot < len(aidx.items)
                      else 0)
+    # Remap illegal move cells BEFORE computing the issued cell_flat.
+    # TRAIN/BUILD/PLACE ignore this (place keeps the sampled cell).
+    if t_name in MOVE_CELL_TYPES:
+        cx, cy = remap_move_cell(obs, aidx, cx, cy, actor_id)
+    eff_cell_flat = int(cy) * aidx.w + int(cx)
     if t_name in ("train", "build", "place_building", "cancel_production"):
         # item_type pudo ser corregido arriba -> localizar su slot real
         if item_type in aidx.items:
@@ -324,7 +504,7 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     else:
         cmd = CommandModel(action=ActionType.NO_OP)
     return OpenRAAction(commands=[cmd]), (eff_type, eff_unit_slot,
-                                          eff_item_slot)
+                                          eff_item_slot, eff_cell_flat)
 
 
 def _nearest_enemy_at_cell(obs, cx: int, cy: int):

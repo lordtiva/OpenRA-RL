@@ -89,6 +89,9 @@ def build_type_masks(obs) -> torch.Tensor:
     if obs.available_production:
         m[TYPE_TO_IDX["train"]] = True   # unidades
         m[TYPE_TO_IDX["build"]] = True   # edificios
+        # Combat TRAIN (e1 / infantry_basic / tanks / ...) is gated later in
+        # ActionIndex until the player owns a proc + harvester. BUILD/PLACE
+        # of proc stay legal so this cannot deadlock the economy.
     if obs.production:
         m[TYPE_TO_IDX["cancel_production"]] = True
     return torch.from_numpy(m)

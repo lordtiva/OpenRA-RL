@@ -3099,10 +3099,10 @@ class OpenRAEnvironment(MCPEnvironment):
             logger.info(f"Session created: {session_id}")
 
             # Wait for session to be ready (game world created and paused).
-            # With 20+ concurrent sessions, world creation is serialized by
-            # WorldCreateLock (~2-3s per session). Last session can take 60s+.
-            # Use 120s timeout (240 retries * 0.5s) for safety margin.
-            ready = self._bridge.wait_for_ready(max_retries=240, retry_interval=0.5)
+            # 20s (40 * 0.5s): a poison InitSession holding WorldCreateLock
+            # must fail fast so we DestroySession instead of blocking 120s
+            # and leaking the half-created id.
+            ready = self._bridge.wait_for_ready(max_retries=40, retry_interval=0.5)
         else:
             # Single-session mode: launch a new OpenRA process.
             # Serialized via semaphore to prevent CPU starvation from JIT.
@@ -3119,6 +3119,10 @@ class OpenRAEnvironment(MCPEnvironment):
         if not ready:
             if self._multi_session:
                 logger.error("Session failed to become ready")
+                try:
+                    self._bridge.destroy_session()
+                except Exception:
+                    pass
             else:
                 alive = self._process.is_alive()
                 logger.error(f"Bridge failed to start. Process alive={alive}")
@@ -3133,6 +3137,11 @@ class OpenRAEnvironment(MCPEnvironment):
             self._player_faction = game_state.player_faction or ""
             self._enemy_faction = game_state.enemy_faction or ""
         except Exception as e:
+            if self._multi_session:
+                try:
+                    self._bridge.destroy_session()
+                except Exception:
+                    pass
             raise RuntimeError(
                 f"Session health check failed: get_state() error: {e}. "
                 f"The .NET session likely failed to initialize."

@@ -75,6 +75,10 @@
       <div class="row"><span>Supremacía (diff)</span><b id="p-diff">—</b></div>
     </div>
     <div class="panel">
+      <h3>Que hay en el mapa</h3>
+      <div id="roster" style="font-size:12px;color:var(--muted);white-space:pre-wrap">—</div>
+    </div>
+    <div class="panel">
       <h3>Histograma acciones (episodio)</h3>
       <div id="hist" style="font-size:12px;color:var(--muted)">—</div>
     </div>
@@ -121,6 +125,18 @@ function render(s){
   document.getElementById('p-diff').textContent = s.sup_diff!=null ? (s.sup_diff>0?'+':'')+fmt(s.sup_diff) : '—';
   document.getElementById('p-diff').style.color = s.sup_diff>0 ? '#3fb950' : s.sup_diff<0 ? '#f85149' : '#e6edf3';
   document.getElementById('action').textContent = s.last_action || '—';
+  (function(){
+    function tally(arr){
+      const c = {};
+      for(const o of (arr||[])){
+        const k = o.type || '?';
+        c[k] = (c[k]||0)+1;
+      }
+      return Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([k,v])=>k+'x'+v).join('  ') || '—';
+    }
+    const el = document.getElementById('roster');
+    if(el) el.textContent = 'U: ' + tally(s.units) + '\nE: ' + tally(s.buildings);
+  })();
   if(s.hist){
     const top = Object.entries(s.hist).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([k,v])=>`${k}:${v}`).join('  ');
     document.getElementById('hist').textContent = top || '—';
@@ -160,6 +176,12 @@ function drawMap(s){
       ctx.fillStyle = b.hp!=null && b.hp<0.4 ? '#1f4a8a' : '#58a6ff';
       ctx.fillRect(b.x*scaleX, b.y*scaleY, scaleX*1.4, scaleY*1.4);
       ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.strokeRect(b.x*scaleX, b.y*scaleY, scaleX*1.4, scaleY*1.4);
+      if(b.type){
+        ctx.fillStyle = '#e6edf3';
+        ctx.font = Math.max(8, Math.floor(scaleX*0.65)) + 'px sans-serif';
+        ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        ctx.fillText(String(b.type).slice(0,4), b.x*scaleX, b.y*scaleY + scaleY*1.5);
+      }
     }
   }
   // unidades propias (cyan)
@@ -170,6 +192,12 @@ function drawMap(s){
       ctx.fillStyle = u.can_attack ? '#39c5cf' : '#8b98a9';
       ctx.fill();
       ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth=1; ctx.stroke();
+      if(u.type){
+        ctx.fillStyle = '#e6edf3';
+        ctx.font = Math.max(8, Math.floor(scaleX*0.7)) + 'px sans-serif';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+        ctx.fillText(String(u.type).slice(0,4), u.x*scaleX+scaleX/2, u.y*scaleY - 1);
+      }
     }
   }
   // edificios enemigos (rojo)
