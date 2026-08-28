@@ -26,7 +26,7 @@ Ctrl+C para parar todo.
 import subprocess, sys, time, pathlib, signal, os, json, re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CKPT_DIR = ROOT / "rl" / "ckpts" / "Run5-a_short"
+CKPT_DIR = ROOT / "rl" / "ckpts"
 METRICS = CKPT_DIR / "metrics.jsonl"
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
 LOGFILE = ROOT / "rl" / "auto_train.log"
@@ -60,9 +60,9 @@ TRAIN_ARGS = [
     "--shaper-preset", "eradicate_v4",
     "--auto-support",
     "--gamma", "0.995",
-    "--ckpt-dir", "rl/ckpts/Run5-a_short",
-    "--metrics", "rl/ckpts/Run5-a_short/metrics.jsonl",
-    "--race-file", "rl/ckpts/Run5-a_short/economy_race.jsonl",
+    "--ckpt-dir", "rl/ckpts",
+    "--metrics", "rl/ckpts/metrics.jsonl",
+    "--race-file", "rl/ckpts/economy_race.jsonl",
 ]
 
 def log(msg: str):
@@ -74,12 +74,11 @@ def log(msg: str):
     except: pass
 
 def find_resume() -> str | None:
-    """Resume del run actual, o semilla de Run3 si Run5 todavía no tiene ckpt.
+    """Resume latest.pt de la raíz de ckpts (lo que mira el dashboard).
 
-    - Run5-a_short/latest.pt (o iter*.pt) si ya arrancó este run.
-    - Si no, Run 3 (Full Stack - Asalto)/latest.pt — NO el latest.pt de
-      rl/ckpts (ese es el probe_short from-scratch de 31 iters).
-    - Si no hay semilla, from scratch.
+    El probe_short quedó archivado en 'Run probe_short-scratch'. Si la raíz
+    no tiene latest.pt, cae a Run3. glob de iter*.pt es solo la raíz, no
+    las subcarpetas de runs viejos.
     """
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
     latest = CKPT_DIR / "latest.pt"
