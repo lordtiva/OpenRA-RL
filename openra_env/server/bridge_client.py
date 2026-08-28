@@ -384,6 +384,7 @@ def commands_to_proto(commands: list[dict]) -> rl_bridge_pb2.AgentAction:
         "surrender": rl_bridge_pb2.SURRENDER,
         "patrol": rl_bridge_pb2.PATROL,
         "fast_advance": rl_bridge_pb2.FAST_ADVANCE,
+        "army_attack_move": rl_bridge_pb2.ARMY_ATTACK_MOVE,
     }
 
     proto_commands = []

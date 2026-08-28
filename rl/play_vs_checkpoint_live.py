@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-play_vs_checkpoint_live.py — igual que play_vs_checkpoint pero con visor EN VIVO
-en el navegador (sin esperar al replay).
+play_vs_checkpoint_live.py — visor EN VIVO del checkpoint en el navegador.
 
-Levanta un HTTP en http://localhost:8765/ que muestra el mapa en tiempo real
-(spatial + unidades) mientras el checkpoint juega. Poll /api/state cada 400ms.
+Por default replica el recipe de auto_train (a_short / beginner / eradicate_v4 /
+auto-support / macro 80 / max-steps 624) y sirve el canvas en :8786.
+Recarga latest.pt entre partidas si el train lo actualizó.
 
-Uso (PowerShell):
+Uso (PowerShell, UN comando):
     cd C:/Users/lordc/Desktop/OpenRA-RL
     $env:PYTHONPATH=""
-    .\.venv\Scripts\python.exe -m rl.play_vs_checkpoint_live --ckpt rl/ckpts/latest.pt --scenario a --macro-ticks 160 --greedy
+    .\.venv\Scripts\python.exe -m rl.play_vs_checkpoint_live
 
-    # Abrir en el navegador (segunda terminal o misma):
-    http://localhost:8765/
+    # visor:
+    http://localhost:8786/
 
-Ctrl+C corta la partida.
+Ctrl+C corta el live, no el train.
 """
 import argparse
 import asyncio
@@ -153,6 +153,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args, broadcaster
     done = False
     last_action_str = "—"
     macro_final = None
+    last_push_cell = None
 
     # estado inicial
     broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, "jugando…", done, ""))
@@ -196,8 +197,12 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args, broadcaster
                     c.target_x = min(c.target_x, ep_dims[1]-1)
                     c.target_y = min(c.target_y, ep_dims[0]-1)
             # Pilar B: auto-harvest/repair gratis (no roba decisión PPO)
+            if atype_str in ("army_attack_move", "attack_move") and action.commands:
+                c0 = action.commands[0]
+                if getattr(c0, "target_x", None) is not None:
+                    last_push_cell = (int(c0.target_x), int(c0.target_y))
             if args.auto_support:
-                for cmd in support_commands(obs):
+                for cmd in support_commands(obs, last_push=last_push_cell):
                     action.commands.append(cmd)
         else:
             # mantener último comando (frame-skip)
@@ -293,14 +298,29 @@ async def amain(args):
         raise SystemExit(1)
     print(f"Conectado a {args.url}")
 
-    for ep in range(1, args.episodes + 1):
-        print(f"\n=== Episodio {ep}/{args.episodes} ===")
-        bc.update({"status": f"episodio {ep}/{args.episodes} — iniciando…", "done": False})
-        outcome = await run_episode_live(env, net, vocab, device, args, bc)
-        print(f"  result={outcome['result']} ticks={outcome['ticks']} decs={outcome['decisions']} rew={outcome['episode_reward']} hist={outcome['hist']}")
-
-    print(f"\nVisor sigue en http://localhost:{args.port}/  (Ctrl+C para salir)")
+    last_mtime = ckpt_path.stat().st_mtime if ckpt_path.exists() else 0.0
+    ep = 0
     try:
+        while True:
+            ep += 1
+            if args.episodes > 0 and ep > args.episodes:
+                break
+            try:
+                mtime = ckpt_path.stat().st_mtime
+            except OSError:
+                mtime = last_mtime
+            if mtime != last_mtime:
+                it = load_checkpoint(str(ckpt_path), net, vocab=vocab)
+                net.to(device)
+                net.eval()
+                last_mtime = mtime
+                print(f"Recargué ckpt iter {it}")
+            label = str(ep) if args.episodes <= 0 else f"{ep}/{args.episodes}"
+            print(f"\n=== Episodio {label} ===")
+            bc.update({"status": f"episodio {label} — iniciando…", "done": False, "ckpt_iter": it})
+            outcome = await run_episode_live(env, net, vocab, device, args, bc)
+            print(f"  result={outcome['result']} ticks={outcome['ticks']} decs={outcome['decisions']} rew={outcome['episode_reward']} hist={outcome['hist']}")
+        print(f"\nVisor sigue en http://localhost:{args.port}/  (Ctrl+C para salir)")
         while True:
             await asyncio.sleep(1)
     except KeyboardInterrupt:
@@ -314,23 +334,24 @@ async def amain(args):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Checkpoint vs bot con visor EN VIVO en http://localhost:8765/")
+    ap = argparse.ArgumentParser(description="Checkpoint vs bot con visor EN VIVO en http://localhost:8786/")
     ap.add_argument("--ckpt", default="rl/ckpts/latest.pt")
     ap.add_argument("--url", default="http://localhost:8000")
     ap.add_argument("--bot-type", default="beginner")
     ap.add_argument("--ai-slot", default=None, help='slot IA: "Multi0" (default) o "" para sin enemigo')
-    ap.add_argument("--scenario", default="a")
-    ap.add_argument("--episodes", type=int, default=1)
+    ap.add_argument("--scenario", default="a_short")
+    ap.add_argument("--episodes", type=int, default=0, help="0 = loop infinito; recarga latest.pt entre partidas")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--temperature", type=float, default=1.0)
-    ap.add_argument("--greedy", action="store_true")
+    ap.add_argument("--greedy", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--k-skip", type=int, default=8)
-    ap.add_argument("--macro-ticks", type=int, default=160)
-    ap.add_argument("--max-steps", type=int, default=4000)
-    ap.add_argument("--shaper-preset", default="eradicate", choices=["eradicate", "eradicate_v3", "standard"])
-    ap.add_argument("--auto-support", action="store_true", help="activa harvest/repair/power automático (Pilar B)")
+    ap.add_argument("--macro-ticks", type=int, default=80)
+    ap.add_argument("--max-steps", type=int, default=624)
+    ap.add_argument("--shaper-preset", default="eradicate_v4", choices=list(PRESETS))
+    ap.add_argument("--auto-support", action=argparse.BooleanOptionalAction, default=True,
+                    help="harvest/repair/power automático (Pilar B); default on como el train")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
-    ap.add_argument("--port", type=int, default=8765, help="puerto del visor live (default 8765)")
+    ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")
     args = ap.parse_args()
     # --bot-type "" mantiene "" (dummy), solo None es "no tocar". --ai-slot "" desactiva enemigo.
     if args.bot_type == "__none__":
