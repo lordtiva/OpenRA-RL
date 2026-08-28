@@ -26,7 +26,9 @@ Ctrl+C para parar todo.
 import subprocess, sys, time, pathlib, signal, os, json, re
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-METRICS = ROOT / "rl" / "ckpts" / "metrics.jsonl"
+CKPT_DIR = ROOT / "rl" / "ckpts" / "Run5-a_short"
+METRICS = CKPT_DIR / "metrics.jsonl"
+RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
 LOGFILE = ROOT / "rl" / "auto_train.log"
 THRESHOLD_S = 300  # fallback 5 min si nvidia-smi no está
 CHECK_EVERY_S = 15  # más fino para pillar cuelgue rápido
@@ -49,15 +51,18 @@ TRAIN_ARGS = [
     "--url", "http://localhost:8000",
     "--iters", "100",
     "--concurrency", "8",
-    "--max-steps", "600",
+    "--max-steps", "624",
     "--macro-ticks", "80",
     "--lr", "1.5e-4",
     "--batch-size", "128",
-    "--scenario", "probe_short",
-    "--bot-type", "easy",
-    "--shaper-preset", "eradicate_v3",
+    "--scenario", "a_short",
+    "--bot-type", "beginner",
+    "--shaper-preset", "eradicate_v4",
     "--auto-support",
     "--gamma", "0.995",
+    "--ckpt-dir", "rl/ckpts/Run5-a_short",
+    "--metrics", "rl/ckpts/Run5-a_short/metrics.jsonl",
+    "--race-file", "rl/ckpts/Run5-a_short/economy_race.jsonl",
 ]
 
 def log(msg: str):
@@ -69,25 +74,23 @@ def log(msg: str):
     except: pass
 
 def find_resume() -> str | None:
-    """Regla de resume (intención del usuario):
+    """Resume del run actual, o semilla de Run3 si Run5 todavía no tiene ckpt.
 
-    - Carpeta rl/ckpts vacía (o inexistente) -> None -> entrenar desde pesos
-      aleatorios (from scratch).
-    - Carpeta con archivos -> priorizar latest.pt (el que reescribe el train
-      cada iter). Si por algún motivo falta latest.pt pero hay otros
-      checkpoints (iterNNNN.pt), usar el más nuevo como fallback defensivo
-      (no disparar from-scratch y perder progreso). Solo si la carpeta está
-      vacía se arranca desde cero.
+    - Run5-a_short/latest.pt (o iter*.pt) si ya arrancó este run.
+    - Si no, Run 3 (Full Stack - Asalto)/latest.pt — NO el latest.pt de
+      rl/ckpts (ese es el probe_short from-scratch de 31 iters).
+    - Si no hay semilla, from scratch.
     """
-    ckpt_dir = ROOT / "rl" / "ckpts"
-    latest = ckpt_dir / "latest.pt"
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    latest = CKPT_DIR / "latest.pt"
     if latest.exists():
         return str(latest)
-    if ckpt_dir.is_dir():
-        pts = sorted(ckpt_dir.glob("iter*.pt"),
-                     key=lambda p: p.stat().st_mtime, reverse=True)
-        if pts:
-            return str(pts[0])
+    pts = sorted(CKPT_DIR.glob("iter*.pt"),
+                 key=lambda p: p.stat().st_mtime, reverse=True)
+    if pts:
+        return str(pts[0])
+    if RESUME_SEED.exists():
+        return str(RESUME_SEED)
     return None
 
 def metrics_mtime() -> float:
@@ -195,7 +198,9 @@ def launch_train() -> subprocess.Popen:
         cmd = TRAIN_ARGS
         log(f"LANZANDO train FROM SCRATCH (pesos aleatorios, sin --resume, iters {TRAIN_ARGS[TRAIN_ARGS.index('--iters')+1]})")
     # cwd=ROOT para que los paths relativos funcionen
-    return subprocess.Popen(cmd, cwd=str(ROOT))
+    env = os.environ.copy()
+    env["PYTHONPATH"] = ""
+    return subprocess.Popen(cmd, cwd=str(ROOT), env=env)
 
 def main():
     log(f"auto_train iniciado — threshold {THRESHOLD_S}s, check {CHECK_EVERY_S}s (GPU<{GPU_LOW_THRESHOLD}% x{GPU_LOW_NEEDED} → 60s rápido)")
