@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>OpenRA Live — Checkpoint vs Bot</title>
+<style>
+  :root { --bg:#0b0e14; --card:#141922; --border:#232b38; --fg:#e6edf3; --muted:#8b98a9; --green:#3fb950; --red:#f85149; --blue:#58a6ff; --amber:#d29922; --cyan:#39c5cf; }
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:var(--bg);color:var(--fg);font-family:'Segoe UI',system-ui,sans-serif;padding:16px;max-width:1200px;margin:0 auto}
+  header{display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
+  h1{font-size:18px}
+  .live{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:6px}
+  .live::before{content:'';width:8px;height:8px;border-radius:50%;background:var(--green);animation:pulse 1.2s infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+  .bar{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+  .kpi{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;min-width:110px}
+  .kpi .l{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+  .kpi .v{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}
+  .kpi.small .v{font-size:14px}
+  .layout{display:grid;grid-template-columns: minmax(520px,1fr) 320px;gap:14px}
+  @media(max-width:900px){.layout{grid-template-columns:1fr}}
+  canvas{background:#0f141f;border:1px solid var(--border);border-radius:8px;width:100%;height:auto;display:block}
+  .panel{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px}
+  .panel h3{font-size:12px;color:var(--muted);margin-bottom:8px}
+  .row{display:flex;justify-content:space-between;font-size:13px;padding:4px 0;border-bottom:1px solid #1e2633}
+  .row:last-child{border:none}
+  .legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin-top:8px}
+  .dot{width:10px;height:10px;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:4px}
+  #action{font-size:12px;white-space:pre-wrap;word-break:break-word;background:#0b0e14;border:1px solid var(--border);border-radius:6px;padding:8px;max-height:220px;overflow:auto}
+  .status{font-size:12px;color:var(--amber)}
+</style>
+</head>
+<body>
+<header>
+  <h1>🔴 OpenRA Live — Checkpoint vs Bot</h1>
+  <span class="live" id="live-lbl">conectando…</span>
+  <span class="status" id="status"></span>
+</header>
+
+<div class="bar" id="kpis">
+  <div class="kpi"><div class="l">Tick</div><div class="v" id="k-tick">—</div></div>
+  <div class="kpi"><div class="l">Cash</div><div class="v" id="k-cash">—</div></div>
+  <div class="kpi"><div class="l">Ore / cap</div><div class="v" id="k-ore">—</div></div>
+  <div class="kpi"><div class="l">Power</div><div class="v" id="k-power">—</div></div>
+  <div class="kpi"><div class="l">Unidades</div><div class="v" id="k-units">—</div></div>
+  <div class="kpi"><div class="l">Edificios</div><div class="v" id="k-bld">—</div></div>
+  <div class="kpi"><div class="l">Enemigos vis.</div><div class="v" id="k-ene">—</div></div>
+  <div class="kpi"><div class="l">Reward ep.</div><div class="v" id="k-rew">—</div></div>
+</div>
+
+<div class="layout">
+  <div>
+    <canvas id="map" width="640" height="640"></canvas>
+    <div class="legend">
+      <span><i class="dot" style="background:#3fb950"></i>recurso</span>
+      <span><i class="dot" style="background:#58a6ff"></i>edificio propio</span>
+      <span><i class="dot" style="background:#39c5cf"></i>unidad propia</span>
+      <span><i class="dot" style="background:#f85149"></i>edificio enemigo</span>
+      <span><i class="dot" style="background:#f0883e"></i>unidad enemiga</span>
+      <span><i class="dot" style="background:rgba(0,0,0,.7);border:1px solid #333"></i>niebla</span>
+    </div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:12px">
+    <div class="panel">
+      <h3>Última acción</h3>
+      <div id="action">—</div>
+    </div>
+    <div class="panel">
+      <h3>Economía / supremacía</h3>
+      <div class="row"><span>Resultado</span><b id="p-result">—</b></div>
+      <div class="row"><span>Decisiones</span><b id="p-decs">—</b></div>
+      <div class="row"><span>Adv ticks</span><b id="p-adv">—</b></div>
+      <div class="row"><span>Own value</span><b id="p-own">—</b></div>
+      <div class="row"><span>Enemy value</span><b id="p-ene">—</b></div>
+      <div class="row"><span>Supremacía (diff)</span><b id="p-diff">—</b></div>
+    </div>
+    <div class="panel">
+      <h3>Histograma acciones (episodio)</h3>
+      <div id="hist" style="font-size:12px;color:var(--muted)">—</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = '/api/state';
+const canvas = document.getElementById('map');
+const ctx = canvas.getContext('2d');
+let lastState = null;
+
+function fmt(n){ if(n==null) return '—'; return typeof n==='number'? (Number.isInteger(n)?n:n.toFixed(1)) : n; }
+
+async function poll(){
+  try{
+    const r = await fetch(API + '?t='+Date.now(), {cache:'no-store'});
+    if(!r.ok) throw new Error(r.status);
+    const s = await r.json();
+    lastState = s;
+    document.getElementById('live-lbl').textContent = s.done ? 'finalizado' : 'en vivo';
+    document.getElementById('live-lbl').style.color = s.done ? '#f85149' : '#8b98a9';
+    document.getElementById('status').textContent = s.status || '';
+    render(s);
+  }catch(e){
+    document.getElementById('live-lbl').textContent = 'sin conexión ('+e.message+')';
+  }
+}
+
+function render(s){
+  document.getElementById('k-tick').textContent = fmt(s.tick);
+  document.getElementById('k-cash').textContent = fmt(s.cash);
+  document.getElementById('k-ore').textContent = s.ore!=null ? `${fmt(s.ore)}/${fmt(s.cap)}` : '—';
+  document.getElementById('k-power').textContent = s.power!=null ? `${s.power_provided}/${s.power_drained}` : '—';
+  document.getElementById('k-units').textContent = fmt(s.n_units);
+  document.getElementById('k-bld').textContent = fmt(s.n_bld);
+  document.getElementById('k-ene').textContent = `${fmt(s.n_ene_u)}/${fmt(s.n_ene_b)}`;
+  document.getElementById('k-rew').textContent = s.episode_reward!=null ? s.episode_reward.toFixed(2) : '—';
+  document.getElementById('p-result').textContent = s.result || '—';
+  document.getElementById('p-decs').textContent = fmt(s.decisions);
+  document.getElementById('p-adv').textContent = fmt(s.advanced_ticks);
+  document.getElementById('p-own').textContent = fmt(s.sup_own);
+  document.getElementById('p-ene').textContent = fmt(s.sup_ene);
+  document.getElementById('p-diff').textContent = s.sup_diff!=null ? (s.sup_diff>0?'+':'')+fmt(s.sup_diff) : '—';
+  document.getElementById('p-diff').style.color = s.sup_diff>0 ? '#3fb950' : s.sup_diff<0 ? '#f85149' : '#e6edf3';
+  document.getElementById('action').textContent = s.last_action || '—';
+  if(s.hist){
+    const top = Object.entries(s.hist).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([k,v])=>`${k}:${v}`).join('  ');
+    document.getElementById('hist').textContent = top || '—';
+  }
+  drawMap(s);
+}
+
+function drawMap(s){
+  const W = s.map_w || 64, H = s.map_h || 64;
+  // ajustar canvas al ratio del mapa
+  const size = 640;
+  canvas.width = size; canvas.height = size;
+  const scaleX = size / W, scaleY = size / H;
+  ctx.clearRect(0,0,size,size);
+  // fondo
+  ctx.fillStyle = '#0f141f';
+  ctx.fillRect(0,0,size,size);
+  // grid suave
+  ctx.strokeStyle = 'rgba(255,255,255,.04)';
+  ctx.lineWidth = 1;
+  for(let x=0;x<W;x+=8){ ctx.beginPath(); ctx.moveTo(x*scaleX,0); ctx.lineTo(x*scaleX,size); ctx.stroke(); }
+  for(let y=0;y<H;y+=8){ ctx.beginPath(); ctx.moveTo(0,y*scaleY); ctx.lineTo(size,y*scaleY); ctx.stroke(); }
+
+  // recursos (si viene spatial resumido)
+  if(s.resources){
+    ctx.fillStyle = 'rgba(63,185,80,.9)';
+    for(const [x,y] of s.resources){ ctx.fillRect(x*scaleX, y*scaleY, Math.max(2,scaleX*0.9), Math.max(2,scaleY*0.9)); }
+  }
+  // niebla como overlay (si viene fog)
+  if(s.fog){
+    ctx.fillStyle = 'rgba(0,0,0,.55)';
+    for(const [x,y] of s.fog){ ctx.fillRect(x*scaleX, y*scaleY, scaleX, scaleY); }
+  }
+  // edificios propios (azul)
+  if(s.buildings){
+    for(const b of s.buildings){
+      ctx.fillStyle = b.hp!=null && b.hp<0.4 ? '#1f4a8a' : '#58a6ff';
+      ctx.fillRect(b.x*scaleX, b.y*scaleY, scaleX*1.4, scaleY*1.4);
+      ctx.strokeStyle = 'rgba(255,255,255,.6)'; ctx.strokeRect(b.x*scaleX, b.y*scaleY, scaleX*1.4, scaleY*1.4);
+    }
+  }
+  // unidades propias (cyan)
+  if(s.units){
+    for(const u of s.units){
+      ctx.beginPath();
+      ctx.arc(u.x*scaleX+scaleX/2, u.y*scaleY+scaleY/2, Math.max(3, scaleX*0.5), 0, Math.PI*2);
+      ctx.fillStyle = u.can_attack ? '#39c5cf' : '#8b98a9';
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth=1; ctx.stroke();
+    }
+  }
+  // edificios enemigos (rojo)
+  if(s.ene_buildings){
+    for(const b of s.ene_buildings){
+      ctx.fillStyle = '#f85149';
+      ctx.fillRect(b.x*scaleX, b.y*scaleY, scaleX*1.4, scaleY*1.4);
+    }
+  }
+  // unidades enemigas (naranja)
+  if(s.ene_units){
+    for(const u of s.ene_units){
+      ctx.beginPath();
+      ctx.arc(u.x*scaleX+scaleX/2, u.y*scaleY+scaleY/2, Math.max(3, scaleX*0.5), 0, Math.PI*2);
+      ctx.fillStyle = '#f0883e'; ctx.fill();
+    }
+  }
+  // beacon (objetivo enemigo conocido por curriculum)
+  if(s.beacon){
+    ctx.strokeStyle = '#d29922'; ctx.lineWidth=2; ctx.setLineDash([6,4]);
+    ctx.strokeRect(s.beacon[0]*scaleX-8, s.beacon[1]*scaleY-8, 16, 16);
+    ctx.setLineDash([]);
+  }
+  // borde mapa
+  ctx.strokeStyle = '#232b38'; ctx.lineWidth=2; ctx.strokeRect(0,0,size,size);
+}
+
+setInterval(poll, 400);
+poll();
+</script>
+</body>
+</html>

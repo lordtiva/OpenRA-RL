@@ -126,11 +126,12 @@ class BridgeClient:
         if enabled_interrupts:
             request.enabled_interrupts.extend(enabled_interrupts)
 
-        # Timeout adaptativo: batallas grandes (Run3: 600+ ataques) hacen que
-        # FastAdvance tarde mucho más que 50 ticks vacíos. 120s fijo mataba
-        # la sesión en coloso pacifista vs coloso. ticks*2.5 + 30s margen.
-        # Mínimo 120s para no romper partidas cortas.
-        timeout = max(120.0, ticks * 2.5 + 30.0)
+        # Timeout adaptativo: batallas grandes usan FastAdvance de 50 ticks
+        # en ráfagas; 120s fijo mataba partidas de 51k ticks. 90s mínimo
+        # + ticks*1.0+30 da 110s para 80 ticks y 80s para 50 ticks: falla
+        # rápido (2 min) si hay cuelgue, sin esperar 460s. El rollout ya
+        # trata DEADLINE como engine_error y sigue.
+        timeout = max(90.0, ticks * 1.0 + 30.0)
         return self._stub.FastAdvance(request, timeout=timeout)
 
     def get_state(self) -> rl_bridge_pb2.GameState:

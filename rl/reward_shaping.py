@@ -15,7 +15,7 @@ Presets disponibles (elegir UNO por run: un cambio de regimen por vez):
 import math
 
 
-PRESETS = ("legacy", "eradicate", "eradicate_v2", "eradicate_v3", "eradicate_v4")
+PRESETS = ("legacy", "eradicate", "eradicate_v2", "eradicate_v3", "eradicate_v4", "eradicate_v4b")
 
 
 def _preset_kwargs(preset: str) -> dict:
@@ -102,6 +102,25 @@ def _preset_kwargs(preset: str) -> dict:
                         w_mining_rate=0.04, mining_rate_scale=1000.0, w_harvester_idle=0.01,
                         w_margin=1.0, margin_scale=3000.0, margin_on_truncate=False,
                         w_win=8.0, w_lose=2.5, w_timeout=1.0,
+                    )
+    if preset == "eradicate_v4b":
+        # v4b — rompe meseta: paga recortar desventaja, no farmear base.
+        # -60% garrison/naked, -50% mining absoluta y hold_zero/timeout,
+        # 4x spread para que +2k de Ventaja material ya pague.
+        # Compatible con ckpt v4 (mismos pesos), solo cambia shaping.
+        return dict(
+            w_kills=0.15, w_deaths=0.05, combat_scale=1000.0,
+            w_assets=0.0, w_building=0.0, w_new_type=0.0,
+            w_refinery=1.0, w_harvester=0.25, harvester_cap=4,
+            w_raze=2.0, raze_cap=0, raze_value_scale=2000.0,
+            w_defense_loss=0.25, defense_value_scale=2000.0, w_defense_first=3.0,
+            w_hold_zero=0.03, w_spread=0.008, spread_scale=1000.0, w_produce=0.0,
+                        w_cancel=0.15, w_refinery_early=2.0, refinery_target_tick=6000,
+                        w_first_ore=1.5,
+                        w_garrison=0.002, w_naked_base=0.002,
+                        w_mining_rate=0.02, mining_rate_scale=1000.0, w_harvester_idle=0.01,
+                        w_margin=1.0, margin_scale=3000.0, margin_on_truncate=False,
+                        w_win=8.0, w_lose=2.5, w_timeout=0.5,
                     )
     raise ValueError(f"preset desconocido: {preset!r} (validos: {PRESETS})")
 

@@ -211,15 +211,34 @@ async function load() {
   drawChart('ch-ent', rows.map(r => r.entropy), '', '#d29922');
   drawChart('ch-kl', rows.map(r => r.kl ?? 0), '', '#f85149');
 
-  // Componentes del reward en régimen eradicate_v2 (gradiente denso):
-  // combate asimétrico + raze + defensa (defense_loss/hold_zero) + spread +
-  // produce + win. Se ocultan las series planas en 0 (p. ej. win hasta la
-  // primera victoria; hold_zero si nunca queda sin núcleo).
-  const COMP_DEFS = [['combat', '#f85149'], ['raze', '#f0883e'],
-                     ['defense_loss', '#ff7b72'], ['spread', '#39c5cf'],
-                     ['hold_zero', '#8b98a9'], ['produce', '#3fb950'],
-                     ['mining', '#a5d6ff'], ['win', '#2ea043'],
-                     ['margin', '#bc8cff'], ['timeout', '#d29922']];
+  // Componentes del reward: la lista se DERIVA de las claves que el shaper
+  // efectivamente emite en reward_components (no hardcodeada), para no perder
+  // componentes nuevos (assets, buildings, new_types, cancel_penalty, garrison,
+  // early_refinery, first_ore...). Se conservan colores fijos para los más
+  // comunes; el resto usa una paleta cíclica. Se ocultan las series planas en
+  // 0 (p. ej. win hasta la primera victoria; hold_zero si nunca queda sin
+  // núcleo) — mantiene el panel legible en runs tempranos.
+  const COMP_COLORS = { combat: '#f85149', raze: '#f0883e',
+    defense_loss: '#ff7b72', spread: '#39c5cf', hold_zero: '#8b98a9',
+    produce: '#3fb950', mining: '#a5d6ff', win: '#2ea043',
+    margin: '#bc8cff', timeout: '#d29922', assets: '#f0e68c',
+    buildings: '#ffd33d', new_types: '#7ee787', cancel_penalty: '#ff6b6b',
+    garrison: '#56d4dd', early_refinery: '#e3a7ff', first_ore: '#ffa657' };
+  const PALETTE = ['#f85149','#f0883e','#ff7b72','#39c5cf','#8b98a9','#3fb950',
+    '#a5d6ff','#2ea043','#bc8cff','#d29922','#f0e68c','#ffd33d','#7ee787',
+    '#ff6b6b','#56d4dd','#e3a7ff','#ffa657','#79c0ff','#d2a8ff','#ff7b72'];
+  // Orden estable: primero los conocidos, luego los extra del datos.
+  const seenKeys = [];
+  for (const r of rows) {
+    const rc = r.reward_components;
+    if (!rc) continue;
+    for (const k of Object.keys(rc)) if (!seenKeys.includes(k)) seenKeys.push(k);
+  }
+  for (const k of Object.keys(COMP_COLORS)) {
+    if (!seenKeys.includes(k)) seenKeys.unshift(k);
+  }
+  const COMP_DEFS = seenKeys.map((k, i) =>
+    [k, COMP_COLORS[k] ?? PALETTE[i % PALETTE.length]]);
   const compSeries = COMP_DEFS
     .map(([k, col]) => ({ name: k, color: col,
         values: rows.map(r => (r.reward_components ?? {})[k] ?? null) }))

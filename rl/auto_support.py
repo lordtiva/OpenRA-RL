@@ -12,6 +12,7 @@ Diseño:
 - Flag --auto-support (default False en Run2, True en Run3/v4). Sin flag, 0 impacto.
 - Reparación: si cash>500 y edificio hp<35% y no está ya reparándose, emite 1
   repair por bloque (máx 2 para no spamear). Es el umbral del hard.
+- Cosecha: si harv está idle y hay proc, emite 1 harvest (auto al ore más cercano).
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
 
 No genera reward — evita defense_loss/hold_zero ya existentes.
@@ -19,10 +20,8 @@ No genera reward — evita defense_loss/hold_zero ya existentes.
 
 from openra_env.models import ActionType, CommandModel
 
-
 # Tipos que el hard apaga cuando hay brownout (ai.yaml PowerDownBotModule)
 _POWER_DOWN_TYPES = {"dome", "tsla", "mslo", "atag", "stag"}
-
 
 def support_commands(obs, max_repairs: int = 2):
     """Lista de CommandModel de soporte para esta observación.
@@ -33,10 +32,32 @@ def support_commands(obs, max_repairs: int = 2):
     out = []
     eco = getattr(obs, "economy", None)
     blds = getattr(obs, "buildings", []) or []
-    if not blds:
-        return out
-
+    units = getattr(obs, "units", []) or []
     cash = int(getattr(eco, "cash", 0) or 0) if eco else 0
+
+    # 0) Auto-harvest — si harv está idle y hay proc, mandarlo a cosechar.
+    #    Gratis para PPO (igual que repair): no roba decisión estratégica.
+    #    El engine con actor_id solo hace auto-harvest al ore más cercano.
+    has_proc = any(getattr(b, "type", "") == "proc" for b in blds)
+    if has_proc:
+        for u in units:
+            ut = str(getattr(u, "type", "")).lower()
+            if "harv" in ut and bool(getattr(u, "is_idle", False)):
+                out.append(CommandModel(action=ActionType.HARVEST, actor_id=int(u.actor_id)))
+                break  # uno por bloque (no spamear)
+
+    # 0b) Auto-proc — si no hay proc, hay cash y hay fact/barr para producirlo, pedirlo.
+    #     Evita el starve infinito del iter100 (6 edificios sin refinería → cap 0 → ore 0).
+    #     Gratis, igual que harvest: el shaper ya premia proc, esto solo rompe el deadlock.
+    if not has_proc and cash >= 1400:
+        has_fact = any(getattr(b, "type", "") == "fact" for b in blds)
+        # available_production viene de obs.available_production (si la red puede ver proc)
+        avail = set(getattr(obs, "available_production", []) or [])
+        can_build_proc = "proc" in avail or has_fact  # fact puede producir proc
+        if can_build_proc and not any(getattr(p, "item", "") == "proc" for p in getattr(obs, "production", []) or []):
+            # emitir BUILD proc (el engine lo encola, luego place_building vendrá de la red o de otro tick)
+            out.append(CommandModel(action=ActionType.BUILD, item_type="proc"))
+            # no break: puede coexistir con harvest (pero harvest no dispara sin proc, así que ok)
 
     # 1) Auto-repair — umbral hard (35%)
     if cash > 500:
