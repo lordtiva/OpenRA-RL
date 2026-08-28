@@ -49,7 +49,7 @@ DOCKER_DEAD_MARKERS = (
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
-    "--iters", "100",
+    "--iters", "200",
     "--concurrency", "8",
     "--max-steps", "624",
     "--macro-ticks", "80",
