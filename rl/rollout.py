@@ -127,6 +127,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     action_counts = {}
     own_n_buildings = 0
     ene_n_buildings = 0
+    last_push_cell = None  # (x, y) del último army/attack_move
 
     for step in range(max_steps):
         # Decidir SIEMPRE cada k_skip (o cada iteración en modo macro):
@@ -197,9 +198,15 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 if c.target_x >= ep_dims[1] or c.target_y >= ep_dims[0]:
                     c.target_x = min(c.target_x, ep_dims[1] - 1)
                     c.target_y = min(c.target_y, ep_dims[0] - 1)
+            # Destino de push vivo: si esta decisión fue army/attack_move,
+            # los ociosos de los próximos bloques siguen hacia esa celda.
+            if atype in ("army_attack_move", "attack_move") and action.commands:
+                c0 = action.commands[0]
+                if getattr(c0, "target_x", None) is not None:
+                    last_push_cell = (int(c0.target_x), int(c0.target_y))
             # Pilar B: autonomía de soporte (0 decisiones, gratis para PPO)
             if auto_support:
-                for cmd in support_commands(obs):
+                for cmd in support_commands(obs, last_push=last_push_cell):
                     action.commands.append(cmd)
             pending_cmd = action
             # F1: al buffer van los ÍNDICES EFECTIVOS (los de la acción que

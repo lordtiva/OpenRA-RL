@@ -57,6 +57,7 @@ TRAIN_ARGS = [
     "--bot-type", "easy",
     "--shaper-preset", "eradicate_v3",
     "--auto-support",
+    "--gamma", "0.995",
 ]
 
 def log(msg: str):

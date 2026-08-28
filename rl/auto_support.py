@@ -14,6 +14,8 @@ Diseño:
   repair por bloque (máx 2 para no spamear). Es el umbral del hard.
 - Cosecha: si harv está idle y hay proc, emite 1 harvest (auto al ore más cercano).
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
+- Push keep-alive: si la política ya eligió army/attack_move, los ociosos de
+  combate siguen hacia esa celda entre decisiones (APM de confort, como repair).
 
 No genera reward — evita defense_loss/hold_zero ya existentes.
 """
@@ -22,8 +24,9 @@ from openra_env.models import ActionType, CommandModel
 
 # Tipos que el hard apaga cuando hay brownout (ai.yaml PowerDownBotModule)
 _POWER_DOWN_TYPES = {"dome", "tsla", "mslo", "atag", "stag"}
+_NON_COMBAT = ("harv", "mcv")
 
-def support_commands(obs, max_repairs: int = 2):
+def support_commands(obs, last_push=None, max_repairs: int = 2):
     """Lista de CommandModel de soporte para esta observación.
 
     Llamar con la obs que ve la red ANTES de ejecutar el step. Devuelve [] si
@@ -79,5 +82,28 @@ def support_commands(obs, max_repairs: int = 2):
                 if b.type in _POWER_DOWN_TYPES and bool(getattr(b, "is_powered", True)):
                     out.append(CommandModel(action=ActionType.POWER_DOWN, actor_id=int(b.actor_id)))
                     break  # uno por bloque
+
+    # 3) Keep-alive de push. army_attack_move del C# mueve a todos EN ESE
+    #    bloque; entre decisiones (train/build/etc.) los rifles ociosos se
+    #    quedan parados. Si hay un destino de push vivo, re-emitimos
+    #    AttackMove a los idle de combate. Gratis para PPO.
+    if last_push is not None:
+        px, py = last_push
+        n_push = 0
+        for u in units:
+            ut = str(getattr(u, "type", "")).lower()
+            if any(tag in ut for tag in _NON_COMBAT):
+                continue
+            if not bool(getattr(u, "is_idle", False)):
+                continue
+            out.append(CommandModel(
+                action=ActionType.ATTACK_MOVE,
+                actor_id=int(u.actor_id),
+                target_x=int(px),
+                target_y=int(py),
+            ))
+            n_push += 1
+            if n_push >= 8:
+                break
 
     return out

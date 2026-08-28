@@ -74,7 +74,7 @@ def build_type_masks(obs) -> torch.Tensor:
     have_buildings = len(obs.buildings) > 0
     if have_units:
         for t in ("move", "attack_move", "attack", "stop", "guard",
-                  "harvest", "set_stance"):
+                  "harvest", "set_stance", "army_attack_move"):
             m[TYPE_TO_IDX[t]] = True
         m[TYPE_TO_IDX["deploy"]] = any("mcv" in u.type.lower() for u in obs.units)
     if have_buildings:
