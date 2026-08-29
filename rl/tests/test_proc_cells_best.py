@@ -22,7 +22,13 @@ from rl.action_adapter import (
     remap_move_cell,
 )
 from rl.auto_support import support_commands
-from rl.best_ckpt import is_strictly_better, maybe_update_best, viability_breakdown, viability_score
+from rl.best_ckpt import (
+    is_attack_spam_collapse,
+    is_strictly_better,
+    maybe_update_best,
+    viability_breakdown,
+    viability_score,
+)
 from rl.network import TYPE_TO_IDX
 from rl.obs_encoding import BEACON_BY_MAP
 
@@ -109,6 +115,10 @@ if "refinery" in aidx.build_items:
     rslot = len(aidx.train_items) + aidx.build_items.index("refinery")
     check("slot refinery on", bool(aidx.build_slot_mask[rslot]) is True)
 check("DEPLOY sigue legal", bool(aidx.type_mask[TYPE_TO_IDX["deploy"]]) is True)
+check("sin proc army_attack_move off", bool(aidx.type_mask[TYPE_TO_IDX["army_attack_move"]]) is False)
+check("sin proc attack_move off", bool(aidx.type_mask[TYPE_TO_IDX["attack_move"]]) is False)
+check("sin proc attack off", bool(aidx.type_mask[TYPE_TO_IDX["attack"]]) is False)
+check("sin proc move sigue on", bool(aidx.type_mask[TYPE_TO_IDX["move"]]) is True)
 check("PLACE no se toca (proc en build_items)", "refinery" in aidx.build_items)
 
 obs2 = _obs(harv=1, bldgs=("fact", "proc", "barr"), avail=("e1", "harv", "proc"),
@@ -116,6 +126,8 @@ obs2 = _obs(harv=1, bldgs=("fact", "proc", "barr"), avail=("e1", "harv", "proc")
 check("proc+harv listo para combate", economy_ready_for_combat(obs2) is True)
 aidx2 = ActionIndex(obs2, Vocab())
 check("TRAIN legal con proc+harv", bool(aidx2.type_mask[TYPE_TO_IDX["train"]]) is True)
+check("con proc army_attack_move on", bool(aidx2.type_mask[TYPE_TO_IDX["army_attack_move"]]) is True)
+check("con proc attack_move on", bool(aidx2.type_mask[TYPE_TO_IDX["attack_move"]]) is True)
 slot = aidx2.train_items.index("infantry_basic")
 check("slot infantry_basic on", bool(aidx2.train_slot_mask[slot]) is True)
 
@@ -134,6 +146,10 @@ check("adapter no entrena e1 sin proc",
       cmd.action.value != "train" or cmd.item_type != "e1")
 check("adapter tampoco entrena harv sin proc",
       cmd.action.value != "train")
+action_am, _ = index_to_command_effective(
+    obs3, TYPE_TO_IDX["army_attack_move"], 0, 0, 0, aidx3)
+check("adapter army_attack_move -> no_op sin proc",
+      action_am.commands[0].action.value == "no_op")
 
 cmds = support_commands(_obs(cash=5000, bldgs=("fact",), avail=("e1", "proc", "powr", "barr")))
 kinds = [(c.action.value, c.item_type) for c in cmds]
@@ -143,6 +159,13 @@ prod_ready = [NS(queue_type="Building", item="proc", progress=1.0, paused=False)
 cmds_p = support_commands(_obs(bldgs=("fact",), avail=("proc",), prod=prod_ready))
 check("auto-support PLACE proc listo",
       any(c.action.value == "place_building" and c.item_type == "proc" for c in cmds_p))
+cmds_push = support_commands(_obs(bldgs=("fact",), units=[_u(1, "e1", 12, 16)]), last_push=(90, 12))
+check("support no keep-alive attack sin proc",
+      not any(c.action.value == "attack_move" for c in cmds_push))
+cmds_push2 = support_commands(
+    _obs(bldgs=("fact", "proc"), units=[_u(1, "e1", 12, 16)]), last_push=(90, 12))
+check("support keep-alive attack CON proc",
+      any(c.action.value == "attack_move" for c in cmds_push2))
 
 h, w = 64, 128
 grid = np.ones((h, w), dtype=np.float32)
@@ -161,7 +184,7 @@ bx, by = remap_move_cell(obs_b, aidx_b, 0, 53, actor_id=1)
 check("remap agua sin enemigo -> beacon a_short (95,11)",
       (bx, by) == BEACON_BY_MAP["fase2_a_short.oramap"])
 
-obs_m = _obs(h=h, w=w, units=[_u(1, "e1", 12, 16)])
+obs_m = _obs(h=h, w=w, bldgs=("fact", "proc"), units=[_u(1, "e1", 12, 16)])
 aidx_m = ActionIndex(obs_m, Vocab())
 apply_passability(aidx_m, grid)
 water_flat = 53 * w + 0
@@ -190,6 +213,15 @@ better, reason = is_strictly_better(builder, collapse)
 check("builder strictly better por viability", better and reason == "higher_viability")
 better2, _ = is_strictly_better(collapse, builder)
 check("collapse NO reemplaza builder", better2 is False)
+
+spam = {
+    "iter": 275, "winrate_rolling20": 0.0,
+    "n_buildings": {"own": 0.0, "enemy": 6.0},
+    "action_hist": {"army_attack_move": 400, "no_op": 5, "build": 0},
+}
+check("attack-spam collapse detectado", is_attack_spam_collapse(spam) is True)
+check("builder no es attack-spam", is_attack_spam_collapse(builder) is False)
+check("deploy-noop collapse no es attack-spam", is_attack_spam_collapse(collapse) is False)
 
 a = {"iter_winrate": 0.25, "winrate_rolling20": 0.2, "iter": 1}
 b = {"iter_winrate": 0.5, "winrate_rolling20": 0.2, "iter": 2}

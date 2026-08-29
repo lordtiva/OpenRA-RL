@@ -26,9 +26,12 @@ Cuelgues — DOS orígenes distintos (no confundirlos):
 Uso:  .venv/Scripts/python.exe rl/auto_train.py
 Ctrl+C para parar todo.
 """
-import subprocess, sys, time, pathlib, signal, os, json, re, urllib.request
+import subprocess, sys, time, pathlib, signal, os, json, re, urllib.request, shutil
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+from rl.best_ckpt import is_attack_spam_collapse
 CKPT_DIR = ROOT / "rl" / "ckpts"
 METRICS = CKPT_DIR / "metrics.jsonl"
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
@@ -65,7 +68,7 @@ DAEMONS = (
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
-    "--iters", "200",
+    "--iters", "800",
     "--concurrency", "4",
     "--max-steps", "624",
     "--macro-ticks", "80",
@@ -119,6 +122,54 @@ def find_resume() -> str | None:
     if RESUME_SEED.exists():
         return str(RESUME_SEED)
     return None
+
+COLLAPSE_STREAK = 3
+COLLAPSE_COOLDOWN_ITERS = 15
+
+
+def last_metrics_rows(n: int = 3) -> list:
+    """Last n unique-by-iter metrics rows (latest write wins per iter)."""
+    rows = []
+    if not METRICS.exists():
+        return rows
+    try:
+        with open(METRICS, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    j = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(j.get("iter"), int):
+                    rows.append(j)
+    except OSError:
+        return []
+    by_iter = {}
+    for r in rows:
+        by_iter[r["iter"]] = r
+    uniq = [by_iter[k] for k in sorted(by_iter)]
+    return uniq[-n:]
+
+
+def restore_best_over_latest() -> bool:
+    """Copy best.pt -> latest.pt so the next launch resumes the last good policy."""
+    best = CKPT_DIR / "best.pt"
+    latest = CKPT_DIR / "latest.pt"
+    if not best.exists():
+        return False
+    tmp = CKPT_DIR / "latest.pt.tmp"
+    try:
+        shutil.copy2(best, tmp)
+        os.replace(tmp, latest)
+        return True
+    except OSError as e:
+        log(f"restore best.pt FAIL: {e}")
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        return False
+
 
 def metrics_mtime() -> float:
     try: return METRICS.stat().st_mtime
@@ -316,6 +367,7 @@ def main():
     last_mtime = metrics_mtime()
     last_progress = time.time()
     gpu_low_streak = 0
+    last_restore_iter = 0
     # arranque inicial
     proc = launch_train()
     time.sleep(CHECK_EVERY_S)
@@ -374,6 +426,23 @@ def main():
                 last_mtime = mtime
                 last_progress = time.time()
                 gpu_low_streak = 0
+                rows = last_metrics_rows(COLLAPSE_STREAK)
+                if (len(rows) >= COLLAPSE_STREAK
+                        and all(is_attack_spam_collapse(r) for r in rows)
+                        and (int(rows[-1]["iter"]) - last_restore_iter) >= COLLAPSE_COOLDOWN_ITERS):
+                    its = [r["iter"] for r in rows]
+                    log(f"COLAPSO attack-spam — iters {its} rolling20=0 atk>90% own_b=0 — restaurando best.pt -> latest.pt")
+                    kill_train(proc)
+                    if restore_best_over_latest():
+                        last_restore_iter = int(rows[-1]["iter"])
+                        log(f"restaurado best.pt sobre latest.pt; cooldown {COLLAPSE_COOLDOWN_ITERS} iters")
+                    else:
+                        log("no hay best.pt — no pude restaurar, sigo")
+                    time.sleep(2)
+                    proc = launch_train()
+                    last_mtime = metrics_mtime()
+                    last_progress = time.time()
+                    gpu_low_streak = 0
                 continue
             idle = time.time() - last_progress
             # GPU baja en collect es NORMAL. Un marker suelto también

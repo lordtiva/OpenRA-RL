@@ -104,6 +104,9 @@ COMBAT_TRAIN_ROLES = {
 }
 ECONOMY_BUILD_ROLES = {"power", "refinery"}  # legal BUILD before proc exists
 MOVE_CELL_TYPES = {"move", "attack_move", "attack", "army_attack_move"}
+# Combat movement: masked until a refinery stands. Otherwise PPO
+# reward-hacks army_attack_move / attack_move (the 201-309 collapse).
+COMBAT_MOVE_TYPES = ("army_attack_move", "attack_move", "attack")
 
 
 def owns_proc(obs) -> bool:
@@ -333,6 +336,8 @@ class ActionIndex:
             m[TYPE_TO_IDX["train"]] = False
             if not bool(self.build_slot_mask.any()):
                 m[TYPE_TO_IDX["build"]] = False
+            for name in COMBAT_MOVE_TYPES:
+                m[TYPE_TO_IDX[name]] = False
             self.type_mask = torch.from_numpy(m)
         elif not economy_ready_for_combat(obs):
             for slot, role in enumerate(self.train_items):
@@ -429,6 +434,9 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     # buffer atribuía el crédito al tipo equivocado).
     if t_name == "attack" and _nearest_enemy_at_cell(obs, cx, cy) is None:
         t_name = "attack_move"
+
+    if t_name in COMBAT_MOVE_TYPES and not owns_proc(obs):
+        t_name = "no_op"
 
     if t_name == "train" and not owns_proc(obs):
         t_name = "no_op"

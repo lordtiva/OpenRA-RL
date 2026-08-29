@@ -125,6 +125,24 @@ def viability_score(row: dict) -> float:
     return float(viability_breakdown(row)["score"])
 
 
+def attack_spam_frac(row: dict) -> float:
+    """Fraction of actions that are combat-move (attack / attack_move / army)."""
+    hist = row.get("action_hist") or {}
+    n_act = float(sum(int(v) for v in hist.values()) or 0)
+    atk = (float(hist.get("attack_move", 0) or 0)
+           + float(hist.get("army_attack_move", 0) or 0)
+           + float(hist.get("attack", 0) or 0))
+    return (atk / n_act) if n_act > 0 else 0.0
+
+
+def is_attack_spam_collapse(row: dict) -> bool:
+    """True when the policy is the 275-309 mode: no base, 0 rolling wr, >90% attack."""
+    n_b = row.get("n_buildings") or {}
+    own_b = float(n_b.get("own", 0) or 0)
+    r20 = float(row.get("winrate_rolling20") or 0.0)
+    return own_b < 0.5 and r20 <= 0.0 and attack_spam_frac(row) > 0.90
+
+
 def is_strictly_better(cand: dict, best: dict) -> tuple[bool, str]:
     """True only when cand beats best. Equal scores do not replace (no flap)."""
     wr_c, wr_b = iter_winrate(cand), iter_winrate(best)
@@ -132,6 +150,14 @@ def is_strictly_better(cand: dict, best: dict) -> tuple[bool, str]:
         return True, "higher_iter_winrate"
     if wr_c < wr_b:
         return False, "lower_iter_winrate"
+    # Era winrate before rolling20: first win sets rolling20=0.25 on a
+    # 4-ep window and would freeze best.pt there all night.
+    era_c = float(cand.get("winrate") or 0.0)
+    era_b = float(best.get("winrate") or 0.0)
+    if era_c > era_b:
+        return True, "higher_era_winrate"
+    if era_c < era_b:
+        return False, "lower_era_winrate"
     r20_c, r20_b = cand.get("winrate_rolling20"), best.get("winrate_rolling20")
     if r20_c is not None and r20_b is not None:
         r20_c, r20_b = float(r20_c), float(r20_b)

@@ -117,7 +117,7 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
     #    bloque; entre decisiones (train/build/etc.) los rifles ociosos se
     #    quedan parados. Si hay un destino de push vivo, re-emitimos
     #    AttackMove a los idle de combate. Gratis para PPO.
-    if last_push is not None:
+    if last_push is not None and has_proc:
         px, py = last_push
         n_push = 0
         for u in units:
