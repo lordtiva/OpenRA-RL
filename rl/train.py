@@ -331,7 +331,7 @@ async def amain(args):
     recent_results = []  # resultados recientes para winrate rodante (20)
     ema_collect = ema_update = None
     t_start = time.time()
-    elite = EliteBuffer(cap_steps=4000) if args.sil else None
+    elite = EliteBuffer(cap_steps=2000) if args.sil else None
     if args.bc or args.sil:
         print(f"Capa 1: bc={args.bc} sil={args.sil} "
               f"warmup={args.bc_warmup} lambda_sil={args.lambda_sil}")
@@ -393,17 +393,26 @@ async def amain(args):
                      "adv_mean": 0.0, "n": len(samples)}
             dt_update = 0.0
         else:
-            stats = await asyncio.to_thread(
-                trainer.update, samples, args.epochs, args.batch_size)
-            if lmb_bc > 0.0 and bc_samples:
-                stats["bc_nll"] = trainer.imitation_update(
-                    bc_samples, lmb_bc, epochs=1, batch_size=args.batch_size)
-                stats["lambda_bc"] = round(lmb_bc, 4)
-            if lmb_sil > 0.0 and elite is not None and len(elite) > 0:
-                stats["sil_nll"] = trainer.imitation_update(
-                    elite.snapshot(), lmb_sil, epochs=1,
-                    batch_size=args.batch_size)
-                stats["sil_n"] = len(elite)
+            sil_batch = (elite.sample_recent(512)
+                         if (lmb_sil > 0.0 and elite is not None) else [])
+
+            def _ppo_and_imitation():
+                st = trainer.update(samples, args.epochs, args.batch_size)
+                if lmb_bc > 0.0 and bc_samples:
+                    st["bc_nll"] = trainer.imitation_update(
+                        bc_samples, lmb_bc, epochs=1,
+                        batch_size=args.batch_size)
+                    st["lambda_bc"] = round(lmb_bc, 4)
+                if lmb_sil > 0.0 and sil_batch:
+                    st["sil_nll"] = trainer.imitation_update(
+                        sil_batch, lmb_sil, epochs=1,
+                        batch_size=args.batch_size)
+                    st["sil_n"] = len(sil_batch)
+                if device == "cuda":
+                    torch.cuda.empty_cache()
+                return st
+
+            stats = await asyncio.to_thread(_ppo_and_imitation)
             dt_update = time.time() - t1
         dt = time.time() - t0  # wall-clock real (collect k + update, con overlap)
         collect_s = t1 - t0

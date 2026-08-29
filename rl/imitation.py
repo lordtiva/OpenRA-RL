@@ -67,10 +67,29 @@ def command_to_indices(obs, cmd: CommandModel, aidx) -> tuple[int, int, int, int
     return t_idx, unit_slot, cell_flat, item_slot
 
 
+def _cpu_clone_step(s: dict) -> dict:
+    """Detach rollout tensors so the SIL ring does not pin live GPU storage."""
+    out = dict(s)
+    batch = s.get("batch") or {}
+    out["batch"] = {
+        k: (v.detach().cpu().contiguous() if torch.is_tensor(v) else v)
+        for k, v in batch.items()
+    }
+    act = s.get("action") or {}
+    out["action"] = {
+        k: (v.detach().cpu().contiguous() if torch.is_tensor(v) else v)
+        for k, v in act.items()
+    }
+    h = s.get("h_in")
+    if torch.is_tensor(h):
+        out["h_in"] = h.detach().cpu().contiguous()
+    return out
+
+
 class EliteBuffer:
     """Ring of on-policy steps from winning / razing episodes (SIL)."""
 
-    def __init__(self, cap_steps: int = 4000):
+    def __init__(self, cap_steps: int = 2000):
         self.cap = int(cap_steps)
         self._steps: deque = deque()
 
@@ -84,11 +103,14 @@ class EliteBuffer:
         result = str(oc.get("result", "") or "")
         rc = oc.get("reward_components") or {}
         raze = float(rc.get("raze", 0) or 0)
-        if not (result.startswith("win") or raze > 0.0):
+        # raze>0 is almost every a_short game (beginner drops a building).
+        # Only keep real wins or a clear raze so the ring does not ingest
+        # 4x~500 maps every iter (that was the VRAM walk).
+        if not (result.startswith("win") or raze >= 2.0):
             return 0
         n = 0
         for s in samples:
-            self._steps.append(s)
+            self._steps.append(_cpu_clone_step(s))
             n += 1
             while len(self._steps) > self.cap:
                 self._steps.popleft()
@@ -96,3 +118,11 @@ class EliteBuffer:
 
     def snapshot(self) -> list:
         return list(self._steps)
+
+    def sample_recent(self, max_steps: int = 512) -> list:
+        """Most recent elite steps, capped so SIL does not replay 2k maps/iter."""
+        if max_steps <= 0 or not self._steps:
+            return []
+        if len(self._steps) <= max_steps:
+            return list(self._steps)
+        return list(self._steps)[-int(max_steps):]

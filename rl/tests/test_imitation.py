@@ -99,6 +99,10 @@ check("lose sin raze no entra", n == 0 and len(buf) == 0)
 n = buf.add_episode([{"a": 1}, {"a": 2}, {"a": 3}, {"a": 4}],
                     {"result": "win", "reward_components": {"raze": 1.0}})
 check("win entra y cap recorta", n == 4 and len(buf) == 3)
+check("sample_recent respeta max", len(buf.sample_recent(2)) == 2)
+n_r = buf.add_episode([{"a": 9}],
+                      {"result": "lose", "reward_components": {"raze": 0.5}})
+check("raze flojo no entra", n_r == 0)
 
 th = ScriptedTeacher()
 check("teacher proc antes de barracks",
