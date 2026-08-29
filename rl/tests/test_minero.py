@@ -25,7 +25,7 @@ def obs(cash=5000, harv=0, kills=0, deaths=0, assets=2000,
 
 
 # 1) refineria nueva paga refineria + cosechador incluido
-sh = ShapedReward()
+sh = ShapedReward(preset="legacy")
 sh.reset(obs(harv=0))
 o2 = obs(harv=1, assets=4000, bldgs=("conyard", "proc"))
 r = sh.step(o2, done=False)
@@ -35,14 +35,14 @@ assert abs(sum(comp.values()) - r) < 1e-9           # INVARIANTE suma exacta
 print(f"1) primera proc: mining={comp['mining']} | suma OK")
 
 # 2) nacer con proc NO paga nada (reset marca como ya pagada)
-sh2 = ShapedReward()
+sh2 = ShapedReward(preset="legacy")
 sh2.reset(obs(harv=1, bldgs=("conyard", "proc")))
 r2 = sh2.step(obs(harv=1, assets=2100), done=False)
 assert sh2.last_components["mining"] == 0.0
 print("2) proc preexistente no paga: OK")
 
 # 3) cosechadoras hasta el tope, despues nada; muerte de cosechadora no roba
-sh3 = ShapedReward()
+sh3 = ShapedReward(preset="legacy")
 sh3.reset(obs(harv=1))
 sh3.step(obs(harv=4, assets=3000), done=False)      # +3 cosechadoras pagadas
 m3 = sh3.last_components["mining"]
@@ -69,5 +69,23 @@ assert tr == ["infantry_antiinf", "infantry_basic"], tr
 assert rol_conc["refinery"] == "proc", rol_conc
 assert rol_conc["infantry_basic"] == "e1", rol_conc
 print("4) split por ROL (agnóstico a facción): train=", tr, "build=", bu)
+
+# 5) lose sin economía es peor que lose con proc (Run 8)
+from rl.reward_shaping import ShapedReward as _SR
+sh5 = _SR(preset="eradicate_v4")
+sh5.reset(obs(bldgs=("conyard",)))
+r5 = sh5.finalize(truncated=False, result="lose")
+assert sh5.last_components["margin"] == -2.5, sh5.last_components
+assert sh5.last_components["no_econ_lose"] == -4.0, sh5.last_components
+assert abs(r5 - (-6.5)) < 1e-9, r5
+assert abs(sum(sh5.last_components.values()) - r5) < 1e-9
+print("5) lose sin proc: -2.5 lose + -4 no_econ = -6.5 OK")
+
+sh6 = _SR(preset="eradicate_v4")
+sh6.reset(obs(bldgs=("conyard", "proc")))
+r6 = sh6.finalize(truncated=False, result="lose")
+assert r6 == -2.5, r6
+assert sh6.last_components["no_econ_lose"] == 0.0
+print("6) lose CON proc: solo -2.5, sin no_econ OK")
 
 print("\nTODOS LOS TESTS OK")

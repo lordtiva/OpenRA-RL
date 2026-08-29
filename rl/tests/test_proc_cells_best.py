@@ -23,7 +23,10 @@ from rl.action_adapter import (
 )
 from rl.auto_support import support_commands
 from rl.best_ckpt import (
+    batch_is_dead,
+    dead_policy_reason,
     is_attack_spam_collapse,
+    is_dead_policy,
     is_strictly_better,
     maybe_update_best,
     viability_breakdown,
@@ -167,6 +170,28 @@ cmds_push2 = support_commands(
 check("support keep-alive attack CON proc",
       any(c.action.value == "attack_move" for c in cmds_push2))
 
+army4 = [_u(i, "e1", 12 + i, 16) for i in range(1, 5)] + [_u(9, "harv", 14, 16)]
+cmds_assault = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4, enemies=[_u(99, "e1", 90, 12)]))
+check("asalto sostenido: army_attack_move con 4 rifles + proc + harv",
+      any(c.action.value == "army_attack_move" for c in cmds_assault))
+am = next(c for c in cmds_assault if c.action.value == "army_attack_move")
+check("asalto apunta al enemigo visible", am.target_x == 90 and am.target_y == 12)
+cmds_no_eco = support_commands(
+    _obs(bldgs=("fact",), units=army4, enemies=[_u(99, "e1", 90, 12)]))
+check("asalto NO arranca sin proc",
+      not any(c.action.value == "army_attack_move" for c in cmds_no_eco))
+cmds_no_harv = support_commands(
+    _obs(harv=0, bldgs=("fact", "proc"), units=army4[:4],
+         enemies=[_u(99, "e1", 90, 12)]))
+check("asalto NO arranca sin harv",
+      not any(c.action.value == "army_attack_move" for c in cmds_no_harv))
+cmds_beacon = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4))
+check("asalto sin enemigo visible usa beacon a_short",
+      any(c.action.value == "army_attack_move" and c.target_x == 95 and c.target_y == 11
+          for c in cmds_beacon))
+
 h, w = 64, 128
 grid = np.ones((h, w), dtype=np.float32)
 grid[40:, :] = 0.0
@@ -222,6 +247,36 @@ spam = {
 check("attack-spam collapse detectado", is_attack_spam_collapse(spam) is True)
 check("builder no es attack-spam", is_attack_spam_collapse(builder) is False)
 check("deploy-noop collapse no es attack-spam", is_attack_spam_collapse(collapse) is False)
+check("deploy-noop ES dead policy", is_dead_policy(collapse) is True)
+check("reason deploy-noop", dead_policy_reason(collapse) == "deploy-noop")
+check("attack-spam ES dead policy", dead_policy_reason(spam) == "attack-spam")
+check("builder NO es dead policy", is_dead_policy(builder) is False)
+noop_spam = {
+    "iter": 329, "winrate_rolling20": 0.0, "entropy": 0.015,
+    "n_buildings": {"own": 0.0, "enemy": 0.0},
+    "action_hist": {"no_op": 391, "deploy": 4},
+    "outcomes": ["lose", "lose", "lose", "lose"],
+    "ticks": [8500, 8400, 8300, 8200],
+    "reward_components": {},
+}
+check("Run8 no_op-spam es dead policy",
+      is_dead_policy(noop_spam) is True
+      and dead_policy_reason(noop_spam) in ("no_op-spam", "deploy-noop"))
+check("batch 80%+ no_op se salta", batch_is_dead([
+    {"action_hist": {"no_op": 90, "deploy": 2}},
+    {"action_hist": {"no_op": 95, "deploy": 1}},
+]) is True)
+check("batch sano no se salta", batch_is_dead([
+    {"action_hist": {"train": 40, "attack_move": 50, "no_op": 10}},
+]) is False)
+
+cmds_mcv = support_commands(_obs(bldgs=(), units=[_u(1, "mcv", 12, 16)],
+                                 avail=("proc", "powr")))
+kinds_mcv = [(c.action.value, c.item_type) for c in cmds_mcv]
+check("auto-support DEPLOY MCV sin fact",
+      any(c.action.value == "deploy" for c in cmds_mcv))
+check("sin fact no BUILD proc el mismo bloque",
+      ("build", "proc") not in kinds_mcv)
 
 a = {"iter_winrate": 0.25, "winrate_rolling20": 0.2, "iter": 1}
 b = {"iter_winrate": 0.5, "winrate_rolling20": 0.2, "iter": 2}

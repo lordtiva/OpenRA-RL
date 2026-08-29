@@ -143,6 +143,54 @@ def is_attack_spam_collapse(row: dict) -> bool:
     return own_b < 0.5 and r20 <= 0.0 and attack_spam_frac(row) > 0.90
 
 
+def action_frac(row: dict, keys) -> float:
+    hist = row.get("action_hist") or {}
+    n_act = float(sum(int(v) for v in hist.values()) or 0)
+    if n_act <= 0:
+        return 0.0
+    return sum(float(hist.get(k, 0) or 0) for k in keys) / n_act
+
+
+def dead_policy_reason(row: dict) -> str | None:
+    """Why this metrics row is a dead policy, or None if it still plays.
+
+    Covers the two observed collapse modes plus a generic entropy crash:
+      - attack-spam (Run 7): no base, wr20=0, >90% combat
+      - deploy-noop (Run 8): viability collapse, or wr20=0 and >80% no_op
+      - entropy crash: wr20=0, no base, H<0.15
+    """
+    if is_attack_spam_collapse(row):
+        return "attack-spam"
+    if viability_breakdown(row).get("collapse"):
+        return "deploy-noop"
+    r20 = float(row.get("winrate_rolling20") or 0.0)
+    if r20 <= 0.0 and action_frac(row, ("no_op",)) > 0.80:
+        return "no_op-spam"
+    n_b = row.get("n_buildings") or {}
+    own_b = float(n_b.get("own", 0) or 0)
+    h = row.get("entropy")
+    if (r20 <= 0.0 and own_b < 0.5 and h is not None
+            and float(h) < 0.15):
+        return "entropy-crash"
+    return None
+
+
+def is_dead_policy(row: dict) -> bool:
+    return dead_policy_reason(row) is not None
+
+
+def batch_is_dead(outcomes) -> bool:
+    """True when this PPO batch is 80%+ no_op — skip the update, don't drive H to 0."""
+    hist = {}
+    for o in outcomes or []:
+        for k, v in (o.get("action_hist") or {}).items():
+            hist[k] = hist.get(k, 0) + int(v or 0)
+    n = float(sum(hist.values()) or 0)
+    if n <= 0:
+        return False
+    return hist.get("no_op", 0) / n > 0.80
+
+
 def is_strictly_better(cand: dict, best: dict) -> tuple[bool, str]:
     """True only when cand beats best. Equal scores do not replace (no flap)."""
     wr_c, wr_b = iter_winrate(cand), iter_winrate(best)

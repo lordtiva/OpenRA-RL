@@ -35,7 +35,9 @@ from rl.network import AlphaLiteNet
 from rl.rollout import (add_advantages, center_advantage_by_episode,
                         collect_one_episode, flatten_samples)
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
-from rl.best_ckpt import maybe_update_best
+from rl.best_ckpt import batch_is_dead, maybe_update_best
+from rl.imitation import EliteBuffer, lambda_bc_at
+from rl.scripted_teacher import ScriptedTeacher
 
 
 def pick_device(requested: str) -> str:
@@ -130,10 +132,13 @@ async def amain(args):
         # F2 (auditoría): restaurar TAMBIÉN el vocabulario del checkpoint —
         # antes se ignoraba y los ids de la cabeza de ítems podían quedar
         # barajados respecto a los pesos guardados.
-        start_iter = load_checkpoint(args.resume, net, trainer.opt,
-                                     vocab=vocab)
+        start_iter = load_checkpoint(
+            args.resume, net,
+            opt=None if args.reset_opt else trainer.opt,
+            vocab=vocab, reset_opt=args.reset_opt)
         print(f"Reanudado desde {args.resume} (iter {start_iter}, "
-              f"{len(vocab.type_to_id)} tipos en vocab)")
+              f"{len(vocab.type_to_id)} tipos en vocab"
+              f"{', Adam fresco' if args.reset_opt else ''})")
 
     if args.roles_vocab:
         # Traductor universal (agnóstico a facción): la cabeza de ítems pasa
@@ -326,6 +331,10 @@ async def amain(args):
     recent_results = []  # resultados recientes para winrate rodante (20)
     ema_collect = ema_update = None
     t_start = time.time()
+    elite = EliteBuffer(cap_steps=4000) if args.sil else None
+    if args.bc or args.sil:
+        print(f"Capa 1: bc={args.bc} sil={args.sil} "
+              f"warmup={args.bc_warmup} lambda_sil={args.lambda_sil}")
 
     for it in range(start_iter + 1, args.iters + 1):
         t0 = time.time()
@@ -339,12 +348,63 @@ async def amain(args):
         infer_net.load_state_dict(net.state_dict())
         samples, outcomes = process_results(results, args.gamma, args.lam,
                                             adv_mode=args.adv_mode)
+        bc_samples = []
+        if args.bc:
+            try:
+                t_traj, t_out = await collect_one_episode(
+                    pool[0], infer_net, vocab, device,
+                    k_skip=args.k_skip,
+                    temperature=args.temperature,
+                    max_steps=args.max_steps,
+                    macro_ticks=args.macro_ticks,
+                    reset_kwargs=reset_kwargs,
+                    shaper_preset=args.shaper_preset,
+                    auto_support=args.auto_support,
+                    teacher=ScriptedTeacher())
+                bc_samples, _ = process_results(
+                    [(t_traj, t_out)], args.gamma, args.lam,
+                    adv_mode=args.adv_mode, verbose=False)
+                for s in bc_samples:
+                    s["_ep"] = 10_000 + it
+                print(f"  [bc] teacher steps={len(bc_samples)} "
+                      f"result={t_out.get('result')}", flush=True)
+            except Exception as e:
+                print(f"  [bc] teacher fail: {e}", flush=True)
+                bc_samples = []
         pending = launch_collection(pending)
 
         t1 = time.time()
-        stats = await asyncio.to_thread(
-            trainer.update, samples, args.epochs, args.batch_size)
-        dt_update = time.time() - t1
+        skipped_update = batch_is_dead(outcomes)
+        lmb_bc = (lambda_bc_at(it, start_iter, args.bc_warmup)
+                  if args.bc else 0.0)
+        lmb_sil = args.lambda_sil if args.sil else 0.0
+        if elite is not None and samples:
+            by_ep = {}
+            for s in samples:
+                by_ep.setdefault(s.get("_ep", 0), []).append(s)
+            for ep_i, traj in by_ep.items():
+                oc = outcomes[ep_i] if ep_i < len(outcomes) else {}
+                elite.add_episode(traj, oc)
+        if skipped_update:
+            print(f"  [collapse] skip PPO update — batch >80% no_op "
+                  f"(n={len(samples)})", flush=True)
+            stats = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
+                     "clip_frac": 0.0, "kl": 0.0, "grad_norm": 0.0,
+                     "adv_mean": 0.0, "n": len(samples)}
+            dt_update = 0.0
+        else:
+            stats = await asyncio.to_thread(
+                trainer.update, samples, args.epochs, args.batch_size)
+            if lmb_bc > 0.0 and bc_samples:
+                stats["bc_nll"] = trainer.imitation_update(
+                    bc_samples, lmb_bc, epochs=1, batch_size=args.batch_size)
+                stats["lambda_bc"] = round(lmb_bc, 4)
+            if lmb_sil > 0.0 and elite is not None and len(elite) > 0:
+                stats["sil_nll"] = trainer.imitation_update(
+                    elite.snapshot(), lmb_sil, epochs=1,
+                    batch_size=args.batch_size)
+                stats["sil_n"] = len(elite)
+            dt_update = time.time() - t1
         dt = time.time() - t0  # wall-clock real (collect k + update, con overlap)
         collect_s = t1 - t0
 
@@ -463,6 +523,14 @@ async def amain(args):
                     "clip_frac": stats.get("clip_frac"),
                     "kl": stats.get("kl"),
                     "grad_norm": stats.get("grad_norm"),
+                    **({"lambda_bc": stats.get("lambda_bc")}
+                       if stats.get("lambda_bc") is not None else {}),
+                    **({"bc_nll": stats.get("bc_nll")}
+                       if stats.get("bc_nll") is not None else {}),
+                    **({"sil_nll": stats.get("sil_nll")}
+                       if stats.get("sil_nll") is not None else {}),
+                    **({"sil_n": stats.get("sil_n")}
+                       if stats.get("sil_n") is not None else {}),
                     "winrate": round(wins / total, 3) if total else 0.0,
                     "winrate_rolling20": round(rolling, 3),
                     "iter_winrate": round(
@@ -492,6 +560,7 @@ async def amain(args):
                             sum(sum(vc) for vc in vcs)
                             / sum(len(vc) for vc in vcs), 3)}
                        if vcs else {}),
+                    **({"update_skipped": True} if skipped_update else {}),
             }
             with open(args.metrics, "a", encoding="utf-8") as f:
                 f.write(json.dumps(metrics_row) + "\n")
@@ -588,6 +657,18 @@ def main():
     ap.add_argument("--auto-support", action="store_true",
                     help="Pilar B: autonomía de soporte (repair hp<35%% + power_down) — "
                          "0 decisiones, gratis para PPO. Activo en Run3/v4.")
+    ap.add_argument("--reset-opt", action="store_true",
+                    help="Al --resume, no cargar Adam del ckpt (momentos de una "
+                         "política colapsada clavan la cabeza de tipo). Lo pasa "
+                         "auto_train tras restaurar best.pt.")
+    ap.add_argument("--bc", action="store_true",
+                    help="Capa 1: 1 episodio ScriptedTeacher por iter + NLL BC.")
+    ap.add_argument("--sil", action="store_true",
+                    help="Capa 1: self-imitation de episodios win/raze>0.")
+    ap.add_argument("--bc-warmup", type=int, default=80,
+                    help="Iters para bajar lambda_bc de 1.0 a 0.")
+    ap.add_argument("--lambda-sil", type=float, default=0.5,
+                    help="Peso SIL cuando --sil (default 0.5).")
     args = ap.parse_args()
 
     try:

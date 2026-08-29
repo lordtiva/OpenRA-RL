@@ -35,3 +35,8 @@ rl/tools/
 wandb/
 runs/
 lightning_logs/
+
+# Backups de mapas de curriculum
+*.oramap.bak
+*.oramap.prebase
+*.prebase

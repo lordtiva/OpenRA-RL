@@ -2,6 +2,7 @@
 
 > **Fuente:** tercera revisión del revisor quisquilloso (2026-08-27), respuesta a "¿cuál es mi siguiente jugada con mi hardware?". Guardado como roadmap de 6-12 meses. Complementa a `10-benchmark-alphastar-openai-five.md` (mapa de familia) y `11-revision-quisquillosa.md` (termómetro).
 > **Tesis:** el cuello no es el algoritmo (PPO ya hace su trabajo: maximiza `garrison`), son **muestras, crédito y que el juego se pueda ganar**. En 1 GPU el stack que rinde es `PPO + BC + self-imitation + self-play chico`.
+> **Estado empírico post-Run8 / Run9 (2026-08-29):** el plan se deja tal cual. Qué de Capa 0 ya está, qué incomplete es este run, y el corte 400–450 → `13-capa0-status-post-run8.md`.
 
 ---
 

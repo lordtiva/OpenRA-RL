@@ -5,6 +5,8 @@ auto_train.py — 1 comando que lanza rl.train y lo vigila (sin 2 ventanas).
 - Lanza rl.train --resume latest.pt (o iter0100.pt la primera vez)
 - Cada 15s chequea metrics.jsonl; si 5 min (300s) sin avanzar, mata el train
   y lo relanza solo desde latest.pt (no vuelve a 100).
+- Si 3 iters seguidas son política muerta (attack-spam, no_op-spam,
+  deploy-noop o H<0.15), copia best.pt -> latest.pt, resetea Adam y relanza.
 - Si el train termina solo (crash/iters completados), también lo relanza.
 - Log en consola + rl/auto_train.log
 - train.py sigue escribiendo latest.pt (dashboard + live). Además, tras cada
@@ -31,7 +33,7 @@ import subprocess, sys, time, pathlib, signal, os, json, re, urllib.request, shu
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from rl.best_ckpt import is_attack_spam_collapse
+from rl.best_ckpt import dead_policy_reason, is_dead_policy
 CKPT_DIR = ROOT / "rl" / "ckpts"
 METRICS = CKPT_DIR / "metrics.jsonl"
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
@@ -78,6 +80,10 @@ TRAIN_ARGS = [
     "--bot-type", "beginner",
     "--shaper-preset", "eradicate_v4",
     "--auto-support",
+    "--bc",
+    "--sil",
+    "--bc-warmup", "80",
+    "--lambda-sil", "0.5",
     "--gamma", "0.995",
     "--ckpt-dir", "rl/ckpts",
     "--metrics", "rl/ckpts/metrics.jsonl",
@@ -151,7 +157,13 @@ def last_metrics_rows(n: int = 3) -> list:
 
 
 def restore_best_over_latest() -> bool:
-    """Copy best.pt -> latest.pt so the next launch resumes the last good policy."""
+    """Copy best.pt -> latest.pt so the next launch resumes the last good policy.
+
+    Keeps the metrics iteration counter moving forward (patch ckpt['iteration']
+    to the last metrics iter) so we don't rewind 220..N and overwrite the new
+    run. Fresh Adam is requested via --reset-opt on the next launch, not by
+    mutating this file.
+    """
     best = CKPT_DIR / "best.pt"
     latest = CKPT_DIR / "latest.pt"
     if not best.exists():
@@ -160,7 +172,6 @@ def restore_best_over_latest() -> bool:
     try:
         shutil.copy2(best, tmp)
         os.replace(tmp, latest)
-        return True
     except OSError as e:
         log(f"restore best.pt FAIL: {e}")
         try:
@@ -169,6 +180,19 @@ def restore_best_over_latest() -> bool:
         except OSError:
             pass
         return False
+    rows = last_metrics_rows(1)
+    keep_iter = int(rows[-1]["iter"]) if rows else None
+    if keep_iter is None:
+        return True
+    try:
+        import torch
+        ckpt = torch.load(latest, map_location="cpu", weights_only=False)
+        ckpt["iteration"] = keep_iter
+        torch.save(ckpt, latest)
+        log(f"restore: pesos de best.pt, iteration parchada a {keep_iter}")
+    except Exception as e:
+        log(f"restore: copié best.pt pero no pude parchar iteration ({e})")
+    return True
 
 
 def metrics_mtime() -> float:
@@ -333,23 +357,25 @@ def recover_from_docker_hang(proc) -> subprocess.Popen:
     time.sleep(2)
     return launch_train()
 
-def launch_train() -> subprocess.Popen:
+def launch_train(extra_args=None) -> subprocess.Popen:
     urls = live_game_urls()
     n_srv = urls.count("http")
     args = list(TRAIN_ARGS)
     args[args.index("--url") + 1] = urls
     log(f"servidores de juego: {urls}  ({n_srv} daemon(s); 2do = compose scale openra-rl-2)")
     resume = find_resume()
+    extra_args = list(extra_args or [])
     if resume and pathlib.Path(resume).exists():
-        cmd = args + ["--resume", resume]
+        cmd = args + ["--resume", resume] + extra_args
         rel = pathlib.Path(resume)
         try:
             rel = rel.resolve().relative_to(ROOT)
         except Exception:
             pass
-        log(f"LANZANDO train --resume {rel}  (iters {TRAIN_ARGS[TRAIN_ARGS.index('--iters')+1]}, preset {TRAIN_ARGS[TRAIN_ARGS.index('--shaper-preset')+1]})")
+        extra_tag = (" " + " ".join(extra_args)) if extra_args else ""
+        log(f"LANZANDO train --resume {rel}{extra_tag}  (iters {TRAIN_ARGS[TRAIN_ARGS.index('--iters')+1]}, preset {TRAIN_ARGS[TRAIN_ARGS.index('--shaper-preset')+1]})")
     else:
-        cmd = args
+        cmd = args + extra_args
         log(f"LANZANDO train FROM SCRATCH (pesos aleatorios, sin --resume, iters {TRAIN_ARGS[TRAIN_ARGS.index('--iters')+1]})")
     # cwd=ROOT para que los paths relativos funcionen
     env = os.environ.copy()
@@ -427,11 +453,12 @@ def main():
                 last_progress = time.time()
                 gpu_low_streak = 0
                 rows = last_metrics_rows(COLLAPSE_STREAK)
+                reasons = [dead_policy_reason(r) for r in rows]
                 if (len(rows) >= COLLAPSE_STREAK
-                        and all(is_attack_spam_collapse(r) for r in rows)
+                        and all(is_dead_policy(r) for r in rows)
                         and (int(rows[-1]["iter"]) - last_restore_iter) >= COLLAPSE_COOLDOWN_ITERS):
                     its = [r["iter"] for r in rows]
-                    log(f"COLAPSO attack-spam — iters {its} rolling20=0 atk>90% own_b=0 — restaurando best.pt -> latest.pt")
+                    log(f"COLAPSO {reasons} — iters {its} — restaurando best.pt -> latest.pt + Adam fresco")
                     kill_train(proc)
                     if restore_best_over_latest():
                         last_restore_iter = int(rows[-1]["iter"])
@@ -439,7 +466,7 @@ def main():
                     else:
                         log("no hay best.pt — no pude restaurar, sigo")
                     time.sleep(2)
-                    proc = launch_train()
+                    proc = launch_train(extra_args=["--reset-opt"])
                     last_mtime = metrics_mtime()
                     last_progress = time.time()
                     gpu_low_streak = 0

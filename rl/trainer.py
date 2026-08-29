@@ -84,8 +84,14 @@ class PPOTrainer:
                     lp_new, entropy, value = self.net.evaluate_actions_seq(
                         seg, self.device)
                     if coef is None:
+                        h_mean = float(entropy.mean().item())
                         coef = self.ent_lo + self.ent_hi * max(
-                            0.0, 1.0 - float(entropy.mean().item()) / 2.0)
+                            0.0, 1.0 - h_mean / 2.0)
+                        # Near-collapse: the 0.05 ceiling cannot unstick a
+                        # peaked type-head. Bump the bonus while H is still
+                        # moving; H≈0 batches are skipped in train.py instead.
+                        if h_mean < 0.5:
+                            coef = max(coef, 0.15)
 
                     lp_old = torch.cat(
                         [s["action"]["log_prob"] for s in seg]).to(self.device)
@@ -132,6 +138,43 @@ class PPOTrainer:
                     [s["adv"] for s in samples])), 5), "n": len(samples)}
         return out
 
+    def imitation_update(self, samples: list, coef: float,
+                         epochs: int = 1, batch_size: int = 128) -> float:
+        """NLL de acciones élite / maestro (BC y SIL). No usa advantages."""
+        if not samples or coef <= 0.0:
+            return 0.0
+        ep0 = samples[0].get("_ep", 0)
+        segs, run = [], [samples[0]]
+        for s in samples[1:]:
+            if s.get("_ep", ep0) != run[0].get("_ep", ep0) or len(run) >= self.bptt_len:
+                segs.append(run)
+                run = [s]
+            else:
+                run.append(s)
+        if run:
+            segs.append(run)
+        if not segs:
+            return 0.0
+        segs_per_batch = max(1, int(round(batch_size / self.bptt_len)))
+        nlls = []
+        idx = np.arange(len(segs))
+        for _ in range(epochs):
+            np.random.shuffle(idx)
+            for start in range(0, len(segs), segs_per_batch):
+                mb = [segs[i] for i in idx[start:start + segs_per_batch]]
+                self.net.zero_grad(set_to_none=True)
+                loss = None
+                for seg in mb:
+                    lp, _, _ = self.net.evaluate_actions_seq(seg, self.device)
+                    nll = -lp.mean() / len(mb)
+                    loss = nll if loss is None else loss + nll
+                (coef * loss).backward()
+                torch.nn.utils.clip_grad_norm_(
+                    self.net.parameters(), self.max_grad_norm)
+                self.opt.step()
+                nlls.append(float(loss.item()))
+        return round(float(np.mean(nlls)), 5)
+
 
 def save_checkpoint(path: str, net, opt, iteration: int, extra: dict | None = None):
     ckpt = {"net": net.state_dict(), "opt": opt.state_dict(),
@@ -141,18 +184,24 @@ def save_checkpoint(path: str, net, opt, iteration: int, extra: dict | None = No
     torch.save(ckpt, path)
 
 
-def load_checkpoint(path: str, net, opt=None, vocab=None):
+def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False):
     """Restaura red/opt/iteración y — si el checkpoint lo trae — el VOCAB.
 
     F2 (auditoría 2026-08-24): antes se ignoraba ckpt["vocab"] y cada resume
     reconstruía el vocabulario en orden de aparición → los ids de la cabeza
     de ítems podían quedar BARAJADOS respecto a los pesos guardados (parte
     del fracaso del incentivo minero tras los reinicios del ritual).
+
+    reset_opt: leave Adam at fresh init (collapse restore). The moments of a
+    dead policy keep the type-head pinned even after weights are replaced.
     """
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
     net.load_state_dict(ckpt["net"])
-    if opt is not None and "opt" in ckpt:
+    do_reset = bool(reset_opt or ckpt.get("reset_opt"))
+    if opt is not None and "opt" in ckpt and not do_reset:
         opt.load_state_dict(ckpt["opt"])
+    elif do_reset:
+        print("[ckpt] Adam fresco (reset-opt)", flush=True)
     if vocab is not None and isinstance(ckpt.get("vocab"), dict):
         vocab.type_to_id = dict(ckpt["vocab"])
     return ckpt.get("iteration", 0)

@@ -16,15 +16,22 @@ Diseño:
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
 - Push keep-alive: si la política ya eligió army/attack_move, los ociosos de
   combate siguen hacia esa celda entre decisiones (APM de confort, como repair).
+- Asalto sostenido (Capa 0, corte Run9 iter 442): con proc+harv y ≥N rifles,
+  el entorno emite army_attack_move cada bloque aunque la red haya elegido
+  train/build. Sin esto el push nunca arranca (hist army ~0% a iter 443).
 
 No genera reward — evita defense_loss/hold_zero ya existentes.
 """
 
 from openra_env.models import ActionType, CommandModel
+from rl.obs_encoding import BEACON_BY_MAP
 
 # Tipos que el hard apaga cuando hay brownout (ai.yaml PowerDownBotModule)
 _POWER_DOWN_TYPES = {"dome", "tsla", "mslo", "atag", "stag"}
 _NON_COMBAT = ("harv", "mcv")
+# Don't march a 1-rifle scout; wait for a real army (Run7 collapse was
+# combat-without-eco; this gate is the army half of that lesson).
+MIN_ARMY_FOR_ASSAULT = 4
 
 def _place_near_base(obs):
     """A cell next to the construction yard / any own building (not a spawn rewrite)."""
@@ -35,6 +42,39 @@ def _place_near_base(obs):
     for u in getattr(obs, "units", None) or []:
         return int(u.cell_x) + 3, int(u.cell_y) + 1
     return 0, 0
+
+
+def _is_combat(u) -> bool:
+    ut = str(getattr(u, "type", "")).lower()
+    return not any(tag in ut for tag in _NON_COMBAT)
+
+
+def _combat_units(units):
+    return [u for u in units if _is_combat(u)]
+
+
+def _has_harvester(obs, eco, units, prod) -> bool:
+    if eco is not None and int(getattr(eco, "harvester_count", 0) or 0) > 0:
+        return True
+    if any("harv" in str(getattr(u, "type", "")).lower() for u in units):
+        return True
+    return any("harv" in str(getattr(p, "item", "")).lower() for p in prod)
+
+
+def _push_cell(obs, last_push):
+    """Celda de asalto: último push de la política, si no enemigo visible, si no beacon."""
+    if last_push is not None:
+        return int(last_push[0]), int(last_push[1])
+    enemies = list(getattr(obs, "visible_enemies", None) or []) + list(
+        getattr(obs, "visible_enemy_buildings", None) or [])
+    if enemies:
+        e = enemies[0]
+        return int(e.cell_x), int(e.cell_y)
+    map_name = str(getattr(getattr(obs, "map_info", None), "map_name", "") or "")
+    beacon = BEACON_BY_MAP.get(map_name)
+    if beacon is not None:
+        return int(beacon[0]), int(beacon[1])
+    return None
 
 
 def support_commands(obs, last_push=None, max_repairs: int = 2):
@@ -49,6 +89,17 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
     blds = getattr(obs, "buildings", []) or []
     units = getattr(obs, "units", []) or []
     cash = int(getattr(eco, "cash", 0) or 0) if eco else 0
+
+    # 0a) Auto-deploy MCV — without a conyard, auto-proc cannot fire and the
+    #     policy collapses to deploy-once-then-no_op (Run 8). Gratis for PPO.
+    has_fact = any(str(getattr(b, "type", "")).lower() in ("fact", "afac")
+                   for b in blds)
+    if not has_fact:
+        for u in units:
+            if "mcv" in str(getattr(u, "type", "")).lower():
+                out.append(CommandModel(
+                    action=ActionType.DEPLOY, actor_id=int(u.actor_id)))
+                break
 
     # 0) Auto-harvest — si harv está idle y hay proc, mandarlo a cosechar.
     #    Gratis para PPO (igual que repair): no roba decisión estratégica.
@@ -74,7 +125,9 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
         and float(getattr(p, "progress", 0) or 0) >= 1.0
         for p in prod
     )
-    if not has_proc:
+    if not has_fact:
+        pass  # wait for the deploy above; BUILD proc needs a conyard
+    elif not has_proc:
         if proc_ready:
             ax, ay = _place_near_base(obs)
             out.append(CommandModel(
@@ -83,11 +136,7 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
         elif (not proc_queued) and "proc" in avail and cash >= 2000:
             out.append(CommandModel(action=ActionType.BUILD, item_type="proc"))
     else:
-        has_harv = False
-        if eco is not None and int(getattr(eco, "harvester_count", 0) or 0) > 0:
-            has_harv = True
-        if not has_harv:
-            has_harv = any("harv" in str(getattr(u, "type", "")).lower() for u in units)
+        has_harv = _has_harvester(obs, eco, units, prod)
         harv_queued = any("harv" in str(getattr(p, "item", "")).lower() for p in prod)
         if (not has_harv) and (not harv_queued) and "harv" in avail:
             out.append(CommandModel(action=ActionType.TRAIN, item_type="harv"))
@@ -113,17 +162,24 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
                     out.append(CommandModel(action=ActionType.POWER_DOWN, actor_id=int(b.actor_id)))
                     break  # uno por bloque
 
-    # 3) Keep-alive de push. army_attack_move del C# mueve a todos EN ESE
-    #    bloque; entre decisiones (train/build/etc.) los rifles ociosos se
-    #    quedan parados. Si hay un destino de push vivo, re-emitimos
-    #    AttackMove a los idle de combate. Gratis para PPO.
-    if last_push is not None and has_proc:
+    # 3) Asalto sostenido + keep-alive. Gratis para PPO.
+    #    Con eco lista y ≥MIN_ARMY de combate, army_attack_move cada bloque
+    #    (el C# salta harvesters). No espera a que la red lo muestreé —
+    #    Run9 iters 340-443: army hist → 0% e incomplete 24%→60%.
+    #    Si aún no hay ejército, solo keep-alive del last_push de la política.
+    combat = _combat_units(units)
+    has_harv = _has_harvester(obs, eco, units, prod)
+    dest = _push_cell(obs, last_push)
+    assault = (has_proc and has_harv and dest is not None
+               and len(combat) >= MIN_ARMY_FOR_ASSAULT)
+    if assault:
+        px, py = dest
+        out.append(CommandModel(
+            action=ActionType.ARMY_ATTACK_MOVE, target_x=px, target_y=py))
+    elif last_push is not None and has_proc:
         px, py = last_push
         n_push = 0
-        for u in units:
-            ut = str(getattr(u, "type", "")).lower()
-            if any(tag in ut for tag in _NON_COMBAT):
-                continue
+        for u in combat:
             if not bool(getattr(u, "is_idle", False)):
                 continue
             out.append(CommandModel(

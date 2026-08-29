@@ -102,6 +102,9 @@ def _preset_kwargs(preset: str) -> dict:
                         w_mining_rate=0.04, mining_rate_scale=1000.0, w_harvester_idle=0.01,
                         w_margin=1.0, margin_scale=3000.0, margin_on_truncate=False,
                         w_win=8.0, w_lose=2.5, w_timeout=1.0,
+                        # Run 8: naked 8k-tick death was -2.57, a failed fight
+                        # ~-6. Extra -4 makes "deploy then sit" worse than playing.
+                        w_no_econ_lose=4.0,
                     )
     if preset == "eradicate_v4b":
         # v4b — rompe meseta: paga recortar desventaja, no farmear base.
@@ -121,6 +124,7 @@ def _preset_kwargs(preset: str) -> dict:
                         w_mining_rate=0.02, mining_rate_scale=1000.0, w_harvester_idle=0.01,
                         w_margin=1.0, margin_scale=3000.0, margin_on_truncate=False,
                         w_win=8.0, w_lose=2.5, w_timeout=0.5,
+                        w_no_econ_lose=4.0,
                     )
     raise ValueError(f"preset desconocido: {preset!r} (validos: {PRESETS})")
 
@@ -168,6 +172,7 @@ class ShapedReward:
         self.w_first_ore = cfg.get("w_first_ore", 0.0)
         self.w_garrison = cfg.get("w_garrison", 0.0)
         self.w_naked_base = cfg.get("w_naked_base", 0.0)
+        self.w_no_econ_lose = cfg.get("w_no_econ_lose", 0.0)
         self._first_ore_paid = False
         # en v2/v3/v4 el raze se paga por VALOR del global_summary (no counting)
         self._raze_by_value = preset in ("eradicate_v2", "eradicate_v3", "eradicate_v4")
@@ -200,6 +205,7 @@ class ShapedReward:
             "spread": 0.0, "defense_loss": 0.0, "hold_zero": 0.0, "produce": 0.0,
             "cancel_penalty": 0.0,
             "garrison": 0.0, "early_refinery": 0.0, "first_ore": 0.0,
+            "no_econ_lose": 0.0,
         }
 
     def reset(self, obs):
@@ -291,6 +297,8 @@ class ShapedReward:
         if done and not self._margin_paid:
             r_win, r_margin = self._pay_declared(obs, mil)
             r += r_win + r_margin
+            if (getattr(obs, "result", "") or "").lower() == "lose":
+                r += self._apply_no_econ_lose()
 
         self.last_components["combat"] += r_combat
         self.last_components["assets"] += r_assets
@@ -334,8 +342,9 @@ class ShapedReward:
             return r_win + r_margin
         if res == "lose":
             self.last_components["margin"] += -self.w_lose
+            extra = self._apply_no_econ_lose()
             self._margin_paid = True
-            return -self.w_lose
+            return -self.w_lose + extra
         if truncated:
             r = 0.0
             if self.margin_on_truncate and self._last_mil is not None:
@@ -364,6 +373,20 @@ class ShapedReward:
         # margen-al-truncar por la puerta de atras.
         self._margin_paid = True
         return 0.0, 0.0
+
+    def _apply_no_econ_lose(self) -> float:
+        """Extra terminal cost if the episode lost without ever standing a proc
+        or delivering ore. Makes the Run 8 'deploy then sit' local optimum
+        (~-2.57) worse than a failed game that at least mined."""
+        if not self.w_no_econ_lose:
+            return 0.0
+        if self._refinery_paid or self._first_ore_paid:
+            return 0.0
+        if self.last_components.get("no_econ_lose"):
+            return 0.0
+        r = -float(self.w_no_econ_lose)
+        self.last_components["no_econ_lose"] += r
+        return r
 
     def _win_terms(self, mil):
         if mil is None:
