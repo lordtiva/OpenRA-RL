@@ -166,6 +166,8 @@ class PPOTrainer:
                 loss = None
                 for seg in mb:
                     lp, _, _ = self.net.evaluate_actions_seq(seg, self.device)
+                    # Dest ilegal (agua) daba logit -1e9 → sil_nll ~7e6 (Run 13).
+                    lp = lp.clamp(min=-20.0)
                     nll = -lp.mean() / len(mb)
                     loss = nll if loss is None else loss + nll
                 (coef * loss).backward()

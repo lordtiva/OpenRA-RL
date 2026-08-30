@@ -260,7 +260,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     last_push_cell = (int(c0.target_x), int(c0.target_y))
             # Pilar B: autonomía de soporte (0 decisiones, gratis para PPO)
             if auto_support:
-                for cmd in support_commands(obs, last_push=last_push_cell):
+                for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx):
                     action.commands.append(cmd)
             pending_cmd = action
             # F1: al buffer van los ÍNDICES EFECTIVOS (los de la acción que

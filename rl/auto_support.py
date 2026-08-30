@@ -34,11 +34,15 @@ Diseño:
   NO re-ordenar mid-map ni un asalto a enemigo visible (visor 817).
 - Crédito de dest: apply_dest_credit reescribe cell_flat de army/attack_move
   al dest de soporte ANTES del buffer PPO/SIL (el win no acredita click en casa).
+  El dest se remapea a celda pasable; hunt en agua era sil_nll ~1e9/128 (Run 13).
+- Rally al dest en tents/weap (Capa 0): los e1 salen caminando, no idle en el tent.
+- Stance AttackAnything al nacer (Capa 0): Defend no caza; el scripted sí.
 
 No genera reward — evita defense_loss/hold_zero ya existentes.
 """
 
 from openra_env.models import ActionType, CommandModel
+from rl.action_adapter import nearest_passable, remap_move_cell
 from rl.obs_encoding import resolve_beacon
 
 # Tipos que el hard apaga cuando hay brownout (ai.yaml PowerDownBotModule)
@@ -57,7 +61,7 @@ STRAY_FROM_BEACON = 20
 DEFEND_CELLS = 18
 HUNT_PERIOD_TICKS = 1600  # ~20 macro decisions; infantry can walk a waypoint
 # Water on Singles is y≳40. Stay on the enemy half (never last_push / home ore).
-HUNT_Y_MAX = 36
+HUNT_Y_MAX = 32  # water on Singles is y≳40; 36 still pisa mask (SIL -1e9)
 HUNT_X_MIN = 40
 HUNT_OFFSETS = (
     (0, 14),
@@ -180,6 +184,43 @@ def _cmd_name(cmd) -> str:
 
 
 COMBAT_PUSH_TYPES = frozenset({"army_attack_move", "attack_move"})
+STANCE_ATTACK_ANYTHING = 3
+_RALLY_BUILDINGS = frozenset({
+    "tent", "barr", "weap", "hpad", "kenn", "spen", "syrd", "afld",
+})
+_NO_SELL = frozenset({"fact", "afac", "proc"})
+SELL_HP = 0.12
+
+
+def _snap_passable(obs, dest, aidx=None):
+    """Dest de soporte/hunt en tierra. Hunt y=36 era agua → sil_nll 7e6."""
+    if dest is None:
+        return None
+    x, y = int(dest[0]), int(dest[1])
+    if aidx is not None:
+        return remap_move_cell(obs, aidx, x, y)
+    info = getattr(obs, "map_info", None)
+    w = int(getattr(info, "width", 128) or 128)
+    h = int(getattr(info, "height", 64) or 64)
+    x = min(max(x, 0), max(0, w - 1))
+    y = min(max(y, 0), min(max(0, h - 1), HUNT_Y_MAX))
+    return int(x), int(y)
+
+
+def _cell_mask_ok(aidx, cell_flat) -> bool:
+    mask = getattr(aidx, "cell_mask", None)
+    if mask is None:
+        return True
+    try:
+        import torch
+        m = mask.reshape(-1)
+        i = int(cell_flat)
+        if i < 0 or i >= int(m.numel() if torch.is_tensor(m) else len(m)):
+            return False
+        v = m[i]
+        return bool(v.item() if torch.is_tensor(v) else v)
+    except (TypeError, ValueError, IndexError, RuntimeError):
+        return True
 
 
 def apply_dest_credit(obs, action, type_name, cell_flat, aidx, last_push=None):
@@ -194,6 +235,7 @@ def apply_dest_credit(obs, action, type_name, cell_flat, aidx, last_push=None):
     if type_name not in COMBAT_PUSH_TYPES:
         return int(cell_flat), None
     dest = _push_cell(obs, last_push)
+    dest = _snap_passable(obs, dest, aidx)
     if dest is None:
         return int(cell_flat), None
     w = int(getattr(aidx, "w", 0) or 0)
@@ -204,6 +246,8 @@ def apply_dest_credit(obs, action, type_name, cell_flat, aidx, last_push=None):
     if h > 0:
         y = min(max(y, 0), h - 1)
     new_flat = (int(y) * w + int(x)) if w > 0 else int(cell_flat)
+    if not _cell_mask_ok(aidx, new_flat):
+        return int(cell_flat), None
     for c in getattr(action, "commands", None) or []:
         if _cmd_name(c) in COMBAT_PUSH_TYPES:
             c.target_x = x
@@ -272,7 +316,7 @@ def _push_cell(obs, last_push):
     return None
 
 
-def support_commands(obs, last_push=None, max_repairs: int = 2):
+def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
 
     """Lista de CommandModel de soporte para esta observación.
 
@@ -347,6 +391,16 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
                 out.append(CommandModel(action=ActionType.REPAIR, actor_id=int(b.actor_id)))
                 repairs += 1
 
+    # 1b) Sell wrecks (not fact/proc). APM tonto; no cabe en la política.
+    for b in blds:
+        t = str(getattr(b, "type", "")).lower()
+        if t in _NO_SELL:
+            continue
+        hp = float(getattr(b, "hp_percent", 1.0) or 1.0)
+        if hp < SELL_HP:
+            out.append(CommandModel(action=ActionType.SELL, actor_id=int(b.actor_id)))
+            break
+
     # 2) Auto-power_down — solo si balance negativo
     if eco is not None:
         provided = int(getattr(eco, "power_provided", 0) or 0)
@@ -367,7 +421,9 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
     #      caminando (Run 12: post-recall el viaje a casa no se cancelaba).
     combat = _combat_units(units)
     has_harv = _has_harvester(obs, eco, units, prod)
-    dest = _push_cell(obs, last_push)
+    raw_dest = _push_cell(obs, last_push)
+    waypoint = _is_beacon_or_hunt(obs, raw_dest)
+    dest = _snap_passable(obs, raw_dest, aidx)
     defending = bool(home_raid_targets(obs))
     assault = (has_proc and has_harv and dest is not None
                and len(combat) >= MIN_ARMY_FOR_ASSAULT)
@@ -382,7 +438,7 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
             and not defending
             and n_at_dest < MIN_ARMY_FOR_ASSAULT
             and n_home >= MIN_ARMY_FOR_ASSAULT
-            and _is_beacon_or_hunt(obs, dest)
+            and waypoint
         )
         if recall or reassault or (assault and len(idles) >= MIN_ARMY_FOR_ASSAULT):
             out.append(CommandModel(
@@ -399,5 +455,34 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
                 n_push += 1
                 if n_push >= 16:
                     break
+
+    # 4) Rally al dest — e1 spawnea y camina (Capa 0, no la política).
+    if dest is not None and has_proc:
+        px, py = dest
+        for b in blds:
+            if str(getattr(b, "type", "")).lower() not in _RALLY_BUILDINGS:
+                continue
+            rx = int(getattr(b, "rally_x", -1) if getattr(b, "rally_x", -1) is not None else -1)
+            ry = int(getattr(b, "rally_y", -1) if getattr(b, "rally_y", -1) is not None else -1)
+            if rx == int(px) and ry == int(py):
+                continue
+            out.append(CommandModel(
+                action=ActionType.SET_RALLY_POINT,
+                actor_id=int(b.actor_id),
+                target_x=int(px),
+                target_y=int(py),
+            ))
+            break
+
+    # 5) Stance AttackAnything al nacer (Defend no caza).
+    for u in combat:
+        st = int(getattr(u, "stance", STANCE_ATTACK_ANYTHING) or 0)
+        if st != STANCE_ATTACK_ANYTHING:
+            out.append(CommandModel(
+                action=ActionType.SET_STANCE,
+                actor_id=int(u.actor_id),
+                target_x=STANCE_ATTACK_ANYTHING,
+            ))
+            break
 
     return out

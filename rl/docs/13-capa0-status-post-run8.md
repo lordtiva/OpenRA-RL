@@ -22,6 +22,8 @@
 > **Corte 935 (Run 11 paliza easy):** 35 iters, **0/140** (lose 95%, incomplete 5%, 0 wins). Lose media 14k ticks, `defense_loss`≈−4 plano, cosecha easy ~3×, H sana (~1.2: no es colapso Run 8). El dest “defend” existía pero **no cancelaba el path**: el blob caminaba al beacon y el easy razeaba la casa. El crédito de dest tampoco: PPO/SIL veían click en casa. **No Capa 2.** Archivo: `rl/ckpts/Run 11 (a_short capa1 easy 901-935)/`. Resume `best.pt` **899** vs **beginner**. Parches de este corte: (1) `apply_dest_credit` — `cell_flat` de `army_attack_move`/`attack_move` = dest de soporte; (2) defend recall — raid en casa re-emite `army_attack_move` aunque el blob ya camine, salvo que ya estén peleando ahí. Bar: wr20 vs beginner ≥0.40 en ~20+ iters y visor `last_push` ≈ `support_dests`. Capa 2 (transformer) **después** de eso.
 >
 > **Corte 977 (Run 12 dest-credit):** 78 iters, wr 0.19, **incomplete ~70%** plano, wr20 0.20, 0 tandas 4/4, `best.pt` sigue 899. El visor 915–921: `last_push=[95,11]` (crédito OK) pero el blob oscila x=40–50 hasta timeout. Causa: after recall el dest vuelve a beacon y **no se re-emite** `army_attack_move` (unidades caminando a casa). Archivo: `rl/ckpts/Run 12 (a_short dest-credit beginner 900-977)/`. Resume **899**. Parche: re-asalto si dest es beacon/hunt, ≥4 combate en casa y <4 en dest. No Capa 2. Bar: incomplete <40% y wr20 ≥0.40.
+>
+> **Corte 923 (Run 13 SIL bomba):** re-asalto no se pudo juzgar. `sil_nll` 2–4 → **7.8e6** (`1e9/128` = un dest en celda con logit −1e9). Hunt `y=36` pisa agua. `pi_loss` 1e24–1e28, `grad_norm` inf, incomplete 75%. Archivo: `rl/ckpts/Run 13 (a_short reassault sil-bomb 900-923)/`. Resume **899**. Este corte: (1) dest/hunt → `remap_move_cell` + skip si sigue tapada; SIL `lp.clamp(-20)`; `HUNT_Y_MAX` 36→32. (2) **Capa 0 de la tabla órdenes:** rally al dest en tent/weap + stance AttackAnything al nacer + sell hp&lt;12% (no fact/proc). No Capa 2.
 
 ---
 
@@ -213,16 +215,16 @@ El C# (`ActionHandler`) ya traduce casi todo lo que usa `examples/scripted_bot.p
 
 Cortes (un régimen por vez):
 
-1. **Ahora:** re-asalto post-recall (corte 977). No toques rally en el mismo resume.
-2. **Siguiente Capa 0** (cuando el incomplete del re-asalto baje o se estanque): rally al dest + stance AttackAnything al spawn. Sell si entra barato. **Antes de Capa 2.**
+1. **Hecho (corte 923):** dest pasable (SIL) + rally al dest + stance AttackAnything al spawn + sell ruinas. Resume 899.
+2. **Siguiente:** juzgar incomplete/wr20. Si el blob sigue idle en el tent, el rally no está pegando (visor: `set_rally_point`). No Capa 2 todavía.
 3. **Capa 2:** transformer + scatter + `celda|unidad`. APC / guard-aprendido **después**, corte aparte.
 4. **Capa 3:** easy / self-play. Cero de esta lista pendiente.
 
 | Orden | Dónde | Cuándo | Notas |
 |---|---|---|---|
-| `set_rally_point` | **support**, no la red | **Capa 0, el corte después de que el re-asalto se vea** (antes de Capa 2) | e1 spawnea en el tent e idle. Rally al dest = caminan solos. Es el asalto sostenido que el 12 ya pidió. |
-| `set_stance` AttackAnything al nacer | **support** (`set_stance` ya está en el mask; casi no se usa) | **Mismo corte Capa 0 que el rally** | El scripted lo pone. Hoy Defend = disparan en rango, no cazan. One-liner al spawn, no lo aprende PPO. |
-| `sell` HP muy baja | **support** (como repair) | Mismo corte Capa 0, o el siguiente si el rally ya cerró incomplete | El C# ya vende. No merece cabeza de política. |
+| `set_rally_point` | **support**, no la red | **Hecho corte 923** | e1 spawnea y camina al dest. Un rally/bloque si `rally_x/y` ≠ dest. |
+| `set_stance` AttackAnything al nacer | **support** | **Hecho corte 923** | `target_x=3` si `stance≠3`. Un unit/bloque. |
+| `sell` HP muy baja | **support** (como repair) | **Hecho corte 923** | hp&lt;0.12, no fact/proc. Un sell/bloque. |
 | `guard` | **no es tipo nuevo ahora** | Capa 0 ya tiene recall a casa. “Dejá 2 en la fact” = regla de dest, no `GUARD` | A la política, **después de Capa 2** (unidad + edificio). |
 | `set_primary` | **no** | Solo si TRAIN pega a un solo tent | El C# recorre colas y manda al primer edificio que pueda. Con 16 tents no es el cuello. |
 | `enter_transport` / `unload` | política, **después del pointer** | **Capa 2 cerrada** (smoke 20 iters, `last_push` sigue al sujeto) **y** wr20 vs beginner ≥0.40 | Sin `celda\|unidad` el APC es un click a Ch6. No es Capa 0. Mask v0 los tiene apagados a propósito. |
@@ -322,4 +324,4 @@ Ckpts del Run 8: `rl/ckpts/Run 8 (a_short collapse no_op 220-408)/`. Resume vivo
 
 ---
 
-*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 977: re-asalto. Órdenes vs scripted ancladas a capa (rally/stance = Capa 0 support, APC = post Capa 2).*
+*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 923: dest pasable + rally/stance/sell (Run 13 SIL archivado).*

@@ -281,7 +281,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                     last_push_cell = (int(c0.target_x), int(c0.target_y))
                     _remember_cell(trace["policy_push_cells"], last_push_cell)
             if args.auto_support:
-                for cmd in support_commands(obs, last_push=last_push_cell):
+                for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx):
                     action.commands.append(cmd)
                     name = getattr(getattr(cmd, "action", None), "value", None) or str(
                         getattr(cmd, "action", ""))

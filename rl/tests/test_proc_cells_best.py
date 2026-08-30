@@ -22,7 +22,9 @@ from rl.action_adapter import (
     remap_move_cell,
 )
 from openra_env.models import ActionType, CommandModel, OpenRAAction
-from rl.auto_support import HUNT_OFFSETS, apply_dest_credit, support_commands
+from rl.auto_support import (
+    HUNT_OFFSETS, STANCE_ATTACK_ANYTHING, apply_dest_credit, support_commands,
+)
 from rl.best_ckpt import (
     batch_is_dead,
     dead_policy_reason,
@@ -50,9 +52,10 @@ def _u(actor_id=1, typ="e1", x=12, y=16, idle=True):
               is_idle=idle, hp_percent=1.0, can_attack=True)
 
 
-def _b(typ="fact", actor_id=10, x=12, y=16):
+def _b(typ="fact", actor_id=10, x=12, y=16, hp=1.0):
     return NS(type=typ, actor_id=actor_id, cell_x=x, cell_y=y,
-              hp_percent=1.0, is_repairing=False, is_powered=True)
+              hp_percent=hp, is_repairing=False, is_powered=True,
+              rally_x=-1, rally_y=-1)
 
 
 def _obs(*, cash=5000, harv=0, bldgs=("fact",), units=None, prod=(),
@@ -281,6 +284,49 @@ _flat_r, xy_r = apply_dest_credit(
          enemies=[_u(99, "e1", 14, 17)]),
     act_raid, "army_attack_move", home_flat, aidx_cred)
 check("credit dest en raid = celda del raid", xy_r == (14, 17))
+grid_w = np.ones((64, 128), dtype=np.float32)
+grid_w[40:, :] = 0.0
+aidx_wat = NS(w=128, h=64, pass_grid=grid_w, cell_mask=grid_w.reshape(-1) > 0.5)
+obs_wat = _obs(h=64, w=128, map_name="no-beacon", harv=1,
+               bldgs=("fact", "proc"), units=army4)
+act_wat = OpenRAAction(commands=[CommandModel(
+    action=ActionType.ARMY_ATTACK_MOVE, target_x=12, target_y=16)])
+_flat_w, xy_w = apply_dest_credit(
+    obs_wat, act_wat, "army_attack_move", home_flat, aidx_wat,
+    last_push=(0, 53))
+check("credit no deja dest en agua", xy_w is None or xy_w[1] < 40)
+cmds_rally = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc", "tent"), units=army4))
+check("rally de tent al beacon",
+      any(c.action.value == "set_rally_point" and c.target_x == 95
+          and c.target_y == 11 for c in cmds_rally))
+cmds_stance = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"),
+         units=[_u(i, "e1", 12 + i, 16) for i in range(1, 5)]
+         + [_u(9, "harv", 14, 16)]))
+# _u sin stance → getattr default AttackAnything, no spam
+check("sin campo stance no spamea set_stance",
+      not any(c.action.value == "set_stance" for c in cmds_stance))
+e1_def = [_u(i, "e1", 12 + i, 16) for i in range(1, 5)]
+for u in e1_def:
+    u.stance = 2
+cmds_aa = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"),
+         units=e1_def + [_u(9, "harv", 14, 16)]))
+check("Defend -> AttackAnything al nacer",
+      any(c.action.value == "set_stance" and c.target_x == STANCE_ATTACK_ANYTHING
+          for c in cmds_aa))
+cmds_sell = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4))
+# no wrecks
+check("no vende fact/proc sanos",
+      not any(c.action.value == "sell" for c in cmds_sell))
+wreck = _obs(harv=1, bldgs=("fact", "proc", "tent"), units=army4)
+wreck.buildings[-1].hp_percent = 0.05
+cmds_wreck = support_commands(wreck)
+check("vende tent en ruinas",
+      any(c.action.value == "sell" and c.actor_id == wreck.buildings[-1].actor_id
+          for c in cmds_wreck))
 army_walk = [_u(i, "e1", 12 + i, 16, idle=False) for i in range(1, 5)] + [
     _u(9, "harv", 14, 16)]
 cmds_walk = support_commands(
