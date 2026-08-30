@@ -28,6 +28,10 @@ Diseño:
 - Defend recall (Run 11): raid a ≤DEFEND_CELLS de un edificio propio cancela
   el path de asalto (army_attack_move de grupo aunque el blob ya camine).
   Sin eso el easy razeaba la casa vacía (defense_loss≈−4, 0/140).
+- Re-asalto (Run 12): si el dest volvió a beacon/hunt y el blob sigue en
+  casa caminando (post-recall), army_attack_move de grupo. Sin eso el blob
+  terminaba el viaje a casa y el episodio iba a timeout (incomplete ~70%).
+  NO re-ordenar mid-map ni un asalto a enemigo visible (visor 817).
 - Crédito de dest: apply_dest_credit reescribe cell_flat de army/attack_move
   al dest de soporte ANTES del buffer PPO/SIL (el win no acredita click en casa).
 
@@ -127,6 +131,31 @@ def _near_own_base(obs, xy, radius: int = DEFEND_CELLS) -> bool:
         except (TypeError, ValueError):
             continue
     return False
+
+
+def _n_combat_near_own_base(obs, combat, radius: int = DEFEND_CELLS) -> int:
+    n = 0
+    for u in combat or []:
+        try:
+            if _near_own_base(obs, _xy(u), radius):
+                n += 1
+        except (TypeError, ValueError):
+            continue
+    return n
+
+
+def _is_beacon_or_hunt(obs, dest) -> bool:
+    """True si dest es el waypoint de asalto (beacon/hunt), no un actor visible."""
+    if dest is None:
+        return False
+    beacon = resolve_beacon(obs)
+    if beacon is None:
+        return False
+    d = (int(dest[0]), int(dest[1]))
+    if d == (int(beacon[0]), int(beacon[1])):
+        return True
+    hx, hy = _hunt_cell(obs, beacon)
+    return d == (int(hx), int(hy))
 
 
 def home_raid_targets(obs):
@@ -332,9 +361,10 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
     #    Destino = raid-en-casa / edificio visible / unidad / hunt / beacon
     #    (no last_push). army_attack_move de grupo SOLO si hay ≥MIN_ARMY
     #    ociosos; si no, ATTACK_MOVE a ociosos (cap 16). Re-emitir el grupo
-    #    cada bloque cancelaba el path (visor) — EXCEPTO defend recall:
-    #    si el dest es un raid en casa y el blob no está ahí, hay que
-    #    cancelar el asalto (Run 11: walking-to-beacon + easy raze).
+    #    cada bloque cancelaba el path (visor) — EXCEPTO:
+    #    - defend recall: raid en casa y el blob no está ahí (Run 11).
+    #    - re-asalto: dest volvió a beacon/hunt y el blob sigue en casa
+    #      caminando (Run 12: post-recall el viaje a casa no se cancelaba).
     combat = _combat_units(units)
     has_harv = _has_harvester(obs, eco, units, prod)
     dest = _push_cell(obs, last_push)
@@ -345,8 +375,16 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
         px, py = dest
         idles = [u for u in combat if bool(getattr(u, "is_idle", False))]
         n_at_dest = _n_combat_at(combat, (px, py), ARRIVED_CELLS)
+        n_home = _n_combat_near_own_base(obs, combat)
         recall = bool(defending and combat and n_at_dest < MIN_ARMY_FOR_ASSAULT)
-        if recall or (assault and len(idles) >= MIN_ARMY_FOR_ASSAULT):
+        reassault = bool(
+            assault
+            and not defending
+            and n_at_dest < MIN_ARMY_FOR_ASSAULT
+            and n_home >= MIN_ARMY_FOR_ASSAULT
+            and _is_beacon_or_hunt(obs, dest)
+        )
+        if recall or reassault or (assault and len(idles) >= MIN_ARMY_FOR_ASSAULT):
             out.append(CommandModel(
                 action=ActionType.ARMY_ATTACK_MOVE, target_x=px, target_y=py))
         else:

@@ -20,6 +20,8 @@
 > **Corte ~900 → Capa 3 easy:** wr20 ≥0.50 **43 iters** (856–898), lose 4.7%, era 36.1%, `best.pt` 898 4/4 wr20 0.70. Incomplete vs beginner ~25%. Cumple el 12 (`wr>30%`). **Avance = `--bot-type easy`**, misma red / asalto / SIL. **No Capa 2.** Antes de easy: dest defiende si hay enemigo a ≤18 de un edificio propio (el stray-ignore del beginner ignoraba raids en casa). `resolve_beacon` también en `_batch_of`. Restore: `best.pt` 898. Archivo: `rl/ckpts/Run 10 (a_short capa1 beginner 604-900)/`. Expectativa: wr20 se cae (easy pega); si lose>25% por 15 iters → restore 898.
 >
 > **Corte 935 (Run 11 paliza easy):** 35 iters, **0/140** (lose 95%, incomplete 5%, 0 wins). Lose media 14k ticks, `defense_loss`≈−4 plano, cosecha easy ~3×, H sana (~1.2: no es colapso Run 8). El dest “defend” existía pero **no cancelaba el path**: el blob caminaba al beacon y el easy razeaba la casa. El crédito de dest tampoco: PPO/SIL veían click en casa. **No Capa 2.** Archivo: `rl/ckpts/Run 11 (a_short capa1 easy 901-935)/`. Resume `best.pt` **899** vs **beginner**. Parches de este corte: (1) `apply_dest_credit` — `cell_flat` de `army_attack_move`/`attack_move` = dest de soporte; (2) defend recall — raid en casa re-emite `army_attack_move` aunque el blob ya camine, salvo que ya estén peleando ahí. Bar: wr20 vs beginner ≥0.40 en ~20+ iters y visor `last_push` ≈ `support_dests`. Capa 2 (transformer) **después** de eso.
+>
+> **Corte 977 (Run 12 dest-credit):** 78 iters, wr 0.19, **incomplete ~70%** plano, wr20 0.20, 0 tandas 4/4, `best.pt` sigue 899. El visor 915–921: `last_push=[95,11]` (crédito OK) pero el blob oscila x=40–50 hasta timeout. Causa: after recall el dest vuelve a beacon y **no se re-emite** `army_attack_move` (unidades caminando a casa). Archivo: `rl/ckpts/Run 12 (a_short dest-credit beginner 900-977)/`. Resume **899**. Parche: re-asalto si dest es beacon/hunt, ≥4 combate en casa y <4 en dest. No Capa 2. Bar: incomplete <40% y wr20 ≥0.40.
 
 ---
 
@@ -295,4 +297,4 @@ Ckpts del Run 8: `rl/ckpts/Run 8 (a_short collapse no_op 220-408)/`. Resume vivo
 
 ---
 
-*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 935: dest credit + defend recall, resume 899 vs beginner (Run 11 easy archivado).*
+*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 977: re-asalto post-recall, resume 899 (Run 12 dest-credit archivado).*

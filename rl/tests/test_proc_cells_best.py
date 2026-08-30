@@ -288,6 +288,19 @@ cmds_walk = support_commands(
          enemies=[_u(99, "e1", 90, 12)]))
 check("no re-emite army_attack si el blob ya camina",
       not any(c.action.value in ("army_attack_move", "attack_move") for c in cmds_walk))
+army_walk_home = [_u(i, "e1", 12 + i, 16, idle=False) for i in range(1, 5)] + [
+    _u(9, "harv", 14, 16)]
+cmds_reassault = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_walk_home))
+check("re-asalto: blob en casa caminando (post-recall) va al beacon",
+      any(c.action.value == "army_attack_move" and c.target_x == 95
+          and c.target_y == 11 for c in cmds_reassault))
+army_mid = [_u(i, "e1", 48 + i, 20, idle=False) for i in range(1, 5)] + [
+    _u(9, "harv", 50, 20)]
+cmds_mid = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_mid))
+check("mid-map caminando al beacon: no re-order (visor 817)",
+      not any(c.action.value in ("army_attack_move", "attack_move") for c in cmds_mid))
 army_mix = [_u(1, "e1", 12, 16, idle=True)] + [
     _u(i, "e1", 12 + i, 16, idle=False) for i in range(2, 5)] + [_u(9, "harv", 14, 16)]
 cmds_mix = support_commands(
