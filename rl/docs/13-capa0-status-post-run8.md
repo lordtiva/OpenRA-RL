@@ -207,6 +207,31 @@ No es `win_early`: el engine tiene razón, quedan edificios. No tocar la red.
 
 ---
 
+## Órdenes vs scripted — cuándo, no “después”
+
+El C# (`ActionHandler`) ya traduce casi todo lo que usa `examples/scripted_bot.py`. El agujero no es el puente: es **quién aprieta el botón**. El scripted emite 12 prioridades por tick; la red emite **1** cada ~80 ticks. APM tonto va a `auto_support` (Capa 0). Lo que necesita “esta unidad, ese actor” espera al pointer (Capa 2). **No** meter tipos nuevos en `ENABLED_TYPES` para que PPO los aprenda. **No** hay Capa 4: el plan es 0→1→2→3. Nada de esta lista puede llegar a Capa 3 pendiente.
+
+Cortes (un régimen por vez):
+
+1. **Ahora:** re-asalto post-recall (corte 977). No toques rally en el mismo resume.
+2. **Siguiente Capa 0** (cuando el incomplete del re-asalto baje o se estanque): rally al dest + stance AttackAnything al spawn. Sell si entra barato. **Antes de Capa 2.**
+3. **Capa 2:** transformer + scatter + `celda|unidad`. APC / guard-aprendido **después**, corte aparte.
+4. **Capa 3:** easy / self-play. Cero de esta lista pendiente.
+
+| Orden | Dónde | Cuándo | Notas |
+|---|---|---|---|
+| `set_rally_point` | **support**, no la red | **Capa 0, el corte después de que el re-asalto se vea** (antes de Capa 2) | e1 spawnea en el tent e idle. Rally al dest = caminan solos. Es el asalto sostenido que el 12 ya pidió. |
+| `set_stance` AttackAnything al nacer | **support** (`set_stance` ya está en el mask; casi no se usa) | **Mismo corte Capa 0 que el rally** | El scripted lo pone. Hoy Defend = disparan en rango, no cazan. One-liner al spawn, no lo aprende PPO. |
+| `sell` HP muy baja | **support** (como repair) | Mismo corte Capa 0, o el siguiente si el rally ya cerró incomplete | El C# ya vende. No merece cabeza de política. |
+| `guard` | **no es tipo nuevo ahora** | Capa 0 ya tiene recall a casa. “Dejá 2 en la fact” = regla de dest, no `GUARD` | A la política, **después de Capa 2** (unidad + edificio). |
+| `set_primary` | **no** | Solo si TRAIN pega a un solo tent | El C# recorre colas y manda al primer edificio que pueda. Con 16 tents no es el cuello. |
+| `enter_transport` / `unload` | política, **después del pointer** | **Capa 2 cerrada** (smoke 20 iters, `last_push` sigue al sujeto) **y** wr20 vs beginner ≥0.40 | Sin `celda\|unidad` el APC es un click a Ch6. No es Capa 0. Mask v0 los tiene apagados a propósito. |
+| `surrender` | **nunca** en la política | — | Mask apagado. El win lo declara el engine. |
+
+Ya cubierto en support (no reabrir): repair HP&lt;35%, harvest idle, power_down brownout, deploy MCV, auto-proc/harv, `army_attack_move` de grupo, dest credit, defend recall, re-asalto.
+
+---
+
 ## Deuda de la cabeza de celda (para Capa 2 — no tocar ahora)
 
 Fuente: live 835–836 + `network.py` `dist_cell` + `11-revision-quisquillosa.md` + Capa 2 del doc 12. El chasis `AlphaLiteNet` es familia correcta para 1×2070. El click en casa es sesgo inductivo incompleto **más** crédito roto, no “tirar la red”.
@@ -297,4 +322,4 @@ Ckpts del Run 8: `rl/ckpts/Run 8 (a_short collapse no_op 220-408)/`. Resume vivo
 
 ---
 
-*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 977: re-asalto post-recall, resume 899 (Run 12 dest-credit archivado).*
+*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 977: re-asalto. Órdenes vs scripted ancladas a capa (rally/stance = Capa 0 support, APC = post Capa 2).*

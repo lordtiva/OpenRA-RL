@@ -64,6 +64,8 @@ cd C:\Users\lordc\Desktop\OpenRA-RL; .\.venv\Scripts\python.exe -m http.server 8
 |-----------|--------|
 | `winrate_rolling20 >0.6` en `beginner` (A) sostenido ~200 eps | Pasar a `--bot-type easy`. **Hecho ~900** (wr20≥0.50 ×43). Easy 901–935 = **0/140** (Run 11). Volver a beginner + dest credit; no Capa 2 todavía. Archivar con `rl/archive_run.py` antes de relanzar. |
 | wr20 ≥0.40 vs beginner y incomplete <40% (visor: blob llega al NE, no mill mid-map) | Capa 2 (transformer + scatter + `celda\|unidad`). Un PR. No easy hasta entonces. Dest-credit Run 12: crédito OK, incomplete 70% → re-asalto post-recall. |
+| Re-asalto no baja incomplete / blob sigue idle en el tent | **Capa 0, no Capa 2:** rally al dest + stance AttackAnything al spawn (`auto_support`). Tabla en `13-capa0-status-post-run8.md` *Órdenes vs scripted*. |
+| Capa 2 pointer ok (20 iters, `last_push` sigue al sujeto) y wr20 ≥0.40 | Recién ahí `enter_transport`/`unload` (y `guard` de política). No antes. |
 | `winrate >0.4` en `easy` + `harvest_edge` positivo | Pasar a `--bot-type medium` |
 | `winrate >0.3` en `medium` + `raze` y `n_buildings.enemy` bajando | Evaluar `hard` (=`normal`) |
 | Meseta sin `w_mass`/`w_tech` | Considerar Pilar C/D de `06-filosofia-rl.md` (escalar `military_ratio`, PBRS por Tier) |
