@@ -45,7 +45,28 @@ BEACON_BY_MAP = {
     "fase2_a.oramap": (95, 11),
     "fase2_amin160.oramap": (96, 10),
     "fase2_a_minus.oramap": (95, 11),
+    # ObservationSerializer writes world.Map.Title, not the filename.
+    # All fase2_*.oramap currently ship Title: Singles (live_games 2026-08-30).
+    "Singles": (95, 11),
 }
+
+
+def resolve_beacon(obs) -> tuple[int, int] | None:
+    """Beacon for this obs. Matches filename, Title ('Singles') or stem."""
+    info = getattr(obs, "map_info", None)
+    name = str(getattr(info, "map_name", "") or "")
+    if not name:
+        return None
+    hit = BEACON_BY_MAP.get(name)
+    if hit is not None:
+        return int(hit[0]), int(hit[1])
+    low = name.lower().replace("\\", "/").rsplit("/", 1)[-1]
+    for k, v in BEACON_BY_MAP.items():
+        kl = k.lower()
+        stem = kl[:-7] if kl.endswith(".oramap") else kl
+        if low == kl or low == stem or stem in low:
+            return int(v[0]), int(v[1])
+    return None
 
 
 def decode_spatial(spatial_b64: str, height: int, width: int, channels: int,

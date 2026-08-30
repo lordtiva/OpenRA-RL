@@ -21,7 +21,7 @@ import torch
 
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.network import TYPE_TO_IDX, build_type_masks
-from rl.obs_encoding import BEACON_BY_MAP, MAX_UNITS
+from rl.obs_encoding import BEACON_BY_MAP, MAX_UNITS, resolve_beacon
 
 # Tipos habilitados en v0.1 (el resto ni entra en la máscara)
 ENABLED_TYPES = {
@@ -196,8 +196,7 @@ def remap_move_cell(obs, aidx, cx: int, cy: int, actor_id: int = 0):
         e = min(enemies, key=lambda e: (int(e.cell_x) - cx) ** 2 + (int(e.cell_y) - cy) ** 2)
         return nearest_passable(int(e.cell_x), int(e.cell_y), grid, h, w)
 
-    map_name = str(getattr(getattr(obs, "map_info", None), "map_name", "") or "")
-    beacon = BEACON_BY_MAP.get(map_name)
+    beacon = resolve_beacon(obs)
     if beacon:
         return nearest_passable(int(beacon[0]), int(beacon[1]), grid, h, w)
 

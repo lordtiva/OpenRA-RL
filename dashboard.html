@@ -103,6 +103,15 @@
     <div class="card small accent-win"><div class="label">🏆 Win/ep</div><div class="value" id="c-win-badge">—</div><div class="sub">reward objetivo (+8)</div></div>
   </div>
 
+  <div class="cards secondary" id="capa1-cards" style="display:none">
+    <div class="card small"><div class="label">λ BC</div><div class="value" id="c-lbc" style="color:var(--purple)">—</div><div class="sub">1 → 0 en warmup</div></div>
+    <div class="card small"><div class="label">BC NLL</div><div class="value" id="c-bcnll">—</div><div class="sub" id="c-bc-sub">clonado del teacher</div></div>
+    <div class="card small"><div class="label">Teacher</div><div class="value" id="c-bcres" style="font-size:16px">—</div><div class="sub" id="c-bcn-sub">partida extra del scripted</div></div>
+    <div class="card small"><div class="label">SIL NLL</div><div class="value" id="c-silnll">—</div><div class="sub">clonado de élites</div></div>
+    <div class="card small"><div class="label">SIL batch</div><div class="value" id="c-siln">—</div><div class="sub">steps en el update</div></div>
+    <div class="card small"><div class="label">Elite buffer</div><div class="value" id="c-elite">—</div><div class="sub">cap 2000 · CPU</div></div>
+  </div>
+
   <div class="chart-card"><h2>Winrate (global + rodante 20)</h2><canvas id="ch-win"></canvas></div>
   <div class="chart-card"><h2>Reward medio por episodio</h2><canvas id="ch-reward"></canvas></div>
   <div class="chart-card"><h2>Componentes del reward — régimen <span class="pill" id="comp-preset">eradicate</span></h2><canvas id="ch-comp"></canvas></div>
@@ -111,6 +120,7 @@
   </div>
   <div class="chart-card"><h2>Valor económico medio por episodio — nosotros vs enemigo</h2><canvas id="ch-sup"></canvas></div>
   <div class="chart-card"><h2>Carrera económica — recaudación bruta y riqueza neta ($/kt)</h2><canvas id="ch-eco"></canvas></div>
+  <div class="chart-card" id="card-imitation" style="display:none"><h2>Capa 1 — NLL de imitación (BC teacher + SIL élites)</h2><canvas id="ch-imitation"></canvas></div>
   <div class="chart-card"><h2>Acciones por iter — qué hace la política (conteos)</h2><canvas id="ch-acc"></canvas></div>
   <div class="chart-card"><h2>Tasa de resolución — win / lose / incomplete por iter</h2><canvas id="ch-res"></canvas></div>
   <div class="chart-card"><h2>Edificios de cada bando al cierre — raze (conteos)</h2><canvas id="ch-raze"></canvas></div>
@@ -146,6 +156,13 @@ function fmtDur(s) {
   return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m`
        : m > 0  ? `${m}m ${String(s % 60).padStart(2, '0')}s`
        :          `${s}s`;
+}
+
+function lastNum(values) {
+  if (!values) return null;
+  for (let i = values.length - 1; i >= 0; i--)
+    if (values[i] != null) return values[i];
+  return null;
 }
 
 async function load() {
@@ -203,6 +220,42 @@ async function load() {
     rcLast.win != null && rcLast.win !== 0 ? '+' + rcLast.win.toFixed(2) : '0.00';
   document.getElementById('c-win-badge').style.color =
     rcLast.win > 0 ? 'var(--green)' : 'var(--muted)';
+
+  const hasCapa1 = rows.some(r =>
+    r.lambda_bc != null || r.bc_nll != null || r.sil_nll != null || r.elite_n != null);
+  document.getElementById('capa1-cards').style.display = hasCapa1 ? '' : 'none';
+  document.getElementById('card-imitation').style.display = hasCapa1 ? '' : 'none';
+  if (hasCapa1) {
+    const lbc = last.lambda_bc;
+    document.getElementById('c-lbc').textContent =
+      lbc == null ? '—' : Number(lbc).toFixed(2);
+    document.getElementById('c-lbc').style.color =
+      (lbc ?? 0) > 0.05 ? 'var(--purple)' : 'var(--muted)';
+    document.getElementById('c-bcnll').textContent =
+      last.bc_nll == null ? '—' : Number(last.bc_nll).toFixed(2);
+    const bcRes = last.bc_result;
+    const bcEl = document.getElementById('c-bcres');
+    bcEl.textContent = bcRes || '—';
+    bcEl.style.color = bcRes === 'win' ? 'var(--green)'
+      : bcRes === 'lose' ? 'var(--red)'
+      : bcRes === 'fail' ? 'var(--red)'
+      : 'var(--muted)';
+    document.getElementById('c-bcn-sub').textContent =
+      last.bc_n != null ? `${last.bc_n} steps del teacher` : 'partida extra del scripted';
+    document.getElementById('c-silnll').textContent =
+      last.sil_nll == null ? '—' : Number(last.sil_nll).toFixed(2);
+    document.getElementById('c-siln').textContent =
+      last.sil_n == null ? '—' : last.sil_n;
+    document.getElementById('c-elite').textContent =
+      last.elite_n == null ? '—' : last.elite_n;
+    const imitSeries = [
+      { name: 'bc_nll', color: '#bc8cff',
+        values: rows.map(r => r.bc_nll ?? null) },
+      { name: 'sil_nll', color: '#39c5cf',
+        values: rows.map(r => r.sil_nll ?? null) },
+    ].filter(s => s.values.some(v => v != null));
+    if (imitSeries.length) drawMulti('ch-imitation', imitSeries);
+  }
 
   drawTwo('ch-win',
           rows.map(r => r.winrate * 100), '#3fb950', 'global',
@@ -282,16 +335,25 @@ async function load() {
     drawChart('ch-pwin', rows.map(r => r.supremacy ? r.supremacy.p_win_est : null), '', '#39c5cf');
   }
 
-  // Acciones efectivas por iter (conteos): ver qué hace la política y si el
-  // remate (army_attack_move) aparece alguna vez frente a train/no_op.
-  const AC_DEFS = [['attack_move', '#f0883e'], ['attack', '#f85149'],
-                   ['train', '#3fb950'], ['no_op', '#8b98a9'],
-                   ['build', '#58a6ff'], ['move', '#39c5cf'],
-                   ['cancel_production', '#6e7681']];
-  const accSeries = AC_DEFS
-    .map(([k, col]) => ({ name: k, color: col,
+  // Acciones efectivas por iter: claves derivadas del jsonl (como reward
+  // components) para no perder army_attack_move / place_building / harvest.
+  const AC_COLORS = {
+    army_attack_move: '#f0883e', attack_move: '#ffa657', attack: '#f85149',
+    train: '#3fb950', no_op: '#8b98a9', build: '#58a6ff',
+    place_building: '#79c0ff', harvest: '#d29922', deploy: '#bc8cff',
+    move: '#39c5cf', cancel_production: '#6e7681',
+  };
+  const acKeys = [];
+  for (const k of Object.keys(AC_COLORS)) acKeys.push(k);
+  for (const r of rows) {
+    const h = r.action_hist;
+    if (!h) continue;
+    for (const k of Object.keys(h)) if (!acKeys.includes(k)) acKeys.push(k);
+  }
+  const accSeries = acKeys
+    .map((k, i) => ({ name: k, color: AC_COLORS[k] ?? PALETTE[i % PALETTE.length],
         values: rows.map(r => (r.action_hist ?? {})[k] ?? null) }))
-    .filter(s => s.values.some(v => v != null));
+    .filter(s => s.values.some(v => v != null && v !== 0));
   if (accSeries.length) {
     drawMulti('ch-acc', accSeries);
   } else {
@@ -371,11 +433,10 @@ function drawMulti(id, series) {
   // nosotros 424.12'). RHS se reserva a la derecha para esa leyenda.
   const rowH = 15, top = 8;
   ctx.font = '600 11px system-ui';
-  const labels = series.map(s => {
-    let lv = s.values[n - 1];
-    if (lv == null) for (let j = n - 1; j >= 0; j--) if (s.values[j] != null) { lv = s.values[j]; break; }
-    return `${s.name} ${(lv != null ? lv : 0).toFixed(2)}`;
-  });
+  const legend = series.map(s => ({ s, lv: lastNum(s.values) }))
+    .sort((a, b) => (b.lv ?? -Infinity) - (a.lv ?? -Infinity));
+  const labels = legend.map(({ s, lv }) =>
+    `${s.name} ${(lv != null ? lv : 0).toFixed(2)}`);
   const RHS = Math.ceil(Math.max(...labels.map(t => ctx.measureText(t).width), 96)) + 30;
   const X = i => pad + (w - 2 * pad - RHS) * i / (n - 1);
   const Y = v => h - pad - (h - 2 * pad) * (v - mn) / span;
@@ -399,9 +460,8 @@ function drawMulti(id, series) {
     if (li >= 0) { ctx.beginPath(); ctx.arc(X(li), Y(lv), 3.5, 0, 7); ctx.fillStyle = s.color; ctx.fill(); }
   }
 
-  // Leyenda en COLUMNA derecha (ancho dinámico: el RHS ya cubre el label más
-    // largo, así ninguno se trunca). Cada etiqueta = "nombre valor" + swatch.
-    series.forEach((s, i) => {
+  // Leyenda en COLUMNA derecha, mayor → menor por el último valor de cada serie.
+    legend.forEach(({ s }, i) => {
     const ty = top + i * rowH;
     const lx2 = w - RHS + 4;
     ctx.fillStyle = s.color;
@@ -470,17 +530,17 @@ function drawTwo(id, valsA, colA, nameA, valsB, colB, nameB, unit = '') {
     if (lastIdx >= 0) { ctx.beginPath(); ctx.arc(X(lastIdx, n), Y(values[lastIdx]), 3.5, 0, 7); ctx.fillStyle = color; ctx.fill(); }
   }
 
-  // Columna derecha, UN valor por serie (misma fila que en drawMulti).
+  // Columna derecha, mayor → menor por el último valor de cada serie.
   const rowH = 15, top = 8;
-  series.forEach(([values, color, idx], i) => {
+  const legend = series.map(([values, color]) => ({ values, color, lv: lastNum(values) }))
+    .sort((a, b) => (b.lv ?? -Infinity) - (a.lv ?? -Infinity));
+  legend.forEach(({ color, lv }, i) => {
     const ty = top + i * rowH;
     const lx2 = w - RHS + 4;
     ctx.fillStyle = color;
     ctx.fillRect(w - RHS + 4, ty + 1, 10, 3);
     ctx.font = '600 11px system-ui';
-    let v = values[values.length - 1];
-    if (v == null) for (let j = values.length - 1; j >= 0; j--) if (values[j] != null) { v = values[j]; break; }
-    ctx.fillText((v != null ? v : 0).toFixed(2) + unit, lx2 + 14, ty + 4);
+    ctx.fillText((lv != null ? lv : 0).toFixed(2) + unit, lx2 + 14, ty + 4);
   });
 
   // escala (no drawMulti la pinta así, pero los charts de 1-2 series la usan)

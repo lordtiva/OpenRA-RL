@@ -184,7 +184,8 @@ def save_checkpoint(path: str, net, opt, iteration: int, extra: dict | None = No
     torch.save(ckpt, path)
 
 
-def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False):
+def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False,
+                    extra_out: dict | None = None):
     """Restaura red/opt/iteración y — si el checkpoint lo trae — el VOCAB.
 
     F2 (auditoría 2026-08-24): antes se ignoraba ckpt["vocab"] y cada resume
@@ -204,4 +205,8 @@ def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False):
         print("[ckpt] Adam fresco (reset-opt)", flush=True)
     if vocab is not None and isinstance(ckpt.get("vocab"), dict):
         vocab.type_to_id = dict(ckpt["vocab"])
+    if extra_out is not None:
+        extra_out.clear()
+        if ckpt.get("bc_start_iter") is not None:
+            extra_out["bc_start_iter"] = int(ckpt["bc_start_iter"])
     return ckpt.get("iteration", 0)

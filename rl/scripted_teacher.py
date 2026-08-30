@@ -21,6 +21,32 @@ class ScriptedTeacher(ScriptedBot):
         "weap",
         "powr",
     ]
+    # 6 rifles no cierran a_short vs beginner; entrar en attack más tarde
+    # y seguir produciendo durante el push.
+    INFANTRY_TRAIN_TARGET = 16
+
+    def _handle_production(self, obs: OpenRAObservation) -> List[CommandModel]:
+        commands = super()._handle_production(obs)
+        if self.phase != "attack":
+            return commands
+        already_train = any(
+            getattr(getattr(c, "action", None), "value", None) == "train"
+            or str(getattr(c, "action", "")) == "train"
+            for c in commands
+        )
+        if already_train:
+            return commands
+        has_barracks = any(b.type in self.BARRACKS_TYPES for b in obs.buildings)
+        infantry_training = any(
+            p.queue_type == "Infantry" and p.progress < 0.99
+            for p in obs.production
+        )
+        if (has_barracks and not infantry_training
+                and self._can_produce_item(obs, "e1")
+                and obs.economy.cash >= 100):
+            commands.append(CommandModel(action=ActionType.TRAIN, item_type="e1"))
+            self._log("Training e1 (sustain during attack)")
+        return commands
 
     def _handle_combat(self, obs: OpenRAObservation) -> List[CommandModel]:
         commands: List[CommandModel] = []

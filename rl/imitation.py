@@ -5,6 +5,8 @@ SIL: mismo NLL sobre transiciones élite propias (win o raze>0).
 
 No sustituye a PPO: L = L_PPO + λ_bc L_BC + λ_sil L_SIL.
 λ_bc arranca en 1.0 y baja a 0 en --bc-warmup iters (kickstarting).
+El origen del warmup (bc_start_iter) se persiste en el ckpt: un resume no
+vuelve a λ=1.0.
 """
 from __future__ import annotations
 
@@ -13,8 +15,17 @@ from collections import deque
 import torch
 
 from rl.action_adapter import ENABLED_TYPES, TYPE_TO_IDX
+from rl.network import ACTION_TYPES
 from rl.roles import role_of
 from openra_env.models import ActionType, CommandModel
+
+# Eco / producción primero: si el teacher emite TRAIN y ARMY en el mismo
+# tick, clonar TRAIN. El asalto ya lo sostiene auto_support.
+_BC_PRIORITY = (
+    "train", "build", "place_building", "harvest", "deploy",
+)
+_BC_LAST = {"army_attack_move", "attack_move", "attack", "no_op"}
+_BC_COMBAT_CAP_TYPES = frozenset(_BC_LAST)
 
 
 def lambda_bc_at(it: int, start_iter: int, warmup: int = 80,
@@ -27,14 +38,69 @@ def lambda_bc_at(it: int, start_iter: int, warmup: int = 80,
     return float(start + (end - start) * t)
 
 
+def _cmd_name(c) -> str:
+    return getattr(getattr(c, "action", None), "value", None) or str(
+        getattr(c, "action", ""))
+
+
 def pick_bc_command(commands) -> CommandModel:
-    """Primera orden del maestro que la red v0.1 puede representar."""
+    """Orden clonable: TRAIN/BUILD/PLACE ganan a army_attack_move/no_op."""
+    enabled = []
     for c in commands or []:
-        name = getattr(getattr(c, "action", None), "value", None) or str(
-            getattr(c, "action", ""))
+        name = _cmd_name(c)
         if name in ENABLED_TYPES:
+            enabled.append((name, c))
+    if not enabled:
+        return CommandModel(action=ActionType.NO_OP)
+    for pref in _BC_PRIORITY:
+        for name, c in enabled:
+            if name == pref:
+                return c
+    for name, c in enabled:
+        if name not in _BC_LAST:
             return c
-    return CommandModel(action=ActionType.NO_OP)
+    return enabled[0][1]
+
+
+def sample_type_name(s: dict) -> str:
+    act = s.get("action") or {}
+    t = act.get("type")
+    if torch.is_tensor(t):
+        t = int(t.reshape(-1)[0].item())
+    try:
+        t = int(t)
+    except (TypeError, ValueError):
+        t = 0
+    if 0 <= t < len(ACTION_TYPES):
+        return ACTION_TYPES[t]
+    return "no_op"
+
+
+def _even_pick(group: list, cap: int) -> list:
+    if cap <= 0 or not group:
+        return []
+    if len(group) <= cap:
+        return list(group)
+    if cap == 1:
+        return [group[0]]
+    return [group[round(i * (len(group) - 1) / (cap - 1))] for i in range(cap)]
+
+
+def balance_bc_samples(samples: list, per_type_cap: int = 96,
+                       combat_cap: int = 64) -> list:
+    """Cap combat/no_op so a 600-step incomplete attack tape cannot drown TRAIN."""
+    if not samples:
+        return []
+    buckets: dict[str, list] = {}
+    for s in samples:
+        buckets.setdefault(sample_type_name(s), []).append(s)
+    picked = []
+    for name, group in buckets.items():
+        cap = combat_cap if name in _BC_COMBAT_CAP_TYPES else per_type_cap
+        picked.extend(_even_pick(group, cap))
+    order = {id(s): i for i, s in enumerate(samples)}
+    picked.sort(key=lambda s: order.get(id(s), 0))
+    return picked
 
 
 def command_to_indices(obs, cmd: CommandModel, aidx) -> tuple[int, int, int, int]:

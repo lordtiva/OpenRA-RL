@@ -11,9 +11,11 @@ from openra_env.models import ActionType, CommandModel
 from rl.action_adapter import ActionIndex, TYPE_TO_IDX, Vocab
 from rl.imitation import (
     EliteBuffer,
+    balance_bc_samples,
     command_to_indices,
     lambda_bc_at,
     pick_bc_command,
+    sample_type_name,
 )
 from rl.scripted_teacher import ScriptedTeacher
 
@@ -25,7 +27,8 @@ def _u(actor_id=1, typ="e1", x=12, y=16, idle=True):
 
 def _b(typ="fact", actor_id=10, x=12, y=16):
     return NS(type=typ, actor_id=actor_id, cell_x=x, cell_y=y,
-              hp_percent=1.0, is_repairing=False, is_powered=True)
+              hp_percent=1.0, is_repairing=False, is_powered=True,
+              can_produce=())
 
 
 def _obs(*, cash=5000, harv=0, bldgs=("fact",), units=None, prod=(),
@@ -69,6 +72,11 @@ cmds = [
 ]
 picked = pick_bc_command(cmds)
 check("pick salta GUARD, toma BUILD", picked.action == ActionType.BUILD)
+picked = pick_bc_command([
+    CommandModel(action=ActionType.ARMY_ATTACK_MOVE, target_x=90, target_y=10),
+    CommandModel(action=ActionType.TRAIN, item_type="e1"),
+])
+check("pick TRAIN gana a ARMY_ATTACK_MOVE", picked.action == ActionType.TRAIN)
 
 obs = _obs(harv=1, bldgs=("fact", "proc", "barr"),
            avail=("e1", "harv", "proc", "powr", "barr"),
@@ -107,6 +115,33 @@ check("raze flojo no entra", n_r == 0)
 th = ScriptedTeacher()
 check("teacher proc antes de barracks",
       th.BUILD_PRIORITY.index("proc") < th.BUILD_PRIORITY.index("barracks"))
+check("teacher army umbral > 6", th.INFANTRY_TRAIN_TARGET >= 16)
+th.phase = "attack"
+obs_atk = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    avail=("e1", "harv", "proc", "powr", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 22)],
+)
+prod_cmds = th._handle_production(obs_atk)
+check("teacher TRAIN en attack aunque ya hay 16+ e1",
+      any(c.action == ActionType.TRAIN for c in prod_cmds))
+
+import torch
+from rl.action_adapter import TYPE_TO_IDX as _T
+
+
+def _step(typ):
+    return {"action": {"type": torch.tensor([_T[typ]])}}
+
+
+tape = [_step("train")] * 12 + [_step("army_attack_move")] * 200
+bal = balance_bc_samples(tape, per_type_cap=20, combat_cap=40)
+n_army = sum(1 for s in bal if sample_type_name(s) == "army_attack_move")
+n_train = sum(1 for s in bal if sample_type_name(s) == "train")
+check("balance capea army", n_army == 40)
+check("balance conserva train", n_train == 12)
+check("balance no alarga", len(bal) == 52)
 
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS"))
 sys.exit(0 if ok else 1)

@@ -21,7 +21,7 @@ from rl.action_adapter import (
     owns_proc,
     remap_move_cell,
 )
-from rl.auto_support import support_commands
+from rl.auto_support import HUNT_OFFSETS, support_commands
 from rl.best_ckpt import (
     batch_is_dead,
     dead_policy_reason,
@@ -56,11 +56,12 @@ def _b(typ="fact", actor_id=10, x=12, y=16):
 
 def _obs(*, cash=5000, harv=0, bldgs=("fact",), units=None, prod=(),
          avail=("e1", "proc", "powr", "barr"), w=128, h=128,
-         map_name="fase2_a_short.oramap", enemies=(), enemy_bldgs=()):
+         map_name="fase2_a_short.oramap", enemies=(), enemy_bldgs=(),
+         tick=100):
     if units is None:
         units = [_u(1, "mcv", 12, 16)]
     return NS(
-        tick=100,
+        tick=tick,
         map_info=NS(height=h, width=w, map_name=map_name),
         economy=NS(cash=cash, ore=0, harvester_count=harv,
                    power_provided=100, power_drained=60, resource_capacity=5000),
@@ -191,6 +192,56 @@ cmds_beacon = support_commands(
 check("asalto sin enemigo visible usa beacon a_short",
       any(c.action.value == "army_attack_move" and c.target_x == 95 and c.target_y == 11
           for c in cmds_beacon))
+cmds_home = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4), last_push=(12, 16))
+check("asalto ignora last_push en casa, usa beacon",
+      any(c.action.value == "army_attack_move" and c.target_x == 95 and c.target_y == 11
+          for c in cmds_home))
+cmds_title = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4, map_name="Singles"),
+    last_push=(12, 16))
+check("asalto con Title=Singles (obs real) usa beacon, no last_push",
+      any(c.action.value == "army_attack_move" and c.target_x == 95 and c.target_y == 11
+          for c in cmds_title))
+army_at_beacon = [_u(i, "e1", 94 + (i % 3), 10 + (i % 2)) for i in range(1, 5)] + [
+    _u(9, "harv", 90, 12)]
+cmds_hunt = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_at_beacon, tick=100))
+hx, hy = 95 + HUNT_OFFSETS[0][0], 11 + HUNT_OFFSETS[0][1]
+check("pile en beacon sin vis: hunt, no idle sobre (95,11)",
+      any(c.action.value == "army_attack_move" and c.target_x == hx and c.target_y == hy
+          for c in cmds_hunt)
+      and not any(c.action.value == "army_attack_move" and c.target_x == 95
+                  and c.target_y == 11 for c in cmds_hunt))
+cmds_bldg = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_at_beacon,
+         enemies=[_u(99, "e1", 50, 28)],
+         enemy_bldgs=[_b("powr", 200, 88, 22)]))
+check("edificio visible gana a unidad lejana y al hunt",
+      any(c.action.value == "army_attack_move" and c.target_x == 88 and c.target_y == 22
+          for c in cmds_bldg))
+cmds_stray = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_at_beacon,
+         enemies=[_u(99, "e1", 48, 29)]))
+check("stray lejos del beacon con pile: hunt, no persigue el scout",
+      any(c.action.value == "army_attack_move" and c.target_x == hx and c.target_y == hy
+          for c in cmds_stray))
+army_walk = [_u(i, "e1", 12 + i, 16, idle=False) for i in range(1, 5)] + [
+    _u(9, "harv", 14, 16)]
+cmds_walk = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_walk,
+         enemies=[_u(99, "e1", 90, 12)]))
+check("no re-emite army_attack si el blob ya camina",
+      not any(c.action.value in ("army_attack_move", "attack_move") for c in cmds_walk))
+army_mix = [_u(1, "e1", 12, 16, idle=True)] + [
+    _u(i, "e1", 12 + i, 16, idle=False) for i in range(2, 5)] + [_u(9, "harv", 14, 16)]
+cmds_mix = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_mix,
+         enemies=[_u(99, "e1", 90, 12)]))
+check("blob caminando: solo ATTACK_MOVE al ocioso, no army_attack",
+      any(c.action.value == "attack_move" and c.actor_id == 1
+          and c.target_x == 90 for c in cmds_mix)
+      and not any(c.action.value == "army_attack_move" for c in cmds_mix))
 
 h, w = 64, 128
 grid = np.ones((h, w), dtype=np.float32)

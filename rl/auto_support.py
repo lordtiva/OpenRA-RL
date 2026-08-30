@@ -14,17 +14,23 @@ Diseño:
   repair por bloque (máx 2 para no spamear). Es el umbral del hard.
 - Cosecha: si harv está idle y hay proc, emite 1 harvest (auto al ore más cercano).
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
-- Push keep-alive: si la política ya eligió army/attack_move, los ociosos de
-  combate siguen hacia esa celda entre decisiones (APM de confort, como repair).
-- Asalto sostenido (Capa 0, corte Run9 iter 442): con proc+harv y ≥N rifles,
-  el entorno emite army_attack_move cada bloque aunque la red haya elegido
-  train/build. Sin esto el push nunca arranca (hist army ~0% a iter 443).
+- Push keep-alive: ociosos de combate hacia enemigo visible / beacon / hunt.
+- Asalto sostenido (Capa 0, corte Run9 iter 442 + visor 817): con proc+harv
+  y ≥N rifles, el entorno manda el ejército al enemigo visible o al beacon
+  aunque la red elija train/build. NO usa last_push de la política (la
+  cabeza de celda apunta al blob propio → hormiguero en casa). NO re-emite
+  army_attack_move a unidades que ya caminan (el re-order cada 80 ticks
+  cancelaba el path).
+- Hunt (iter ~854): si ≥N combate ya están en el beacon y no hay objetivo
+  visible, el destino rota por waypoints al sur/oeste del NE. El pile-up
+  en (95,11) dejaba edificios resagados en niebla y el episodio iba a
+  timeout (incomplete con enB 5–10).
 
 No genera reward — evita defense_loss/hold_zero ya existentes.
 """
 
 from openra_env.models import ActionType, CommandModel
-from rl.obs_encoding import BEACON_BY_MAP
+from rl.obs_encoding import resolve_beacon
 
 # Tipos que el hard apaga cuando hay brownout (ai.yaml PowerDownBotModule)
 _POWER_DOWN_TYPES = {"dome", "tsla", "mslo", "atag", "stag"}
@@ -32,6 +38,26 @@ _NON_COMBAT = ("harv", "mcv")
 # Don't march a 1-rifle scout; wait for a real army (Run7 collapse was
 # combat-without-eco; this gate is the army half of that lesson).
 MIN_ARMY_FOR_ASSAULT = 4
+# Pile-up at the beacon (visor 851: 230 e1, dist 2.8, then timeout if a
+# powr/tent sits in fog 15 cells south). Hunt only after this many combat
+# units are actually there — home spawns must not start the sweep.
+ARRIVED_CELLS = 8
+# Ignore a stray scout in mid-map once the army is already at the enemy base.
+STRAY_FROM_BEACON = 20
+HUNT_PERIOD_TICKS = 1600  # ~20 macro decisions; infantry can walk a waypoint
+# Water on Singles is y≳40. Stay on the enemy half (never last_push / home ore).
+HUNT_Y_MAX = 36
+HUNT_X_MIN = 40
+HUNT_OFFSETS = (
+    (0, 14),
+    (-16, 6),
+    (10, 6),
+    (-12, 20),
+    (8, 22),
+    (-24, 12),
+    (-20, 26),
+    (6, 28),
+)
 
 def _place_near_base(obs):
     """A cell next to the construction yard / any own building (not a spawn rewrite)."""
@@ -61,19 +87,77 @@ def _has_harvester(obs, eco, units, prod) -> bool:
     return any("harv" in str(getattr(p, "item", "")).lower() for p in prod)
 
 
+def _xy(obj) -> tuple[int, int]:
+    return int(obj.cell_x), int(obj.cell_y)
+
+
+def _dist2(a, b) -> int:
+    return (int(a[0]) - int(b[0])) ** 2 + (int(a[1]) - int(b[1])) ** 2
+
+
+def _nearest_xy(targets, origin) -> tuple[int, int]:
+    return _xy(min(targets, key=lambda t: _dist2(_xy(t), origin)))
+
+
+def _n_combat_at(combat, cell, radius: int) -> int:
+    r2 = int(radius) * int(radius)
+    n = 0
+    for u in combat:
+        try:
+            if _dist2(_xy(u), cell) <= r2:
+                n += 1
+        except (TypeError, ValueError):
+            continue
+    return n
+
+
+def _hunt_cell(obs, beacon) -> tuple[int, int]:
+    """Next sweep cell around the enemy half. Stateless: index from obs.tick."""
+    info = getattr(obs, "map_info", None)
+    w = int(getattr(info, "width", 128) or 128)
+    h = int(getattr(info, "height", 64) or 64)
+    bx, by = int(beacon[0]), int(beacon[1])
+    tick = int(getattr(obs, "tick", 0) or 0)
+    dx, dy = HUNT_OFFSETS[(tick // HUNT_PERIOD_TICKS) % len(HUNT_OFFSETS)]
+    min_x = max(HUNT_X_MIN, bx - 45)
+    max_x = max(min_x + 1, w - 2)
+    max_y = min(h - 2, HUNT_Y_MAX)
+    x = min(max(bx + dx, min_x), max_x)
+    y = min(max(by + dy, 2), max_y)
+    return int(x), int(y)
+
+
 def _push_cell(obs, last_push):
-    """Celda de asalto: último push de la política, si no enemigo visible, si no beacon."""
+    """Celda de asalto: edificio visible, unidad visible, hunt, beacon.
+
+    last_push de la política es veneno en a_short: la cabeza de celda no está
+    condicionada a la unidad y cae en Ch6 (densidad propia). Visor 2026-08-30:
+    280 e1 attack-move al mineral de casa, beginner intacto en niebla.
+
+    Iter ~854: clavar el dest en el beacon después de llegar deja el ejército
+    idle sobre (95,11). Edificios resagados en niebla (enB 5–10) → timeout.
+    Hunt solo si ya hay masa en el beacon; el acercamiento sigue siendo beacon.
+    """
+    beacon = resolve_beacon(obs)
+    origin = beacon if beacon is not None else (0, 0)
+    bldgs = list(getattr(obs, "visible_enemy_buildings", None) or [])
+    if bldgs:
+        return _nearest_xy(bldgs, origin)
+    ene_u = list(getattr(obs, "visible_enemies", None) or [])
+    combat = _combat_units(getattr(obs, "units", None) or [])
+    n_at = _n_combat_at(combat, beacon, ARRIVED_CELLS) if beacon is not None else 0
+    piled = n_at >= MIN_ARMY_FOR_ASSAULT
+    if ene_u:
+        e = _nearest_xy(ene_u, origin)
+        if piled and beacon is not None and _dist2(e, beacon) > STRAY_FROM_BEACON ** 2:
+            return _hunt_cell(obs, beacon)
+        return e
+    if beacon is not None:
+        if piled:
+            return _hunt_cell(obs, beacon)
+        return int(beacon[0]), int(beacon[1])
     if last_push is not None:
         return int(last_push[0]), int(last_push[1])
-    enemies = list(getattr(obs, "visible_enemies", None) or []) + list(
-        getattr(obs, "visible_enemy_buildings", None) or [])
-    if enemies:
-        e = enemies[0]
-        return int(e.cell_x), int(e.cell_y)
-    map_name = str(getattr(getattr(obs, "map_info", None), "map_name", "") or "")
-    beacon = BEACON_BY_MAP.get(map_name)
-    if beacon is not None:
-        return int(beacon[0]), int(beacon[1])
     return None
 
 
@@ -163,33 +247,32 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
                     break  # uno por bloque
 
     # 3) Asalto sostenido + keep-alive. Gratis para PPO.
-    #    Con eco lista y ≥MIN_ARMY de combate, army_attack_move cada bloque
-    #    (el C# salta harvesters). No espera a que la red lo muestreé —
-    #    Run9 iters 340-443: army hist → 0% e incomplete 24%→60%.
-    #    Si aún no hay ejército, solo keep-alive del last_push de la política.
+    #    Destino = edificio visible / unidad / hunt-si-pile / beacon
+    #    (no last_push). army_attack_move de grupo SOLO si hay ≥MIN_ARMY
+    #    ociosos; si no, ATTACK_MOVE a ociosos (cap 16). Re-emitir el grupo
+    #    cada bloque cancelaba el path (visor).
     combat = _combat_units(units)
     has_harv = _has_harvester(obs, eco, units, prod)
     dest = _push_cell(obs, last_push)
     assault = (has_proc and has_harv and dest is not None
                and len(combat) >= MIN_ARMY_FOR_ASSAULT)
-    if assault:
+    if dest is not None and has_proc:
         px, py = dest
-        out.append(CommandModel(
-            action=ActionType.ARMY_ATTACK_MOVE, target_x=px, target_y=py))
-    elif last_push is not None and has_proc:
-        px, py = last_push
-        n_push = 0
-        for u in combat:
-            if not bool(getattr(u, "is_idle", False)):
-                continue
+        idles = [u for u in combat if bool(getattr(u, "is_idle", False))]
+        if assault and len(idles) >= MIN_ARMY_FOR_ASSAULT:
             out.append(CommandModel(
-                action=ActionType.ATTACK_MOVE,
-                actor_id=int(u.actor_id),
-                target_x=int(px),
-                target_y=int(py),
-            ))
-            n_push += 1
-            if n_push >= 8:
-                break
+                action=ActionType.ARMY_ATTACK_MOVE, target_x=px, target_y=py))
+        else:
+            n_push = 0
+            for u in idles:
+                out.append(CommandModel(
+                    action=ActionType.ATTACK_MOVE,
+                    actor_id=int(u.actor_id),
+                    target_x=int(px),
+                    target_y=int(py),
+                ))
+                n_push += 1
+                if n_push >= 16:
+                    break
 
     return out

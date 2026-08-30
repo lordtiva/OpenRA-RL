@@ -14,12 +14,15 @@ Uso (PowerShell, UN comando):
     # visor:
     http://localhost:8786/
 
-Ctrl+C corta el live, no el train.
+Al terminar cada partida append a rl/ckpts/live_games.jsonl (histograma,
+destino de asalto, centroide del ejército vs beacon). Ctrl+C no pisa el train.
 """
 import argparse
 import asyncio
 import base64
+import json
 import time
+from datetime import datetime
 from pathlib import Path
 import sys
 
@@ -46,6 +49,54 @@ def pick_device(req: str) -> str:
     if req != "auto":
         return req
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _tally_types(objs) -> dict:
+    c: dict[str, int] = {}
+    for o in objs or []:
+        if isinstance(o, dict):
+            k = str(o.get("type") or "?")
+        else:
+            k = str(getattr(o, "type", "") or "?")
+        c[k] = c.get(k, 0) + 1
+    return dict(sorted(c.items(), key=lambda kv: -kv[1]))
+
+
+def _combat_centroid(units):
+    pts = []
+    for u in units or []:
+        t = str(getattr(u, "type", "") or "").lower()
+        if "harv" in t or "mcv" in t:
+            continue
+        try:
+            pts.append((int(u.cell_x), int(u.cell_y)))
+        except (TypeError, ValueError):
+            continue
+    if not pts:
+        return None
+    return [round(sum(p[0] for p in pts) / len(pts), 1),
+            round(sum(p[1] for p in pts) / len(pts), 1)]
+
+
+def _dist(a, b):
+    if not a or not b:
+        return None
+    return round(((float(a[0]) - float(b[0])) ** 2
+                  + (float(a[1]) - float(b[1])) ** 2) ** 0.5, 1)
+
+
+def _remember_cell(bucket: list, xy, cap: int = 24) -> None:
+    if xy is None or len(bucket) >= cap:
+        return
+    cell = [int(xy[0]), int(xy[1])]
+    if cell not in bucket:
+        bucket.append(cell)
+
+
+def _append_live_game(path: Path, row: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str, status, done, result):
@@ -122,7 +173,8 @@ def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str,
     }
 
 
-async def run_episode_live(env: OpenRAEnv, net, vocab, device, args, broadcaster: LiveBroadcaster):
+async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
+                           broadcaster: LiveBroadcaster, ckpt_iter: int = 0):
     reset_kwargs = {}
     if args.scenario:
         mapa = Path(f"rl/scenarios/fase2_{args.scenario.lower()}.oramap")
@@ -157,6 +209,13 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args, broadcaster
     last_action_str = "—"
     macro_final = None
     last_push_cell = None
+    trace = {
+        "policy_push_cells": [],
+        "support_dests": [],
+        "n_support_army": 0,
+        "n_support_am": 0,
+        "centroid": [],
+    }
 
     # estado inicial
     broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, "jugando…", done, ""))
@@ -213,9 +272,19 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args, broadcaster
                 c0 = action.commands[0]
                 if getattr(c0, "target_x", None) is not None:
                     last_push_cell = (int(c0.target_x), int(c0.target_y))
+                    _remember_cell(trace["policy_push_cells"], last_push_cell)
             if args.auto_support:
                 for cmd in support_commands(obs, last_push=last_push_cell):
                     action.commands.append(cmd)
+                    name = getattr(getattr(cmd, "action", None), "value", None) or str(
+                        getattr(cmd, "action", ""))
+                    if name in ("army_attack_move", "attack_move"):
+                        dest = [int(cmd.target_x), int(cmd.target_y)]
+                        if name == "army_attack_move":
+                            trace["n_support_army"] += 1
+                        else:
+                            trace["n_support_am"] += 1
+                        _remember_cell(trace["support_dests"], dest)
         else:
             # mantener último comando (frame-skip)
             action = action  # type: ignore
@@ -260,6 +329,20 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args, broadcaster
 
         # push live cada decisión (throttle: solo si can_decide para no spamear)
         if can_decide:
+            if decs == 1 or decs % 50 == 0:
+                n_cbt = 0
+                for u in obs.units or []:
+                    t = str(getattr(u, "type", "") or "").lower()
+                    if "harv" not in t and "mcv" not in t:
+                        n_cbt += 1
+                trace["centroid"].append({
+                    "dec": decs, "tick": obs.tick,
+                    "xy": _combat_centroid(obs.units),
+                    "n_combat": n_cbt,
+                    "n_units": len(obs.units or []),
+                    "n_ene": (len(obs.visible_enemies or [])
+                              + len(obs.visible_enemy_buildings or [])),
+                })
             broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, f"dec {decs} tick {obs.tick}", done, getattr(obs, "result", "") or macro_final or ""))
 
         if done:
@@ -271,7 +354,52 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args, broadcaster
     episode_reward += r_final
     final_result = getattr(obs, "result", None) or macro_final or ("incomplete" if not done else "")
     broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, f"final: {final_result}", True, final_result))
-    return {"result": final_result, "ticks": obs.tick, "decisions": decs, "episode_reward": round(episode_reward, 3), "hist": hist, "advanced_ticks": adv_total}
+    xy_end = _combat_centroid(obs.units)
+    beacon_xy = list(beacon) if beacon else None
+    log_row = {
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "ckpt": str(getattr(args, "ckpt", "")),
+        "ckpt_iter": int(ckpt_iter),
+        "bot_type": args.bot_type,
+        "scenario": args.scenario,
+        "map_name": str(getattr(getattr(obs, "map_info", None), "map_name", "") or ""),
+        "result": final_result,
+        "ticks": int(obs.tick or 0),
+        "decisions": decs,
+        "episode_reward": round(episode_reward, 3),
+        "advanced_ticks": adv_total,
+        "hist": dict(hist),
+        "beacon": beacon_xy,
+        "policy_push_cells": trace["policy_push_cells"],
+        "support_dests": trace["support_dests"],
+        "n_support_army": trace["n_support_army"],
+        "n_support_am": trace["n_support_am"],
+        "centroid": trace["centroid"],
+        "centroid_end": xy_end,
+        "dist_to_beacon": _dist(xy_end, beacon_xy),
+        "n_units_end": len(obs.units or []),
+        "n_bld_end": len(obs.buildings or []),
+        "n_ene_vis": (len(obs.visible_enemies or [])
+                      + len(obs.visible_enemy_buildings or [])),
+        "units": _tally_types(obs.units),
+        "buildings": _tally_types(obs.buildings),
+        "last_action": last_action_str,
+        "last_push": list(last_push_cell) if last_push_cell else None,
+    }
+    log_path = getattr(args, "log_file", "") or ""
+    if log_path:
+        p = Path(log_path)
+        if not p.is_absolute():
+            p = Path(__file__).resolve().parent.parent / p
+        try:
+            _append_live_game(p, log_row)
+            print(f"  logged {p}  dist_beacon={log_row['dist_to_beacon']} "
+                  f"support_dests={trace['support_dests']}", flush=True)
+        except OSError as e:
+            print(f"  [live log] no pude escribir {p}: {e}", flush=True)
+    return {"result": final_result, "ticks": obs.tick, "decisions": decs,
+            "episode_reward": round(episode_reward, 3), "hist": hist,
+            "advanced_ticks": adv_total, "dist_to_beacon": log_row["dist_to_beacon"]}
 
 
 async def amain(args):
@@ -330,8 +458,11 @@ async def amain(args):
             label = str(ep) if args.episodes <= 0 else f"{ep}/{args.episodes}"
             print(f"\n=== Episodio {label} ===")
             bc.update({"status": f"episodio {label} — iniciando…", "done": False, "ckpt_iter": it})
-            outcome = await run_episode_live(env, net, vocab, device, args, bc)
-            print(f"  result={outcome['result']} ticks={outcome['ticks']} decs={outcome['decisions']} rew={outcome['episode_reward']} hist={outcome['hist']}")
+            outcome = await run_episode_live(
+                env, net, vocab, device, args, bc, ckpt_iter=it)
+            print(f"  result={outcome['result']} ticks={outcome['ticks']} "
+                  f"decs={outcome['decisions']} rew={outcome['episode_reward']} "
+                  f"dist_beacon={outcome.get('dist_to_beacon')} hist={outcome['hist']}")
         print(f"\nVisor sigue en http://localhost:{args.port}/  (Ctrl+C para salir)")
         while True:
             await asyncio.sleep(1)
@@ -364,6 +495,8 @@ def main():
                     help="harvest/repair/power automático (Pilar B); default on como el train")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")
+    ap.add_argument("--log-file", default="rl/ckpts/live_games.jsonl",
+                    help="jsonl por partida del visor. Vacío = no loguear.")
     args = ap.parse_args()
     # --bot-type "" mantiene "" (dummy), solo None es "no tocar". --ai-slot "" desactiva enemigo.
     if args.bot_type == "__none__":

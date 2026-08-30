@@ -36,7 +36,7 @@ from rl.rollout import (add_advantages, center_advantage_by_episode,
                         collect_one_episode, flatten_samples)
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
 from rl.best_ckpt import batch_is_dead, maybe_update_best
-from rl.imitation import EliteBuffer, lambda_bc_at
+from rl.imitation import EliteBuffer, balance_bc_samples, lambda_bc_at
 from rl.scripted_teacher import ScriptedTeacher
 
 
@@ -128,6 +128,7 @@ async def amain(args):
     trainer = PPOTrainer(net, lr=args.lr, device=device)
 
     start_iter = 0
+    ckpt_extra: dict = {}
     if args.resume:
         # F2 (auditoría): restaurar TAMBIÉN el vocabulario del checkpoint —
         # antes se ignoraba y los ids de la cabeza de ítems podían quedar
@@ -135,10 +136,17 @@ async def amain(args):
         start_iter = load_checkpoint(
             args.resume, net,
             opt=None if args.reset_opt else trainer.opt,
-            vocab=vocab, reset_opt=args.reset_opt)
+            vocab=vocab, reset_opt=args.reset_opt,
+            extra_out=ckpt_extra)
         print(f"Reanudado desde {args.resume} (iter {start_iter}, "
               f"{len(vocab.type_to_id)} tipos en vocab"
               f"{', Adam fresco' if args.reset_opt else ''})")
+
+    bc_start_iter = int(getattr(args, "bc_start_iter", 0) or 0)
+    if bc_start_iter <= 0:
+        bc_start_iter = int(ckpt_extra.get("bc_start_iter") or 0)
+    if args.bc and bc_start_iter <= 0:
+        bc_start_iter = int(start_iter)
 
     if args.roles_vocab:
         # Traductor universal (agnóstico a facción): la cabeza de ítems pasa
@@ -334,7 +342,8 @@ async def amain(args):
     elite = EliteBuffer(cap_steps=2000) if args.sil else None
     if args.bc or args.sil:
         print(f"Capa 1: bc={args.bc} sil={args.sil} "
-              f"warmup={args.bc_warmup} lambda_sil={args.lambda_sil}")
+              f"warmup={args.bc_warmup} lambda_sil={args.lambda_sil} "
+              f"bc_start_iter={bc_start_iter}", flush=True)
 
     for it in range(start_iter + 1, args.iters + 1):
         t0 = time.time()
@@ -348,8 +357,12 @@ async def amain(args):
         infer_net.load_state_dict(net.state_dict())
         samples, outcomes = process_results(results, args.gamma, args.lam,
                                             adv_mode=args.adv_mode)
+        lmb_bc = (lambda_bc_at(it, bc_start_iter, args.bc_warmup)
+                  if args.bc else 0.0)
+        lmb_sil = args.lambda_sil if args.sil else 0.0
         bc_samples = []
-        if args.bc:
+        bc_meta = {}
+        if args.bc and lmb_bc > 0.0:
             try:
                 t_traj, t_out = await collect_one_episode(
                     pool[0], infer_net, vocab, device,
@@ -364,20 +377,27 @@ async def amain(args):
                 bc_samples, _ = process_results(
                     [(t_traj, t_out)], args.gamma, args.lam,
                     adv_mode=args.adv_mode, verbose=False)
+                n_raw = len(bc_samples)
+                bc_samples = balance_bc_samples(bc_samples)
                 for s in bc_samples:
                     s["_ep"] = 10_000 + it
-                print(f"  [bc] teacher steps={len(bc_samples)} "
+                bc_meta = {
+                    "bc_n": len(bc_samples),
+                    "bc_n_raw": n_raw,
+                    "bc_result": t_out.get("result"),
+                }
+                print(f"  [bc] teacher steps={n_raw}->{len(bc_samples)} "
                       f"result={t_out.get('result')}", flush=True)
             except Exception as e:
                 print(f"  [bc] teacher fail: {e}", flush=True)
                 bc_samples = []
+                bc_meta = {"bc_n": 0, "bc_result": "fail"}
+        elif args.bc:
+            print(f"  [bc] skip teacher (lambda_bc=0)", flush=True)
         pending = launch_collection(pending)
 
         t1 = time.time()
         skipped_update = batch_is_dead(outcomes)
-        lmb_bc = (lambda_bc_at(it, start_iter, args.bc_warmup)
-                  if args.bc else 0.0)
-        lmb_sil = args.lambda_sil if args.sil else 0.0
         if elite is not None and samples:
             by_ep = {}
             for s in samples:
@@ -438,12 +458,13 @@ async def amain(args):
                     for o in outcomes) / len(outcomes), 4)
 
         ckpt_path = os.path.join(args.ckpt_dir, "latest.pt")
-        save_checkpoint(ckpt_path, net, trainer.opt, it,
-                        extra={"vocab": dict(vocab.type_to_id)})
+        ckpt_blob = {"vocab": dict(vocab.type_to_id)}
+        if args.bc:
+            ckpt_blob["bc_start_iter"] = int(bc_start_iter)
+        save_checkpoint(ckpt_path, net, trainer.opt, it, extra=ckpt_blob)
         if it % 10 == 0:
             save_checkpoint(os.path.join(args.ckpt_dir, f"iter{it:04d}.pt"),
-                            net, trainer.opt, it,
-                            extra={"vocab": dict(vocab.type_to_id)})
+                            net, trainer.opt, it, extra=ckpt_blob)
 
         if args.metrics:
             os.makedirs(os.path.dirname(args.metrics) or ".", exist_ok=True)
@@ -532,14 +553,16 @@ async def amain(args):
                     "clip_frac": stats.get("clip_frac"),
                     "kl": stats.get("kl"),
                     "grad_norm": stats.get("grad_norm"),
-                    **({"lambda_bc": stats.get("lambda_bc")}
-                       if stats.get("lambda_bc") is not None else {}),
+                    **({"lambda_bc": round(lmb_bc, 4)} if args.bc else {}),
+                    **({"lambda_sil": round(lmb_sil, 4)} if args.sil else {}),
+                    **bc_meta,
                     **({"bc_nll": stats.get("bc_nll")}
                        if stats.get("bc_nll") is not None else {}),
                     **({"sil_nll": stats.get("sil_nll")}
                        if stats.get("sil_nll") is not None else {}),
                     **({"sil_n": stats.get("sil_n")}
                        if stats.get("sil_n") is not None else {}),
+                    **({"elite_n": len(elite)} if elite is not None else {}),
                     "winrate": round(wins / total, 3) if total else 0.0,
                     "winrate_rolling20": round(rolling, 3),
                     "iter_winrate": round(
@@ -676,6 +699,9 @@ def main():
                     help="Capa 1: self-imitation de episodios win/raze>0.")
     ap.add_argument("--bc-warmup", type=int, default=80,
                     help="Iters para bajar lambda_bc de 1.0 a 0.")
+    ap.add_argument("--bc-start-iter", type=int, default=0,
+                    help="Origen del warmup BC. 0 = ckpt o start_iter. "
+                         "No debe resetearse en cada --resume.")
     ap.add_argument("--lambda-sil", type=float, default=0.5,
                     help="Peso SIL cuando --sil (default 0.5).")
     args = ap.parse_args()

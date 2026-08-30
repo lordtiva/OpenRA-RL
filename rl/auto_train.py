@@ -38,9 +38,11 @@ CKPT_DIR = ROOT / "rl" / "ckpts"
 METRICS = CKPT_DIR / "metrics.jsonl"
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
 LOGFILE = ROOT / "rl" / "auto_train.log"
-THRESHOLD_S = 300  # sin metrics 5 min = cuelgue real (un iter collect+update suele ser ~2-4 min)
+# Capa 1: 4 eps + teacher sequential + PPO+BC+SIL. El primer iter post-launch
+# ronda 5-8 min. 300s mataba el update (GPU 30%) antes de escribir metrics.
+THRESHOLD_S = 540
 CHECK_EVERY_S = 15
-GPU_LOW_THRESHOLD = 15  # solo para el log: el collect deja la GPU en 1-5%, NO es cuelgue
+GPU_LOW_THRESHOLD = 15  # GPU >= esto = collect/update en vuelo, no es cuelgue
 
 # Cuelgue Docker: cada URL de GAME_URLS tiene su servicio compose.
 # Recreate toca TODOS los daemons que estaban up, no solo openra-rl.
@@ -70,7 +72,7 @@ DAEMONS = (
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
-    "--iters", "800",
+    "--iters", "1200",
     "--concurrency", "4",
     "--max-steps", "624",
     "--macro-ticks", "80",
@@ -83,6 +85,7 @@ TRAIN_ARGS = [
     "--bc",
     "--sil",
     "--bc-warmup", "80",
+    "--bc-start-iter", "603",
     "--lambda-sil", "0.5",
     "--gamma", "0.995",
     "--ckpt-dir", "rl/ckpts",
@@ -484,6 +487,13 @@ def main():
                 gpu_low_streak = 0
                 continue
             if idle >= THRESHOLD_S:
+                if gpu is not None and gpu >= GPU_LOW_THRESHOLD:
+                    # Update/inferencia en vuelo: el jsonl se escribe al FINAL
+                    # del iter. Matar acá era el loop 636 (teacher 623->135 y
+                    # GPU 30% cuando el watchdog cortaba).
+                    log(f"en vuelo — idle {idle:.0f}s pero GPU {gpu}%, no mato")
+                    last_progress = time.time()
+                    continue
                 log(f"CUELGUE — idle {idle:.0f}s >= {THRESHOLD_S}s{gpu_tag} markers={score}")
                 if score >= 1:
                     log("cuelgue es del daemon Docker (no del train) — recreando contenedor")

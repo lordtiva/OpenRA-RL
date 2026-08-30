@@ -20,7 +20,7 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | **11** | `10-benchmark-alphastar-openai-five.md` | **Benchmark: dónde estás vs AlphaStar/OpenAI Five — qué ya tenés y las 3 brechas (self-play, imitation, annealing)** | **Posicionamiento — mapa de familia** |
 | **12** | `11-revision-quisquillosa.md` | **Contra-benchmark quisquilloso: dónde infla la tabla, 6 brechas no contadas y veredicto recalibrado (chasis vs motor)** | **Termómetro de nivel** |
 | **13** | `12-plan-4-capas-siguiente-nivel.md` | **Plan 4 capas para tu hardware (2070+5600X): Capa 0 win posible + Capa 1 BC/SIL + Capa 2 transformer/scatter + Capa 3 self-play + throughput** | **Roadmap 6-12 meses (orden por ROI) — no se modifica** |
-| **13b** | `13-capa0-status-post-run8.md` | **Estado Capa 0 post Run8/Run9: meseta wr~11%, incomplete 36% no es colapso; asalto sostenido primero, no alargar partidas** | **Companion del 12 — 2026-08-29** |
+| **13b** | `13-capa0-status-post-run8.md` | **Estado Capa 0 post Run8/Run9 + visor 4/4 + hunt ~854. Deuda `cell_head` y qué robar de Qwen3.8-Flash-Next (QSA al mapa, no MoE) para Capa 2** | **Companion del 12 — 2026-08-30** |
 | **14** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Consolida análisis `ai.yaml` + teoría RL** |
 | **15** | `07-operacion.md` | **Comandos PowerShell (contenedor / train / dashboard), reglas de run limpio, criterios de promoción** | **Nuevo** |
 
@@ -28,7 +28,7 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 
 1. **Si entrás por primera vez:** `roadmap-agente.md` → `parche-grande-2026-08.md` §1-5 → `08-avance-run2.md` → `09-fullstack-run3.md` → `10-benchmark-alphastar-openai-five.md` + `11-revision-quisquillosa.md` + `12-plan-4-capas-siguiente-nivel.md` (mapa + termómetro + plan) + `13-capa0-status-post-run8.md` (qué de Capa 0 ya está).
 2. **Si vas a tocar reward:** `08-avance-run2.md` §3 + `09-fullstack-run3.md` §1-2 + `11-revision-quisquillosa.md` §4-5 + `12-plan-4-capas-siguiente-nivel.md` Capa 0 (riesgo garrison/annealing) + `06-filosofia-rl.md` §2-3 + `reward_shaping.py` como fuente.
-3. **Si vas a tocar arquitectura:** `diseno-advance-macro.md` + `parche-grande-2026-08.md` §3 (CoordConv/U-Net/broadcast GRU).
+3. **Si vas a tocar arquitectura:** `diseno-advance-macro.md` + `parche-grande-2026-08.md` §3 (CoordConv/U-Net/broadcast GRU) + `13-capa0-status-post-run8.md` *Deuda de la cabeza de celda* y *Qué robar de Qwen3.8-Flash-Next* (Capa 2: pointer + QSA al mapa; no GDN/MoE el mismo PR).
 4. **Si vas a lanzar un run:** `07-operacion.md` (3 comandos).
 
 ## Mapa de código ↔ doc
