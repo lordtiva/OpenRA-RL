@@ -20,7 +20,7 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | **11** | `10-benchmark-alphastar-openai-five.md` | **Benchmark: dónde estás vs AlphaStar/OpenAI Five — qué ya tenés y las 3 brechas (self-play, imitation, annealing)** | **Posicionamiento — mapa de familia** |
 | **12** | `11-revision-quisquillosa.md` | **Contra-benchmark quisquilloso: dónde infla la tabla, 6 brechas no contadas y veredicto recalibrado (chasis vs motor)** | **Termómetro de nivel** |
 | **13** | `12-plan-4-capas-siguiente-nivel.md` | **Plan 4 capas para tu hardware (2070+5600X): Capa 0 win posible + Capa 1 BC/SIL + Capa 2 transformer/scatter + Capa 3 self-play + throughput** | **Roadmap 6-12 meses (orden por ROI) — no se modifica** |
-| **13b** | `13-capa0-status-post-run8.md` | **Estado Capa 0 post Run8/Run9 + visor 4/4 + hunt ~854. Deuda `cell_head` y qué robar de Qwen3.8-Flash-Next (QSA al mapa, no MoE) para Capa 2** | **Companion del 12 — 2026-08-30** |
+| **13b** | `13-capa0-status-post-run8.md` | **Capa 0/1. Run 11 easy 0/140. Dest credit + defend recall, resume 899 vs beginner. Capa 2 después** | **Companion del 12 — 2026-08-30** |
 | **14** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Consolida análisis `ai.yaml` + teoría RL** |
 | **15** | `07-operacion.md` | **Comandos PowerShell (contenedor / train / dashboard), reglas de run limpio, criterios de promoción** | **Nuevo** |
 

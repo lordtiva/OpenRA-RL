@@ -16,6 +16,10 @@
 > **Visor 835–836 (4/4 win):** con Title `Singles` resuelto, `support_dests[0]=[95,11]` y el blob llega (`dist_beacon` 10–12). El 4/4 lo carga **auto_support**, no la cabeza de celda (`last_push` sigue en casa). Falencias de la red → sección *Deuda de la cabeza de celda* (Capa 2, no ahora).
 >
 > **Hunt ~854:** wr era ~30% al alza, wr20 ~0.40. El ejército **llega** al beacon y se queda idle; incomplete con enB 5–10 (edificios resagados en niebla) → timeout 51k. Parche: si ≥4 combate ya están en el beacon y no hay objetivo visible, dest rota por waypoints al sur/oeste del NE. El acercamiento sigue siendo beacon. Relanzar `auto_train` + visor para cargarlo.
+>
+> **Corte ~900 → Capa 3 easy:** wr20 ≥0.50 **43 iters** (856–898), lose 4.7%, era 36.1%, `best.pt` 898 4/4 wr20 0.70. Incomplete vs beginner ~25%. Cumple el 12 (`wr>30%`). **Avance = `--bot-type easy`**, misma red / asalto / SIL. **No Capa 2.** Antes de easy: dest defiende si hay enemigo a ≤18 de un edificio propio (el stray-ignore del beginner ignoraba raids en casa). `resolve_beacon` también en `_batch_of`. Restore: `best.pt` 898. Archivo: `rl/ckpts/Run 10 (a_short capa1 beginner 604-900)/`. Expectativa: wr20 se cae (easy pega); si lose>25% por 15 iters → restore 898.
+>
+> **Corte 935 (Run 11 paliza easy):** 35 iters, **0/140** (lose 95%, incomplete 5%, 0 wins). Lose media 14k ticks, `defense_loss`≈−4 plano, cosecha easy ~3×, H sana (~1.2: no es colapso Run 8). El dest “defend” existía pero **no cancelaba el path**: el blob caminaba al beacon y el easy razeaba la casa. El crédito de dest tampoco: PPO/SIL veían click en casa. **No Capa 2.** Archivo: `rl/ckpts/Run 11 (a_short capa1 easy 901-935)/`. Resume `best.pt` **899** vs **beginner**. Parches de este corte: (1) `apply_dest_credit` — `cell_flat` de `army_attack_move`/`attack_move` = dest de soporte; (2) defend recall — raid en casa re-emite `army_attack_move` aunque el blob ya camine, salvo que ya estén peleando ahí. Bar: wr20 vs beginner ≥0.40 en ~20+ iters y visor `last_push` ≈ `support_dests`. Capa 2 (transformer) **después** de eso.
 
 ---
 
@@ -229,13 +233,13 @@ Canales: Ch5 edificios propios, Ch6 densidad propia (a veces 200+ e1 en el ore),
 
 El visor guarda `policy_push_cells` en casa y `support_dests` en `(95,11)`. PPO/SIL ven la acción **de la red** (casa). El engine gana por el **soporte** (beacon). El gradiente lee: “clickeaste el mineral y ganaste”. SIL clona exactamente esas celdas. Refuerza el vicio.
 
-Parche barato **si** después de ~80–100 iters con beacon pintado la cabeza sigue en casa: que el `cell_flat` efectivo de `army_attack_move` (el que entra al buffer) sea el destino de soporte, no el sample crudo. Eso es crédito de Capa 0/1, no transformer. **No hacerlo en el mismo corte que un cambio de red.**
+**Hecho en el corte 935** (Capa 0/1, no transformer): `apply_dest_credit` reescribe el `cell_flat` de `army_attack_move`/`attack_move` al dest de soporte **y** muta el comando de política, con recálculo F1 de log π. PPO/SIL y el visor ven la misma celda. **No** mezclar con Capa 2.
 
 ### 6. La pedagogía Ch7/Ch8 estuvo apagada casi todo el run
 
 Hasta la clave `"Singles"`, `rollout._batch_of` hacía `BEACON_BY_MAP.get(obs.map_info.map_name)` y `map_name` era Title `"Singles"` → `beacon=None`. El visor pintaba el naranja con el filename del `.oramap`; el tensor de la política no. Recién post-relaunch el mapa de train tiene el parche. Unas ~20 iters no reescriben una cabeza entrenada a clickear Ch5/Ch6.
 
-Al tocar Capa 2: unificar `_batch_of` a `resolve_beacon(obs)` (hoy el `.get` funciona *porque* existe la clave `Singles`; el Title-mismatch puede volver en otro mapa).
+`_batch_of` ya usa `resolve_beacon(obs)` (corte 900). Seguir usándolo en Capa 2; no volver al `.get` por filename.
 
 ### Qué sí está bien (no reescribir de raíz)
 
@@ -249,7 +253,7 @@ Un PR, ~3–4M params extra, **después** de wr20 vs beginner sostenido (el 12 p
 2. Scatter de unidades en el fmap.
 3. Transformer de entidades 2 capas / 48 slots.
 
-Opcional, antes o en vez de (1) si el pointer no se mueve: crédito honesto del dest de soporte (punto 5). Nunca las tres cosas el mismo resume.
+Crédito de dest (punto 5) **ya está** (corte 935). Nunca concatenar transformer + scatter + pointer el mismo resume.
 
 ### Qué robar de Qwen3.8-Flash-Next (cuando Capa 2, no ahora)
 
@@ -275,7 +279,7 @@ Orden del PR cuando toque (el 12 + media pieza de Qwen):
 5. GatedNorm en el residual nuevo.
 6. **No** GDN, MoE, Muon ni n-gram en ese PR.
 
-Unificar `_batch_of` a `resolve_beacon(obs)` al tocar Capa 2 (punto 6 arriba).
+`_batch_of` ya usa `resolve_beacon` (no reintroducir `.get` por filename).
 
 ---
 
@@ -291,4 +295,4 @@ Ckpts del Run 8: `rl/ckpts/Run 8 (a_short collapse no_op 220-408)/`. Resume vivo
 
 ---
 
-*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Hunt ~854 + notas Qwen3.8-Flash-Next para Capa 2.*
+*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 935: dest credit + defend recall, resume 899 vs beginner (Run 11 easy archivado).*

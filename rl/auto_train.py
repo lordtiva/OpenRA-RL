@@ -69,6 +69,8 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
+# Dest credit + defend recall (post Run 11 easy 0/140). Resume best.pt 899
+# vs beginner. No Capa 2. lambda_bc=0 (bc-start-iter 603, warmup 80).
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",

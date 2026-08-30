@@ -25,6 +25,11 @@ Diseño:
   visible, el destino rota por waypoints al sur/oeste del NE. El pile-up
   en (95,11) dejaba edificios resagados en niebla y el episodio iba a
   timeout (incomplete con enB 5–10).
+- Defend recall (Run 11): raid a ≤DEFEND_CELLS de un edificio propio cancela
+  el path de asalto (army_attack_move de grupo aunque el blob ya camine).
+  Sin eso el easy razeaba la casa vacía (defense_loss≈−4, 0/140).
+- Crédito de dest: apply_dest_credit reescribe cell_flat de army/attack_move
+  al dest de soporte ANTES del buffer PPO/SIL (el win no acredita click en casa).
 
 No genera reward — evita defense_loss/hold_zero ya existentes.
 """
@@ -43,7 +48,9 @@ MIN_ARMY_FOR_ASSAULT = 4
 # units are actually there — home spawns must not start the sweep.
 ARRIVED_CELLS = 8
 # Ignore a stray scout in mid-map once the army is already at the enemy base.
+# NOT if that unit is next to our buildings: easy raids home, beginner didn't.
 STRAY_FROM_BEACON = 20
+DEFEND_CELLS = 18
 HUNT_PERIOD_TICKS = 1600  # ~20 macro decisions; infantry can walk a waypoint
 # Water on Singles is y≳40. Stay on the enemy half (never last_push / home ore).
 HUNT_Y_MAX = 36
@@ -111,6 +118,70 @@ def _n_combat_at(combat, cell, radius: int) -> int:
     return n
 
 
+def _near_own_base(obs, xy, radius: int = DEFEND_CELLS) -> bool:
+    r2 = int(radius) * int(radius)
+    for b in getattr(obs, "buildings", None) or []:
+        try:
+            if _dist2(_xy(b), xy) <= r2:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def home_raid_targets(obs):
+    """Enemigos (unidad o edificio) a ≤DEFEND_CELLS de un edificio propio."""
+    bldgs = list(getattr(obs, "visible_enemy_buildings", None) or [])
+    ene_u = list(getattr(obs, "visible_enemies", None) or [])
+    out = []
+    for t in bldgs + ene_u:
+        try:
+            if _near_own_base(obs, _xy(t)):
+                out.append(t)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _cmd_name(cmd) -> str:
+    act = getattr(cmd, "action", None)
+    if act is None:
+        return ""
+    return str(getattr(act, "value", None) or act)
+
+
+COMBAT_PUSH_TYPES = frozenset({"army_attack_move", "attack_move"})
+
+
+def apply_dest_credit(obs, action, type_name, cell_flat, aidx, last_push=None):
+    """cell_flat de army/attack_move = dest de soporte (el que mueve el ejército).
+
+    PPO/SIL veían el sample de la cabeza de celda (Ch6 en casa) mientras el
+    engine ganaba por el comando de soporte al beacon. El gradiente leía
+    'clickeaste el mineral y ganaste'. Mutar el comando de política y devolver
+    el flat del dest; el caller recalcula log π(a_ejecutada|s).
+    TRAIN/BUILD/PLACE no se tocan.
+    """
+    if type_name not in COMBAT_PUSH_TYPES:
+        return int(cell_flat), None
+    dest = _push_cell(obs, last_push)
+    if dest is None:
+        return int(cell_flat), None
+    w = int(getattr(aidx, "w", 0) or 0)
+    h = int(getattr(aidx, "h", 0) or 0)
+    x, y = int(dest[0]), int(dest[1])
+    if w > 0:
+        x = min(max(x, 0), w - 1)
+    if h > 0:
+        y = min(max(y, 0), h - 1)
+    new_flat = (int(y) * w + int(x)) if w > 0 else int(cell_flat)
+    for c in getattr(action, "commands", None) or []:
+        if _cmd_name(c) in COMBAT_PUSH_TYPES:
+            c.target_x = x
+            c.target_y = y
+    return int(new_flat), (x, y)
+
+
 def _hunt_cell(obs, beacon) -> tuple[int, int]:
     """Next sweep cell around the enemy half. Stateless: index from obs.tick."""
     info = getattr(obs, "map_info", None)
@@ -137,13 +208,24 @@ def _push_cell(obs, last_push):
     Iter ~854: clavar el dest en el beacon después de llegar deja el ejército
     idle sobre (95,11). Edificios resagados en niebla (enB 5–10) → timeout.
     Hunt solo si ya hay masa en el beacon; el acercamiento sigue siendo beacon.
+
+    Easy (Capa 3): un enemigo junto a nuestros edificios es raid, no scout.
+    Defender eso gana a hunt / beacon. El stray-ignore del beginner no aplica.
     """
     beacon = resolve_beacon(obs)
     origin = beacon if beacon is not None else (0, 0)
     bldgs = list(getattr(obs, "visible_enemy_buildings", None) or [])
+    ene_u = list(getattr(obs, "visible_enemies", None) or [])
+    home = home_raid_targets(obs)
+    if home:
+        fact = None
+        for b in getattr(obs, "buildings", None) or []:
+            if str(getattr(b, "type", "")).lower() in ("fact", "afac"):
+                fact = _xy(b)
+                break
+        return _nearest_xy(home, fact or origin)
     if bldgs:
         return _nearest_xy(bldgs, origin)
-    ene_u = list(getattr(obs, "visible_enemies", None) or [])
     combat = _combat_units(getattr(obs, "units", None) or [])
     n_at = _n_combat_at(combat, beacon, ARRIVED_CELLS) if beacon is not None else 0
     piled = n_at >= MIN_ARMY_FOR_ASSAULT
@@ -247,19 +329,24 @@ def support_commands(obs, last_push=None, max_repairs: int = 2):
                     break  # uno por bloque
 
     # 3) Asalto sostenido + keep-alive. Gratis para PPO.
-    #    Destino = edificio visible / unidad / hunt-si-pile / beacon
+    #    Destino = raid-en-casa / edificio visible / unidad / hunt / beacon
     #    (no last_push). army_attack_move de grupo SOLO si hay ≥MIN_ARMY
     #    ociosos; si no, ATTACK_MOVE a ociosos (cap 16). Re-emitir el grupo
-    #    cada bloque cancelaba el path (visor).
+    #    cada bloque cancelaba el path (visor) — EXCEPTO defend recall:
+    #    si el dest es un raid en casa y el blob no está ahí, hay que
+    #    cancelar el asalto (Run 11: walking-to-beacon + easy raze).
     combat = _combat_units(units)
     has_harv = _has_harvester(obs, eco, units, prod)
     dest = _push_cell(obs, last_push)
+    defending = bool(home_raid_targets(obs))
     assault = (has_proc and has_harv and dest is not None
                and len(combat) >= MIN_ARMY_FOR_ASSAULT)
-    if dest is not None and has_proc:
+    if dest is not None and (has_proc or defending):
         px, py = dest
         idles = [u for u in combat if bool(getattr(u, "is_idle", False))]
-        if assault and len(idles) >= MIN_ARMY_FOR_ASSAULT:
+        n_at_dest = _n_combat_at(combat, (px, py), ARRIVED_CELLS)
+        recall = bool(defending and combat and n_at_dest < MIN_ARMY_FOR_ASSAULT)
+        if recall or (assault and len(idles) >= MIN_ARMY_FOR_ASSAULT):
             out.append(CommandModel(
                 action=ActionType.ARMY_ATTACK_MOVE, target_x=px, target_y=py))
         else:

@@ -23,12 +23,11 @@ from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_command_effective
 from rl.imitation import command_to_indices, pick_bc_command
 from rl.network import ACTION_TYPES, HIDDEN_DIM
-from rl.obs_encoding import MAX_UNITS, decode_spatial, scalar_features, unit_slots
-from rl.obs_encoding import BEACON_BY_MAP
+from rl.obs_encoding import MAX_UNITS, decode_spatial, resolve_beacon, scalar_features, unit_slots
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
 from rl.economy_race import EconomyRace
-from rl.auto_support import support_commands
+from rl.auto_support import apply_dest_credit, support_commands
 
 
 def _batch_of(obs, vocab, device):
@@ -37,7 +36,7 @@ def _batch_of(obs, vocab, device):
     w = max(obs.map_info.width, 1)
     # Beacon del objetivo (curriculum A): revela en Ch7/Ch8 la base enemiga
     # sin tocar la niebla. La red VE a dónde atacar (deja de ser ciego).
-    beacon = BEACON_BY_MAP.get(obs.map_info.map_name)
+    beacon = resolve_beacon(obs)
     spatial = decode_spatial(obs.spatial_map, h, w, obs.spatial_channels or 9,
                              beacon=beacon)
     if spatial is None:
@@ -194,6 +193,16 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 out_value = float(out["value"].item())
                 log_prob = out["log_prob"]
                 cell_t = out["cell_flat"]
+            # Crédito de dest (Capa 0/1, no Capa 2): army/attack_move entra al
+            # buffer con el dest de auto_support, no el sample en casa (Ch6).
+            # Mutar el comando + cell_flat; F1 abajo recálcula log π.
+            if auto_support:
+                new_c, _dest_xy = apply_dest_credit(
+                    obs, action, ACTION_TYPES[eff_t], int(eff_c), aidx,
+                    last_push=last_push_cell)
+                if int(new_c) != int(eff_c):
+                    eff_c = int(new_c)
+                    cell_t = torch.tensor([int(eff_c)], device=device)
             # F1 coerción COMPLETA (auditoría 2026-08-24): si una corrección
             # de seguridad MUTÓ la acción, recalcular log π(a_ejecutada|s)
             # con h_in — la MISMA semilla de hidden con la que se muestreó —

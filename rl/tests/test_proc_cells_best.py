@@ -21,7 +21,8 @@ from rl.action_adapter import (
     owns_proc,
     remap_move_cell,
 )
-from rl.auto_support import HUNT_OFFSETS, support_commands
+from openra_env.models import ActionType, CommandModel, OpenRAAction
+from rl.auto_support import HUNT_OFFSETS, apply_dest_credit, support_commands
 from rl.best_ckpt import (
     batch_is_dead,
     dead_policy_reason,
@@ -226,6 +227,60 @@ cmds_stray = support_commands(
 check("stray lejos del beacon con pile: hunt, no persigue el scout",
       any(c.action.value == "army_attack_move" and c.target_x == hx and c.target_y == hy
           for c in cmds_stray))
+cmds_raid = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_at_beacon,
+         enemies=[_u(99, "e1", 14, 17)]))
+check("raid junto a fact gana a hunt (easy pega en casa)",
+      any(c.action.value == "army_attack_move" and c.target_x == 14 and c.target_y == 17
+          for c in cmds_raid))
+cmds_raid_bldg = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_at_beacon,
+         enemies=[_u(99, "e1", 14, 17)],
+         enemy_bldgs=[_b("powr", 200, 88, 22)]))
+check("raid en casa gana tambien a edificio enemigo en el beacon",
+      any(c.action.value == "army_attack_move" and c.target_x == 14 and c.target_y == 17
+          for c in cmds_raid_bldg))
+army_walk_beacon = [
+    _u(i, "e1", 94 + (i % 3), 10 + (i % 2), idle=False) for i in range(1, 5)
+] + [_u(9, "harv", 90, 12)]
+cmds_defend_walk = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_walk_beacon,
+         enemies=[_u(99, "e1", 14, 17)]))
+check("raid: recall aunque el blob ya camina al beacon",
+      any(c.action.value == "army_attack_move" and c.target_x == 14
+          and c.target_y == 17 for c in cmds_defend_walk))
+army_fight_home = [
+    _u(i, "e1", 13 + (i % 3), 16, idle=False) for i in range(1, 5)
+] + [_u(9, "harv", 14, 16)]
+cmds_fight = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_fight_home,
+         enemies=[_u(99, "e1", 14, 17)]))
+check("ya pelean el raid en casa: no cancelar path",
+      not any(c.action.value == "army_attack_move" for c in cmds_fight))
+aidx_cred = NS(w=128, h=64)
+home_flat = 16 * 128 + 12
+act_army = OpenRAAction(commands=[CommandModel(
+    action=ActionType.ARMY_ATTACK_MOVE, target_x=12, target_y=16)])
+flat_b, xy_b = apply_dest_credit(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4),
+    act_army, "army_attack_move", home_flat, aidx_cred)
+check("credit army_attack_move en casa -> beacon", xy_b == (95, 11))
+check("credit muta el comando a beacon",
+      act_army.commands[0].target_x == 95 and act_army.commands[0].target_y == 11)
+check("credit cell_flat = y*w+x", flat_b == 11 * 128 + 95)
+act_train = OpenRAAction(commands=[CommandModel(
+    action=ActionType.TRAIN, item_type="e1")])
+flat_t, xy_t = apply_dest_credit(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4),
+    act_train, "train", home_flat, aidx_cred)
+check("credit no toca TRAIN", xy_t is None and flat_t == home_flat)
+act_raid = OpenRAAction(commands=[CommandModel(
+    action=ActionType.ARMY_ATTACK_MOVE, target_x=12, target_y=16)])
+_flat_r, xy_r = apply_dest_credit(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4,
+         enemies=[_u(99, "e1", 14, 17)]),
+    act_raid, "army_attack_move", home_flat, aidx_cred)
+check("credit dest en raid = celda del raid", xy_r == (14, 17))
 army_walk = [_u(i, "e1", 12 + i, 16, idle=False) for i in range(1, 5)] + [
     _u(9, "harv", 14, 16)]
 cmds_walk = support_commands(

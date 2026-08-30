@@ -42,7 +42,7 @@ from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
 from rl.network import ACTION_TYPES, HIDDEN_DIM
-from rl.auto_support import support_commands
+from rl.auto_support import apply_dest_credit, support_commands
 
 
 def pick_device(req: str) -> str:
@@ -255,6 +255,13 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                 if c.target_x >= ep_dims[1] or c.target_y >= ep_dims[0]:
                     c.target_x = min(c.target_x, ep_dims[1]-1)
                     c.target_y = min(c.target_y, ep_dims[0]-1)
+            # Mismo crédito que el train: army/attack_move muestra el dest
+            # de soporte (visor: last_push ≈ support_dests, no mill en casa).
+            if args.auto_support:
+                new_c, _dest_xy = apply_dest_credit(
+                    obs, action, atype_str, int(eff_c), aidx,
+                    last_push=last_push_cell)
+                eff_c = int(new_c)
             # texto acción: the cell ACTUALLY issued (after water/OOB remap).
             # TRAIN/BUILD ignore cell — show em-dash so live does not display south-water.
             item_name = aidx.items[int(out["item_slot"])] if int(out["item_slot"]) < len(aidx.items) else "—"
