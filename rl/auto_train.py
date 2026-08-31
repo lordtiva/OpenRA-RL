@@ -69,8 +69,8 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Pack 12 en casa + rally staging (no oleadas de 4). NaN logits → no crash.
-# Resume best.pt 899 vs beginner. No Capa 2. lambda_bc=0.
+# Pack 12 + rally staging. PPO clamp log-ratio / SIL skip nll≥18 (no bomba 923).
+# Resume best.pt 922 vs beginner. No Capa 2. lambda_bc=0.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",

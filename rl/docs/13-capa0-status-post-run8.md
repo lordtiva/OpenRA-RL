@@ -32,6 +32,8 @@
 > **Skirmish GUI (humano vs PPO):** el bot `rl-agent` ya estaba en `rl-bot.yaml`. Ahora el lobby lo muestra como **PPO Agent**. GUI: `FastAdvance(ticks=0)` inyecta órdenes sin acelerar; no `Game.Exit` ni `win_early` contra humano. Sidecar `rl/play_skirmish.py` (autostart desde `Activate`, o `.\play_skirmish.ps1`). Compilar: `OpenRA\make.cmd all` — **no** es el Docker de train. Mapa: Singles / a-short. El 899 todavía mill-ea vs beginner; contra un humano hoy gana el humano. No Capa 2.
 >
 > **Corte 947 (Run 16 drip-4 + NaN):** wr 0.16, incomplete **81%**, visor 6am: `MIN_ARMY=4` + rally al beacon = oleadas de 4 que mueren en x≈45 (`nd≥4`≈0). PPO crash `Categorical logits nan` (shape 1×22) al update; latest.pt **sin** nan en pesos. Archivo: `rl/ckpts/Run 16 (a_short drip-4 nan 900-947)/`. Resume **899**. Parche: pack **12 en casa** antes de `army_attack_move`; rally **staging** (~10 celdas del fact) hasta el pack; no `attack_move` de 1–3 ociosos; `_categorical` nan→no_op. No Capa 2. Docker `markers=1` / gRPC fail = daemon; recrear compose si vuelve.
+>
+> **Corte 977 (Run 17 pack12 + bomba SIL/PPO):** pack 12 **sí** (visor 922: 4/4 win, `nh` 11–14 antes del push, `n_support_am=0`, harv en casa, `policy` incluye `[95,11]`). `best.pt` **922** wr20 0.65 iwr 1.0. No Capa 2: wr20≥0.40 racha máx **7** iters, incomplete ~36% en el pico. Iter 923: `sil_nll` 19.6, `pi_loss=inf` (ratio PPO `exp(lp_new-lp_old)` con dest-credit y adv<0; el skip de logits nan no cubría inf). Latest 977 wr20 0, tandas `llll` ownB=0. Archivo: `rl/ckpts/Run 17 (a_short pack12 sil-bomb 900-977)/`. Resume **922**. Parche: clamp log-ratio ±8, skip loss/grad no finito, SIL skip nll≥18. No Capa 2.
 
 ---
 
@@ -226,9 +228,11 @@ Cortes (un régimen por vez):
 1. **Hecho (corte 923):** dest pasable (SIL) + rally al dest + stance AttackAnything al spawn + sell ruinas. Resume 899.
 2. **Hecho (corte 939):** harv no marcha al dest (rally `weap` off, credit skip harv/mcv, adapter harvest). Resume 899.
 3. **Hecho (corte 987):** muros no van a TRAIN; auto-tent tras proc. Resume 899.
-4. **Siguiente:** juzgar lose-desnudo (visor: `iss=e1`, tent en pie antes de tick 4k) y incomplete (`nd≥4`). No Capa 2 todavía.
-5. **Capa 2:** transformer + scatter + `celda|unidad`. APC / guard-aprendido **después**, corte aparte.
-6. **Capa 3:** easy / self-play. Cero de esta lista pendiente.
+4. **Hecho (corte 947):** pack 12 + rally staging. Resume 899.
+5. **Hecho (corte 977):** clamp ratio PPO + SIL skip nll saturado. Resume **922**.
+6. **Siguiente:** wr20 ≥ 0.40 ~20 iters **y** incomplete <40% (visor `nd≥4` en el remate). No Capa 2 todavía.
+7. **Capa 2:** transformer + scatter + `celda|unidad`. APC / guard-aprendido **después**, corte aparte.
+8. **Capa 3:** easy / self-play. Cero de esta lista pendiente.
 
 | Orden | Dónde | Cuándo | Notas |
 |---|---|---|---|

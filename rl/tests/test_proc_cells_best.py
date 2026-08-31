@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import tempfile
 from pathlib import Path
@@ -587,6 +588,56 @@ cat_nan = AlphaLiteNet._categorical(bad)
 check("categorical nan no crashea", torch.isfinite(cat_nan.logits).all().item())
 check("categorical nan cae a no_op (slot 0)",
       int(cat_nan.probs.argmax(-1).item()) == 0)
+
+from rl.trainer import PPOTrainer
+
+
+class _BoomNet(torch.nn.Module):
+    """evaluate_actions_seq returns canned tensors; w exists so Adam has a param."""
+
+    def __init__(self, lp_new, entropy, value):
+        super().__init__()
+        self.w = torch.nn.Parameter(torch.zeros(1))
+        self._lp = lp_new
+        self._ent = entropy
+        self._val = value
+
+    def evaluate_actions_seq(self, seg, device):
+        n = len(seg)
+        extra = self.w.expand(n)
+        return self._lp[:n] + extra, self._ent[:n], self._val[:n]
+
+
+def _seg_sample(lp_old, adv=-1.0, ret=0.0, value_pred=0.0):
+    return {
+        "_ep": 0,
+        "action": {"log_prob": torch.tensor([lp_old])},
+        "adv": adv,
+        "ret": ret,
+        "value_pred": value_pred,
+    }
+
+
+boom = _BoomNet(
+    lp_new=torch.tensor([0.0]),
+    entropy=torch.tensor([1.0]),
+    value=torch.tensor([0.0]),
+)
+tr = PPOTrainer(boom, lr=1e-3, device="cpu")
+st_boom = tr.update([_seg_sample(-1000.0, adv=-1.0)], epochs=1, batch_size=1)
+check("ppo ratio inf no envenena pi_loss", math.isfinite(st_boom.get("pi_loss", 0)))
+check("ppo ratio inf no envenena pesos", torch.isfinite(boom.w).all().item())
+
+sil_net = _BoomNet(
+    lp_new=torch.full((1,), -20.0),
+    entropy=torch.tensor([1.0]),
+    value=torch.tensor([0.0]),
+)
+tr_sil = PPOTrainer(sil_net, lr=1e-3, device="cpu")
+sil_nll = tr_sil.imitation_update(
+    [_seg_sample(-20.0)], coef=0.5, epochs=1, batch_size=1)
+check("sil nll saturado se salta (no 20)", sil_nll == 0.0)
+check("sil nll saturado no envenena pesos", torch.isfinite(sil_net.w).all().item())
 
 act_sk = OpenRAAction(commands=[
     CommandModel(action=ActionType.ARMY_ATTACK_MOVE, target_x=95, target_y=11),

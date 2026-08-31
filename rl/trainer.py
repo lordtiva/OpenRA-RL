@@ -14,11 +14,18 @@ Diseño (lecciones alto-truco/Imperium aplicadas):
       dentro del grafo)
 """
 
+import math
 import time
 
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+# Dest-credit puede guardar lp_old ~ -1e9 (celda tapada) y lp_new finito.
+# ratio=exp(Δ) → inf; con adv<0 PPO no clippea y pi_loss=inf (iter 923 Run 17).
+_LOG_RATIO_CLAMP = 8.0
+# SIL lp.clamp(-20) deja nll≈20 cuando la acción sigue ilegal. No clonar eso.
+_SIL_NLL_SKIP = 18.0
 
 
 class PPOTrainer:
@@ -88,19 +95,10 @@ class PPOTrainer:
                             or not torch.isfinite(value).all()
                             or not torch.isfinite(entropy).all()):
                         continue
-                    n_back += 1
-                    if coef is None:
-                        h_mean = float(entropy.mean().item())
-                        coef = self.ent_lo + self.ent_hi * max(
-                            0.0, 1.0 - h_mean / 2.0)
-                        # Near-collapse: the 0.05 ceiling cannot unstick a
-                        # peaked type-head. Bump the bonus while H is still
-                        # moving; H≈0 batches are skipped in train.py instead.
-                        if h_mean < 0.5:
-                            coef = max(coef, 0.15)
-
                     lp_old = torch.cat(
                         [s["action"]["log_prob"] for s in seg]).to(self.device)
+                    if not torch.isfinite(lp_old).all():
+                        continue
                     v_old = torch.tensor(
                         [s["value_pred"] for s in seg], device=self.device)
                     mb_adv = torch.tensor(
@@ -108,7 +106,11 @@ class PPOTrainer:
                     mb_ret = torch.tensor(
                         [s["ret"] for s in seg], device=self.device)
 
-                    ratio = torch.exp(lp_new - lp_old)
+                    log_ratio = (lp_new - lp_old).clamp(
+                        -_LOG_RATIO_CLAMP, _LOG_RATIO_CLAMP)
+                    ratio = torch.exp(log_ratio)
+                    if not torch.isfinite(ratio).all():
+                        continue
                     surr1 = ratio * mb_adv
                     surr2 = torch.clamp(ratio, 1 - self.clip_eps,
                                         1 + self.clip_eps) * mb_adv
@@ -119,11 +121,25 @@ class PPOTrainer:
                     v_loss = torch.max(F.smooth_l1_loss(value, mb_ret),
                                        F.smooth_l1_loss(v_clipped, mb_ret))
                     entropy_mean = entropy.mean()
+                    if coef is None:
+                        h_mean = float(entropy_mean.item())
+                        coef = self.ent_lo + self.ent_hi * max(
+                            0.0, 1.0 - h_mean / 2.0)
+                        # Near-collapse: the 0.05 ceiling cannot unstick a
+                        # peaked type-head. Bump the bonus while H is still
+                        # moving; H≈0 batches are skipped in train.py instead.
+                        if h_mean < 0.5:
+                            coef = max(coef, 0.15)
                     loss = ((pi_loss + self.vf_coef * v_loss
                              - coef * entropy_mean) / len(mb))
+                    if (not torch.isfinite(pi_loss)
+                            or not torch.isfinite(v_loss)
+                            or not torch.isfinite(loss)):
+                        continue
                     # divide por nº de segmentos para NO escalar el grad con
                     # len(mb)>1 (si no, la lr efectiva se duplica con 2 seg)
                     loss.backward()
+                    n_back += 1
 
                     with torch.no_grad():
                         clip_frac = ((ratio - 1).abs() > self.clip_eps).float().mean()
@@ -138,9 +154,13 @@ class PPOTrainer:
                     continue
                 gn = torch.nn.utils.clip_grad_norm_(
                     self.net.parameters(), self.max_grad_norm).item()
+                if not math.isfinite(gn):
+                    self.net.zero_grad(set_to_none=True)
+                    continue
                 self.opt.step()
 
-        out = {k: round(float(np.mean(v)), 5) for k, v in stats.items()}
+        out = {k: round(float(np.mean(v)), 5) if v else 0.0
+               for k, v in stats.items()}
         out |= {"grad_norm": round(gn, 4),
                 "adv_mean": round(float(np.mean(
                     [s["adv"] for s in samples])), 5), "n": len(samples)}
@@ -178,16 +198,24 @@ class PPOTrainer:
                         continue
                     # Dest ilegal (agua) daba logit -1e9 → sil_nll ~7e6 (Run 13).
                     lp = lp.clamp(min=-20.0)
-                    nll = -lp.mean() / len(mb)
+                    nll = -lp.mean()
+                    # Floor del clamp: la acción sigue tapada. No clonar (923).
+                    if (not torch.isfinite(nll)
+                            or float(nll.item()) >= _SIL_NLL_SKIP):
+                        continue
+                    nll = nll / len(mb)
                     loss = nll if loss is None else loss + nll
-                if loss is None:
+                if loss is None or not torch.isfinite(loss):
                     continue
                 (coef * loss).backward()
-                torch.nn.utils.clip_grad_norm_(
-                    self.net.parameters(), self.max_grad_norm)
+                gn = torch.nn.utils.clip_grad_norm_(
+                    self.net.parameters(), self.max_grad_norm).item()
+                if not math.isfinite(gn):
+                    self.net.zero_grad(set_to_none=True)
+                    continue
                 self.opt.step()
                 nlls.append(float(loss.item()))
-        return round(float(np.mean(nlls)), 5)
+        return round(float(np.mean(nlls)), 5) if nlls else 0.0
 
 
 def save_checkpoint(path: str, net, opt, iteration: int, extra: dict | None = None):
