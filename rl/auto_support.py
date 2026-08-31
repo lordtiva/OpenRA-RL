@@ -14,32 +14,11 @@ Diseño:
   repair por bloque (máx 2 para no spamear). Es el umbral del hard.
 - Cosecha: si harv está idle y hay proc, emite 1 harvest (auto al ore más cercano).
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
-- Push keep-alive: ociosos de combate hacia enemigo visible / beacon / hunt.
-- Asalto sostenido (Capa 0, corte Run9 iter 442 + visor 817, pack 12
-  corte 947): con proc+harv y ≥N rifles EN CASA, el entorno manda el
-  ejército al enemigo visible o al beacon. Rally staging hasta el pack;
-  no attack_move de 1–3 ociosos (visor 6am: oleadas de 4 mueren en x≈45).
-  NO usa last_push de la política. NO re-emite army_attack_move a
-  unidades que ya caminan salvo recall/re-asalto.
-- Hunt (iter ~854): si ≥N combate ya están en el beacon y no hay objetivo
-  visible, el destino rota por waypoints al sur/oeste del NE. El pile-up
-  en (95,11) dejaba edificios resagados en niebla y el episodio iba a
-  timeout (incomplete con enB 5–10).
-- Defend recall (Run 11): raid a ≤DEFEND_CELLS de un edificio propio cancela
-  el path de asalto (army_attack_move de grupo aunque el blob ya camine).
-  Sin eso el easy razeaba la casa vacía (defense_loss≈−4, 0/140).
-- Re-asalto (Run 12): si el dest volvió a beacon/hunt y el blob sigue en
-  casa caminando (post-recall), army_attack_move de grupo. Sin eso el blob
-  terminaba el viaje a casa y el episodio iba a timeout (incomplete ~70%).
-  NO re-ordenar mid-map ni un asalto a enemigo visible (visor 817).
-- Crédito de dest: apply_dest_credit reescribe cell_flat de army/attack_move
-  al dest de soporte ANTES del buffer PPO/SIL (el win no acredita click en casa).
-  El dest se remapea a celda pasable; hunt en agua era sil_nll ~1e9/128 (Run 13).
-- Rally al dest en tent/barr/kenn (Capa 0): los e1 salen caminando, no idle en el tent.
-  weap/hpad/syrd NO: HARV sale de Vehicle queue y el visor 921 la veía
-  caminar al beacon. Tanques idle los recoge army_attack_move.
+- Asalto / hunt / recall / rally-al-beacon / crédito de dest: APAGADOS
+  (corte 950). Era estrategia spawn-asimétrica (siempre (95,11)). La red
+  elige dónde atacar y si defender. Re-activar: SUPPORT_ASSAULT=True.
 - Stance AttackAnything al nacer (Capa 0): Defend no caza; el scripted sí.
-  Solo combate (no harv/mcv).
+  Solo combate (no harv/mcv). Micro, no “andá al NE”.
 - Auto-tent (Capa 0, corte 987): con proc en pie y sin tent/barr, BUILD/PLACE
   el cuartel (como auto-proc). Sin eso latest 985 TRAIN-eaba sbag y moría
   a los 10k sin un rifle.
@@ -54,6 +33,9 @@ from rl.obs_encoding import resolve_beacon
 # Tipos que el hard apaga cuando hay brownout (ai.yaml PowerDownBotModule)
 _POWER_DOWN_TYPES = {"dome", "tsla", "mslo", "atag", "stag"}
 _NON_COMBAT = ("harv", "mcv")
+# War script (pack/hunt/rally/dest-credit). Off: the policy owns targeting.
+# Eco/micro above stays. Flip True only for a controlled ablation.
+SUPPORT_ASSAULT = False
 # Don't march a 1-rifle scout; wait for a real army (Run7 collapse was
 # combat-without-eco; this gate is the army half of that lesson).
 # Visor 6am 947: 4 idle → army_attack_move + rally-to-beacon = oleada de 4
@@ -289,6 +271,8 @@ def _is_noncombat_actor(obs, actor_id) -> bool:
 def apply_dest_credit(obs, action, type_name, cell_flat, aidx, last_push=None):
     """cell_flat de army/attack_move = dest de soporte (el que mueve el ejército).
 
+    No-op si SUPPORT_ASSAULT=False: PPO ve el click de la red, no (95,11).
+
     PPO/SIL veían el sample de la cabeza de celda (Ch6 en casa) mientras el
     engine ganaba por el comando de soporte al beacon. El gradiente leía
     'clickeaste el mineral y ganaste'. Mutar el comando de política y devolver
@@ -298,6 +282,8 @@ def apply_dest_credit(obs, action, type_name, cell_flat, aidx, last_push=None):
     salta Harvester, pero AttackMove por actor_id no, y el crédito mandaba
     la recolectora al beacon (visor 921).
     """
+    if not SUPPORT_ASSAULT:
+        return int(cell_flat), None
     if type_name not in COMBAT_PUSH_TYPES:
         return int(cell_flat), None
     if type_name == "attack_move":
@@ -512,79 +498,68 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
                     out.append(CommandModel(action=ActionType.POWER_DOWN, actor_id=int(b.actor_id)))
                     break  # uno por bloque
 
-    # 3) Asalto sostenido. Gratis para PPO.
-    #    Destino = raid-en-casa / edificio visible / unidad / hunt / beacon
-    #    (no last_push). Group army_attack_move only if ≥MIN_ARMY are HOME
-    #    (visor 6am: 4 idle + rally-to-beacon = feed). Do NOT attack_move
-    #    leftover 1–3 idles to dest — that was the drip.
-    #    - defend recall: raid en casa y el blob no está ahí (Run 11).
-    #    - re-asalto: dest volvió a beacon/hunt y el pack sigue en casa
-    #      caminando (Run 12).
     combat = _combat_units(units)
-    has_harv = _has_harvester(obs, eco, units, prod)
-    raw_dest = _push_cell(obs, last_push)
-    waypoint = _is_beacon_or_hunt(obs, raw_dest)
-    dest = _snap_passable(obs, raw_dest, aidx)
-    defending = bool(home_raid_targets(obs))
-    n_home = _n_combat_near_own_base(obs, combat)
-    n_at_dest = 0
-    if dest is not None:
-        n_at_dest = _n_combat_at(combat, dest, ARRIVED_CELLS)
-    beacon = resolve_beacon(obs)
-    n_at_beacon = (_n_combat_at(combat, beacon, ARRIVED_CELLS)
-                   if beacon is not None else 0)
-    assault = (has_proc and has_harv and dest is not None
-               and n_home >= MIN_ARMY_FOR_ASSAULT)
-    if dest is not None and (has_proc or defending):
-        px, py = dest
-        idles = [u for u in combat if bool(getattr(u, "is_idle", False))]
-        idles_home = [u for u in idles if _near_own_base(obs, _xy(u))]
-        recall = bool(defending and combat and n_at_dest < MIN_PILE_FOR_HUNT)
-        reassault = bool(
-            assault
-            and not defending
-            and n_at_dest < MIN_ARMY_FOR_ASSAULT
-            and n_home >= MIN_ARMY_FOR_ASSAULT
-            and waypoint
-        )
-        pack_idle = assault and len(idles_home) >= MIN_ARMY_FOR_ASSAULT
-        # Already on the enemy half: hunt/visible dest. Idle pile only —
-        # don't cancel a walk to the next waypoint every 80 ticks.
-        sweep = (not defending and has_proc and has_harv
-                 and n_at_beacon >= MIN_PILE_FOR_HUNT
-                 and len(idles) >= MIN_PILE_FOR_HUNT)
-        if recall or reassault or pack_idle or sweep:
-            out.append(CommandModel(
-                action=ActionType.ARMY_ATTACK_MOVE, target_x=px, target_y=py))
 
-    # 4) Rally. Staging near the yard until the pack is ready; dest only
-    #    when ≥MIN_ARMY are home (or already arriving / defending).
-    #    Solo tents/barr/kenn. weap produce HARV: no marchar ore al dest.
-    if has_proc:
-        pack_committed = bool(
-            defending
-            or n_home >= MIN_ARMY_FOR_ASSAULT
-            or n_at_dest >= MIN_PILE_FOR_HUNT
-            or n_at_beacon >= MIN_PILE_FOR_HUNT
-        )
-        if dest is not None and pack_committed:
-            rx_t, ry_t = dest
-        else:
-            rx_t, ry_t = _staging_cell(obs, dest, aidx)
-        for b in blds:
-            if str(getattr(b, "type", "")).lower() not in _RALLY_BUILDINGS:
-                continue
-            rx = int(getattr(b, "rally_x", -1) if getattr(b, "rally_x", -1) is not None else -1)
-            ry = int(getattr(b, "rally_y", -1) if getattr(b, "rally_y", -1) is not None else -1)
-            if rx == int(rx_t) and ry == int(ry_t):
-                continue
-            out.append(CommandModel(
-                action=ActionType.SET_RALLY_POINT,
-                actor_id=int(b.actor_id),
-                target_x=int(rx_t),
-                target_y=int(ry_t),
-            ))
-            break
+    # 3-4) Asalto / hunt / recall / rally-al-dest: off. La red elige guerra.
+    if SUPPORT_ASSAULT:
+        has_harv = _has_harvester(obs, eco, units, prod)
+        raw_dest = _push_cell(obs, last_push)
+        waypoint = _is_beacon_or_hunt(obs, raw_dest)
+        dest = _snap_passable(obs, raw_dest, aidx)
+        defending = bool(home_raid_targets(obs))
+        n_home = _n_combat_near_own_base(obs, combat)
+        n_at_dest = 0
+        if dest is not None:
+            n_at_dest = _n_combat_at(combat, dest, ARRIVED_CELLS)
+        beacon = resolve_beacon(obs)
+        n_at_beacon = (_n_combat_at(combat, beacon, ARRIVED_CELLS)
+                       if beacon is not None else 0)
+        assault = (has_proc and has_harv and dest is not None
+                   and n_home >= MIN_ARMY_FOR_ASSAULT)
+        if dest is not None and (has_proc or defending):
+            px, py = dest
+            idles = [u for u in combat if bool(getattr(u, "is_idle", False))]
+            idles_home = [u for u in idles if _near_own_base(obs, _xy(u))]
+            recall = bool(defending and combat and n_at_dest < MIN_PILE_FOR_HUNT)
+            reassault = bool(
+                assault
+                and not defending
+                and n_at_dest < MIN_ARMY_FOR_ASSAULT
+                and n_home >= MIN_ARMY_FOR_ASSAULT
+                and waypoint
+            )
+            pack_idle = assault and len(idles_home) >= MIN_ARMY_FOR_ASSAULT
+            sweep = (not defending and has_proc and has_harv
+                     and n_at_beacon >= MIN_PILE_FOR_HUNT
+                     and len(idles) >= MIN_PILE_FOR_HUNT)
+            if recall or reassault or pack_idle or sweep:
+                out.append(CommandModel(
+                    action=ActionType.ARMY_ATTACK_MOVE, target_x=px, target_y=py))
+        if has_proc:
+            pack_committed = bool(
+                defending
+                or n_home >= MIN_ARMY_FOR_ASSAULT
+                or n_at_dest >= MIN_PILE_FOR_HUNT
+                or n_at_beacon >= MIN_PILE_FOR_HUNT
+            )
+            if dest is not None and pack_committed:
+                rx_t, ry_t = dest
+            else:
+                rx_t, ry_t = _staging_cell(obs, dest, aidx)
+            for b in blds:
+                if str(getattr(b, "type", "")).lower() not in _RALLY_BUILDINGS:
+                    continue
+                rx = int(getattr(b, "rally_x", -1) if getattr(b, "rally_x", -1) is not None else -1)
+                ry = int(getattr(b, "rally_y", -1) if getattr(b, "rally_y", -1) is not None else -1)
+                if rx == int(rx_t) and ry == int(ry_t):
+                    continue
+                out.append(CommandModel(
+                    action=ActionType.SET_RALLY_POINT,
+                    actor_id=int(b.actor_id),
+                    target_x=int(rx_t),
+                    target_y=int(ry_t),
+                ))
+                break
 
     # 5) Stance AttackAnything al nacer (Defend no caza).
     for u in combat:

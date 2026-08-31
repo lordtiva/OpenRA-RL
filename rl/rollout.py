@@ -23,7 +23,7 @@ from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_command_effective
 from rl.imitation import command_to_indices, pick_bc_command
 from rl.network import ACTION_TYPES, HIDDEN_DIM
-from rl.obs_encoding import MAX_UNITS, decode_spatial, resolve_beacon, scalar_features, unit_slots
+from rl.obs_encoding import MAX_UNITS, decode_spatial, scalar_features, unit_slots
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
 from rl.economy_race import EconomyRace
@@ -34,11 +34,10 @@ def _batch_of(obs, vocab, device):
     """Observación del env -> dict de tensores para la red (+ActionIndex)."""
     h = max(obs.map_info.height, 1)
     w = max(obs.map_info.width, 1)
-    # Beacon del objetivo (curriculum A): revela en Ch7/Ch8 la base enemiga
-    # sin tocar la niebla. La red VE a dónde atacar (deja de ser ciego).
-    beacon = resolve_beacon(obs)
+    # No pintar (95,11) en Ch7/Ch8: es el spawn NE, no “el enemigo”.
+    # Spawn invertido olía a casa. Ch7/Ch8 reales (visión) bastan.
     spatial = decode_spatial(obs.spatial_map, h, w, obs.spatial_channels or 9,
-                             beacon=beacon)
+                             beacon=None)
     if spatial is None:
         spatial = np.zeros((9, h, w), dtype=np.float32)
 

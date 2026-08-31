@@ -69,8 +69,8 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 2: transformer 48 + scatter + cell|unidad (Net2Net desde 922).
-# Resume best.pt 922 vs beginner. Pack 12 intacto. lambda_bc=0. No easy.
+# Capa 2 Net2Net 922. Asalto de soporte OFF (pack/hunt/rally/dest-credit).
+# Eco/micro on (proc/tent/harvest/repair/deploy/stance). Resume 922. No easy.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",

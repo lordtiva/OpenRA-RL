@@ -211,7 +211,7 @@ def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str,
     resources = []
     fog = []
     try:
-        sp = decode_spatial(obs.spatial_map, H, W, obs.spatial_channels or 9, beacon=beacon)
+        sp = decode_spatial(obs.spatial_map, H, W, obs.spatial_channels or 9, beacon=None)
         if sp is not None:
             # ch2 recurso >0.3, ch4 niebla==1
             import numpy as np

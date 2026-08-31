@@ -24,8 +24,8 @@ from rl.action_adapter import (
 )
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.auto_support import (
-    HUNT_OFFSETS, MIN_ARMY_FOR_ASSAULT, STAGING_STEPS, STANCE_ATTACK_ANYTHING,
-    apply_dest_credit, support_commands, _staging_cell,
+    MIN_ARMY_FOR_ASSAULT, STAGING_STEPS, STANCE_ATTACK_ANYTHING, SUPPORT_ASSAULT,
+    apply_dest_credit, support_commands,
 )
 from rl.best_ckpt import (
     batch_is_dead,
@@ -219,6 +219,7 @@ army4 = [_u(i, "e1", 12 + i, 16) for i in range(1, 5)] + [_u(9, "harv", 14, 16)]
 army12 = [_u(i, "e1", 12 + (i % 4), 16 + (i // 4)) for i in range(1, 13)] + [
     _u(9, "harv", 14, 16)]
 check("pack size", MIN_ARMY_FOR_ASSAULT == 12 and STAGING_STEPS == 10)
+check("SUPPORT_ASSAULT off (la red decide guerra)", SUPPORT_ASSAULT is False)
 cmds_has_tent = support_commands(
     _obs(harv=1, cash=5000, bldgs=("fact", "proc", "tent"),
          avail=("e1", "tent", "proc"), units=army4))
@@ -232,88 +233,20 @@ check("4 rifles NO asaltan (pack 12, visor 6am)",
               for c in cmds_drip4))
 cmds_assault = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army12, enemies=[_u(99, "e1", 90, 12)]))
-check("asalto sostenido: army_attack_move con 12 rifles EN CASA + proc + harv",
-      any(c.action.value == "army_attack_move" for c in cmds_assault))
-am = next(c for c in cmds_assault if c.action.value == "army_attack_move")
-check("asalto apunta al enemigo visible", am.target_x == 90 and am.target_y == 12)
-cmds_no_eco = support_commands(
-    _obs(bldgs=("fact",), units=army12, enemies=[_u(99, "e1", 90, 12)]))
-check("asalto NO arranca sin proc",
-      not any(c.action.value == "army_attack_move" for c in cmds_no_eco))
-cmds_no_harv = support_commands(
-    _obs(harv=0, bldgs=("fact", "proc"), units=army12[:12],
-         enemies=[_u(99, "e1", 90, 12)]))
-check("asalto NO arranca sin harv",
-      not any(c.action.value == "army_attack_move" for c in cmds_no_harv))
+check("12 rifles: support NO asalta (la red decide)",
+      not any(c.action.value in ("army_attack_move", "attack_move")
+              for c in cmds_assault))
 cmds_beacon = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army12))
-check("asalto sin enemigo visible usa beacon a_short",
-      any(c.action.value == "army_attack_move" and c.target_x == 95 and c.target_y == 11
-          for c in cmds_beacon))
-cmds_home = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army12), last_push=(12, 16))
-check("asalto ignora last_push en casa, usa beacon",
-      any(c.action.value == "army_attack_move" and c.target_x == 95 and c.target_y == 11
-          for c in cmds_home))
-cmds_title = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army12, map_name="Singles"),
-    last_push=(12, 16))
-check("asalto con Title=Singles (obs real) usa beacon, no last_push",
-      any(c.action.value == "army_attack_move" and c.target_x == 95 and c.target_y == 11
-          for c in cmds_title))
-army_at_beacon = [_u(i, "e1", 94 + (i % 3), 10 + (i % 2)) for i in range(1, 5)] + [
-    _u(9, "harv", 90, 12)]
-cmds_hunt = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army_at_beacon, tick=100))
-hx, hy = 95 + HUNT_OFFSETS[0][0], 11 + HUNT_OFFSETS[0][1]
-check("pile en beacon sin vis: hunt, no idle sobre (95,11)",
-      any(c.action.value == "army_attack_move" and c.target_x == hx and c.target_y == hy
-          for c in cmds_hunt)
-      and not any(c.action.value == "army_attack_move" and c.target_x == 95
-                  and c.target_y == 11 for c in cmds_hunt))
-cmds_bldg = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army_at_beacon,
-         enemies=[_u(99, "e1", 50, 28)],
-         enemy_bldgs=[_b("powr", 200, 88, 22)]))
-check("edificio visible gana a unidad lejana y al hunt",
-      any(c.action.value == "army_attack_move" and c.target_x == 88 and c.target_y == 22
-          for c in cmds_bldg))
-cmds_stray = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army_at_beacon,
-         enemies=[_u(99, "e1", 48, 29)]))
-check("stray lejos del beacon con pile: hunt, no persigue el scout",
-      any(c.action.value == "army_attack_move" and c.target_x == hx and c.target_y == hy
-          for c in cmds_stray))
+check("support no manda al beacon (95,11)",
+      not any(c.action.value == "army_attack_move" and c.target_x == 95
+              and c.target_y == 11 for c in cmds_beacon))
 cmds_raid = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army_at_beacon,
+    _obs(harv=1, bldgs=("fact", "proc"), units=army12,
          enemies=[_u(99, "e1", 14, 17)]))
-check("raid junto a fact gana a hunt (easy pega en casa)",
-      any(c.action.value == "army_attack_move" and c.target_x == 14 and c.target_y == 17
-          for c in cmds_raid))
-cmds_raid_bldg = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army_at_beacon,
-         enemies=[_u(99, "e1", 14, 17)],
-         enemy_bldgs=[_b("powr", 200, 88, 22)]))
-check("raid en casa gana tambien a edificio enemigo en el beacon",
-      any(c.action.value == "army_attack_move" and c.target_x == 14 and c.target_y == 17
-          for c in cmds_raid_bldg))
-army_walk_beacon = [
-    _u(i, "e1", 94 + (i % 3), 10 + (i % 2), idle=False) for i in range(1, 5)
-] + [_u(9, "harv", 90, 12)]
-cmds_defend_walk = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army_walk_beacon,
-         enemies=[_u(99, "e1", 14, 17)]))
-check("raid: recall aunque el blob ya camina al beacon",
-      any(c.action.value == "army_attack_move" and c.target_x == 14
-          and c.target_y == 17 for c in cmds_defend_walk))
-army_fight_home = [
-    _u(i, "e1", 13 + (i % 3), 16, idle=False) for i in range(1, 5)
-] + [_u(9, "harv", 14, 16)]
-cmds_fight = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army_fight_home,
-         enemies=[_u(99, "e1", 14, 17)]))
-check("ya pelean el raid en casa: no cancelar path",
-      not any(c.action.value == "army_attack_move" for c in cmds_fight))
+check("raid en casa: support no recall (la red decide)",
+      not any(c.action.value in ("army_attack_move", "attack_move")
+              for c in cmds_raid))
 aidx_cred = NS(w=128, h=64)
 home_flat = 16 * 128 + 12
 act_army = OpenRAAction(commands=[CommandModel(
@@ -321,67 +254,18 @@ act_army = OpenRAAction(commands=[CommandModel(
 flat_b, xy_b = apply_dest_credit(
     _obs(harv=1, bldgs=("fact", "proc"), units=army4),
     act_army, "army_attack_move", home_flat, aidx_cred)
-check("credit army_attack_move en casa -> beacon", xy_b == (95, 11))
-check("credit muta el comando a beacon",
-      act_army.commands[0].target_x == 95 and act_army.commands[0].target_y == 11)
-check("credit cell_flat = y*w+x", flat_b == 11 * 128 + 95)
-act_train = OpenRAAction(commands=[CommandModel(
-    action=ActionType.TRAIN, item_type="e1")])
-flat_t, xy_t = apply_dest_credit(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army4),
-    act_train, "train", home_flat, aidx_cred)
-check("credit no toca TRAIN", xy_t is None and flat_t == home_flat)
-act_raid = OpenRAAction(commands=[CommandModel(
-    action=ActionType.ARMY_ATTACK_MOVE, target_x=12, target_y=16)])
-_flat_r, xy_r = apply_dest_credit(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army4,
-         enemies=[_u(99, "e1", 14, 17)]),
-    act_raid, "army_attack_move", home_flat, aidx_cred)
-check("credit dest en raid = celda del raid", xy_r == (14, 17))
-grid_w = np.ones((64, 128), dtype=np.float32)
-grid_w[40:, :] = 0.0
-aidx_wat = NS(w=128, h=64, pass_grid=grid_w, cell_mask=grid_w.reshape(-1) > 0.5)
-obs_wat = _obs(h=64, w=128, map_name="no-beacon", harv=1,
-               bldgs=("fact", "proc"), units=army4)
-act_wat = OpenRAAction(commands=[CommandModel(
-    action=ActionType.ARMY_ATTACK_MOVE, target_x=12, target_y=16)])
-_flat_w, xy_w = apply_dest_credit(
-    obs_wat, act_wat, "army_attack_move", home_flat, aidx_wat,
-    last_push=(0, 53))
-check("credit no deja dest en agua", xy_w is None or xy_w[1] < 40)
-stg = _staging_cell(_obs(harv=1, bldgs=("fact", "proc", "tent"), units=army4),
-                    (95, 11))
-cmds_rally = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc", "tent"), units=army4))
-check("rally de tent a staging (no beacon) con 4 rifles",
-      any(c.action.value == "set_rally_point" and c.target_x == stg[0]
-          and c.target_y == stg[1] for c in cmds_rally)
-      and not any(c.action.value == "set_rally_point" and c.target_x == 95
-                  and c.target_y == 11 for c in cmds_rally))
+check("dest credit off: no pisa el click de la red",
+      xy_b is None and flat_b == home_flat
+      and act_army.commands[0].target_x == 12
+      and act_army.commands[0].target_y == 16)
 cmds_rally12 = support_commands(
     _obs(harv=1, bldgs=("fact", "proc", "tent"), units=army12))
-check("rally de tent al beacon con pack 12",
-      any(c.action.value == "set_rally_point" and c.target_x == 95
-          and c.target_y == 11 for c in cmds_rally12))
+check("sin rally de guerra al beacon",
+      not any(c.action.value == "set_rally_point" for c in cmds_rally12))
 cmds_weap = support_commands(
     _obs(harv=1, bldgs=("fact", "proc", "weap"), units=army4))
 check("weap no rally al beacon (HARV sale de weap)",
       not any(c.action.value == "set_rally_point" for c in cmds_weap))
-act_harv_am = OpenRAAction(commands=[CommandModel(
-    action=ActionType.ATTACK_MOVE, actor_id=9, target_x=12, target_y=16)])
-flat_h, xy_h = apply_dest_credit(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army4),
-    act_harv_am, "attack_move", home_flat, aidx_cred)
-check("credit no manda attack_move de harv al beacon",
-      xy_h is None and act_harv_am.commands[0].target_x == 12
-      and act_harv_am.commands[0].target_y == 16
-      and flat_h == home_flat)
-act_e1_am = OpenRAAction(commands=[CommandModel(
-    action=ActionType.ATTACK_MOVE, actor_id=1, target_x=12, target_y=16)])
-_flat_e, xy_e = apply_dest_credit(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army4),
-    act_e1_am, "attack_move", home_flat, aidx_cred)
-check("credit attack_move de rifle SI va al beacon", xy_e == (95, 11))
 obs_h = _obs(harv=1, bldgs=("fact", "proc"), units=army4)
 aidx_h = ActionIndex(obs_h, Vocab())
 hslot = aidx_h.unit_ids.index(9)
@@ -437,9 +321,9 @@ army_walk_home = [
 ] + [_u(9, "harv", 14, 16)]
 cmds_reassault = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army_walk_home))
-check("re-asalto: pack 12 en casa caminando (post-recall) va al beacon",
-      any(c.action.value == "army_attack_move" and c.target_x == 95
-          and c.target_y == 11 for c in cmds_reassault))
+check("re-asalto off: pack 12 caminando no va al beacon",
+      not any(c.action.value in ("army_attack_move", "attack_move")
+              for c in cmds_reassault))
 army_mid = [_u(i, "e1", 48 + i, 20, idle=False) for i in range(1, 5)] + [
     _u(9, "harv", 50, 20)]
 cmds_mid = support_commands(
