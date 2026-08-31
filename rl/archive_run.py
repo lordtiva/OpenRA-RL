@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CKPT = ROOT / "rl" / "ckpts"
-DEFAULT_NAME = "Run 20 (a_short capa2 beginner 923-952)"
+DEFAULT_NAME = "Run 21 (a_short easy 80t 952-978)"
 
 KEEP_ROOT = {"best.pt", "best.json", "latest.pt"}
 

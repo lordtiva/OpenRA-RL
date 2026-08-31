@@ -69,16 +69,16 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 3: easy. Misma red Capa 2, asalto de soporte OFF, eco/micro on.
-# Resume best 951 (beginner 88%). Run 11 easy fue 0/140 con script al beacon;
-# ahora la política elige dest. Si lose>25% ~15 iters → restore 951.
+# Capa 3 easy + APM: 50 ticks/decisión (~2s), 1000 steps ≈ 50k ticks.
+# Asalto support OFF. Resume 970 (mejor snapshot easy; 971 no estaba en disco).
+# best.json por bot_type (un 4/4 beginner no congela easy).
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
     "--iters", "1200",
     "--concurrency", "4",
-    "--max-steps", "624",
-    "--macro-ticks", "80",
+    "--max-steps", "1000",
+    "--macro-ticks", "50",
     "--lr", "1.5e-4",
     "--batch-size", "128",
     "--scenario", "a_short",

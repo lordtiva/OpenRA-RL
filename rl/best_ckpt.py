@@ -242,7 +242,13 @@ def maybe_update_best(ckpt_dir, metrics_row: dict,
     if current is None:
         better, reason = True, "first"
     else:
-        better, reason = is_strictly_better(metrics_row, current)
+        bt_c = str(metrics_row.get("bot_type") or "")
+        bt_b = str(current.get("bot_type") or "")
+        # Beginner 4/4 (iwr=1, wr 0.88) froze easy: never a 4/4 vs easy.
+        if bt_c and bt_b and bt_c != bt_b:
+            better, reason = True, "new_bot_type"
+        else:
+            better, reason = is_strictly_better(metrics_row, current)
     if not better:
         return False
 
@@ -263,6 +269,7 @@ def maybe_update_best(ckpt_dir, metrics_row: dict,
     payload = {
         "iter": metrics_row.get("iter"),
         "reason": reason,
+        "bot_type": metrics_row.get("bot_type"),
         "winrate": metrics_row.get("winrate"),
         "iter_winrate": iter_winrate(metrics_row),
         "winrate_rolling20": metrics_row.get("winrate_rolling20"),

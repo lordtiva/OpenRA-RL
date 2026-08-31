@@ -646,8 +646,8 @@ def main():
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--greedy", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--k-skip", type=int, default=8)
-    ap.add_argument("--macro-ticks", type=int, default=80)
-    ap.add_argument("--max-steps", type=int, default=624)
+    ap.add_argument("--macro-ticks", type=int, default=50)
+    ap.add_argument("--max-steps", type=int, default=1000)
     ap.add_argument("--shaper-preset", default="eradicate_v4", choices=list(PRESETS))
     ap.add_argument("--auto-support", action=argparse.BooleanOptionalAction, default=True,
                     help="harvest/repair/power automático (Pilar B); default on como el train")

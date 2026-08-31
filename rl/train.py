@@ -543,6 +543,7 @@ async def amain(args):
                            for side in ("own", "enemy")}
             metrics_row = {
                     "iter": it,
+                    "bot_type": args.bot_type,
                     "elapsed_s": round(elapsed_s, 1),
                     "eta_min": round(max(eta_s, 0) / 60, 1),
                     "collect_s": round(collect_s, 1),

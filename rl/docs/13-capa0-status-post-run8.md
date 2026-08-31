@@ -40,6 +40,8 @@
 > **Corte 950 (Run 19 Capa 2 + script de asalto → rueditas off):** 923–950, incomplete ~63%, mismo mill. Visor 922: con soporte patrón `(95,11)` / pack 12; sin soporte 2/4 win y clicks distintos, 300 unidades que la red no elige (MAX_UNITS=48). El dest hardcoded es spawn-asimétrico (GUI al revés = tropas a la derecha). Archivo: `rl/ckpts/Run 19 (a_short capa2 assault-script 923-950)/`. Resume **922**. `SUPPORT_ASSAULT=False`: no pack/hunt/recall/rally-guerra/crédito de dest. Eco on (deploy/proc/tent/harvest/repair/sell/power/stance). Sin parche Ch7/Ch8 en (95,11). `army_attack_move` sigue legal en la política. No easy.
 >
 > **Corte 952 (Run 20 Capa 2 cerrada vs beginner → Capa 3 easy):** 30 iters, **102/116 win (87.9%)**, incomplete 9.5%, wr20 **1.0**, 17 tandas 4/4, `best.pt` **951**. Capa 2 del 12 (transformer + scatter + `celda|unidad`) **hecha**; 2b (QSA/GDN/GRU 512) no: Ch6 ya no es el techo vs beginner. Archivo: `rl/ckpts/Run 20 (a_short capa2 beginner 923-952)/`. Resume **951**, `--bot-type easy`, asalto support sigue off. Expectativa: wr20 se cae (easy pega en casa). Si lose>25% ~15 iters → restore 951. No self-play, no APC, no MAX_UNITS este corte.
+>
+> **Corte 978 (Run 21 easy 80t → APM 50 ticks):** 27 iters vs easy, win **8.8%**, lose 70%, incomplete 21%, `defense_loss`≈−4 (raid en casa). wr20 0→0.30 (967–971). `best.pt` quedó en **951 beginner** (iwr 1.0 congela easy). 971 fue el mejor easy (`lwlw`) pero no hay snapshot; resume **970**. Archivo: `rl/ckpts/Run 21 (a_short easy 80t 952-978)/`. `--macro-ticks 50` `--max-steps 1000` (mismo techo ~50k ticks, ~2 s/decisión). `best.json` lleva `bot_type`; un 4/4 beginner no pisa easy. Seguir vs easy. No hard, no QSA, no MAX_UNITS.
 
 ---
 
@@ -239,8 +241,8 @@ Cortes (un régimen por vez):
 6. **Hecho (corte 1010):** Capa 2 transformer + scatter + `celda|unidad` (Net2Net 922).
 7. **Hecho (corte 950):** asalto de soporte OFF (pack/hunt/rally/dest-credit/recall). Eco/micro on. Resume **922**.
 8. **Hecho (corte 952):** Capa 2 vs beginner cerrada (wr 88%). Resume **951**, Capa 3 **easy**.
-9. **Siguiente:** juzgar easy (lose media, `defense_loss`, harvest_edge). No QSA/APC/self-play el mismo corte.
-10. **Capa 2b / 3b:** hard cuando wr20 vs easy se sostenga; indexer QSA / `MAX_UNITS` si el incomplete es 300 e1 ciegos; APC/guard después.
+9. **Hecho (corte 978):** APM 80→50 ticks (1000 steps). Resume **970**. `best` por `bot_type`.
+10. **Siguiente:** wr20 vs easy y `defense_loss`. Si sigue −4 con 2 s, **entonces** `MAX_UNITS` 48→96 (los e1 nuevos no entran en 48). No hard.
 
 | Orden | Dónde | Cuándo | Notas |
 |---|---|---|---|

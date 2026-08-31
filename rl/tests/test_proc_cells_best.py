@@ -432,6 +432,25 @@ check("winrate per-iter gana", ok_wr and reason_wr == "higher_iter_winrate")
 ok_eq, reason_eq = is_strictly_better(a, dict(a))
 check("empate no flap", (not ok_eq) and reason_eq == "not_strictly_better")
 
+with tempfile.TemporaryDirectory() as td_bt:
+    d = Path(td_bt)
+    latest = d / "latest.pt"
+    latest.write_bytes(b"BEG")
+    beg = dict(_builder_row())
+    beg.update({"iter": 951, "iter_winrate": 1.0, "winrate": 0.879,
+                "bot_type": "beginner", "winrate_rolling20": 1.0})
+    check("beginner 4/4 se escribe", maybe_update_best(d, beg, latest_path=str(latest)))
+    latest.write_bytes(b"EASY")
+    easy = dict(_builder_row())
+    easy.update({"iter": 970, "iter_winrate": 0.25, "winrate": 0.066,
+                 "bot_type": "easy", "winrate_rolling20": 0.2})
+    check("easy pisa beginner (nuevo rival, no iwr 1.0)",
+          maybe_update_best(d, easy, latest_path=str(latest)) is True
+          and (d / "best.pt").read_bytes() == b"EASY")
+    meta_e = json.loads((d / "best.json").read_text(encoding="utf-8"))
+    check("best.json bot_type easy", meta_e.get("bot_type") == "easy"
+          and meta_e.get("reason") == "new_bot_type")
+
 with tempfile.TemporaryDirectory() as td:
     d = Path(td)
     latest = d / "latest.pt"
@@ -590,7 +609,7 @@ ckpt_922 = Path("rl/ckpts/best.pt")
 if ckpt_922.exists():
     loaded = AlphaLiteNet()
     it_c2 = _load_ckpt(str(ckpt_922), loaded)
-    check("Capa 2 carga best.pt 922", it_c2 == 922)
+    check("Capa 2 carga best.pt", it_c2 >= 900)
     batch = {
         "spatial": torch.zeros(1, 9, 8, 8),
         "scalars": torch.zeros(1, SCALAR_DIM),
