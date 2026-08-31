@@ -300,6 +300,41 @@ cmds_rally = support_commands(
 check("rally de tent al beacon",
       any(c.action.value == "set_rally_point" and c.target_x == 95
           and c.target_y == 11 for c in cmds_rally))
+cmds_weap = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc", "weap"), units=army4))
+check("weap no rally al beacon (HARV sale de weap)",
+      not any(c.action.value == "set_rally_point" for c in cmds_weap))
+act_harv_am = OpenRAAction(commands=[CommandModel(
+    action=ActionType.ATTACK_MOVE, actor_id=9, target_x=12, target_y=16)])
+flat_h, xy_h = apply_dest_credit(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4),
+    act_harv_am, "attack_move", home_flat, aidx_cred)
+check("credit no manda attack_move de harv al beacon",
+      xy_h is None and act_harv_am.commands[0].target_x == 12
+      and act_harv_am.commands[0].target_y == 16
+      and flat_h == home_flat)
+act_e1_am = OpenRAAction(commands=[CommandModel(
+    action=ActionType.ATTACK_MOVE, actor_id=1, target_x=12, target_y=16)])
+_flat_e, xy_e = apply_dest_credit(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4),
+    act_e1_am, "attack_move", home_flat, aidx_cred)
+check("credit attack_move de rifle SI va al beacon", xy_e == (95, 11))
+obs_h = _obs(harv=1, bldgs=("fact", "proc"), units=army4)
+aidx_h = ActionIndex(obs_h, Vocab())
+hslot = aidx_h.unit_ids.index(9)
+e1slot = aidx_h.unit_ids.index(1)
+act_h_am, _ = index_to_command_effective(
+    obs_h, TYPE_TO_IDX["attack_move"], hslot, home_flat, 0, aidx_h)
+check("adapter attack_move sobre harv -> harvest",
+      act_h_am.commands[0].action.value == "harvest")
+act_h_mv, _ = index_to_command_effective(
+    obs_h, TYPE_TO_IDX["move"], hslot, home_flat, 0, aidx_h)
+check("adapter move sobre harv -> harvest",
+      act_h_mv.commands[0].action.value == "harvest")
+act_e1_am2, _ = index_to_command_effective(
+    obs_h, TYPE_TO_IDX["attack_move"], e1slot, home_flat, 0, aidx_h)
+check("adapter attack_move sobre e1 sigue attack_move",
+      act_e1_am2.commands[0].action.value == "attack_move")
 cmds_stance = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"),
          units=[_u(i, "e1", 12 + i, 16) for i in range(1, 5)]

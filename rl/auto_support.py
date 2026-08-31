@@ -35,8 +35,11 @@ Diseño:
 - Crédito de dest: apply_dest_credit reescribe cell_flat de army/attack_move
   al dest de soporte ANTES del buffer PPO/SIL (el win no acredita click en casa).
   El dest se remapea a celda pasable; hunt en agua era sil_nll ~1e9/128 (Run 13).
-- Rally al dest en tents/weap (Capa 0): los e1 salen caminando, no idle en el tent.
+- Rally al dest en tent/barr/kenn (Capa 0): los e1 salen caminando, no idle en el tent.
+  weap/hpad/syrd NO: HARV sale de Vehicle queue y el visor 921 la veía
+  caminar al beacon. Tanques idle los recoge army_attack_move.
 - Stance AttackAnything al nacer (Capa 0): Defend no caza; el scripted sí.
+  Solo combate (no harv/mcv).
 
 No genera reward — evita defense_loss/hold_zero ya existentes.
 """
@@ -185,8 +188,10 @@ def _cmd_name(cmd) -> str:
 
 COMBAT_PUSH_TYPES = frozenset({"army_attack_move", "attack_move"})
 STANCE_ATTACK_ANYTHING = 3
+# Infantry only. weap/hpad/syrd/afld produce HARV (or mix combat+eco);
+# rally-to-dest marched ore trucks to the enemy beacon (visor 921).
 _RALLY_BUILDINGS = frozenset({
-    "tent", "barr", "weap", "hpad", "kenn", "spen", "syrd", "afld",
+    "tent", "barr", "kenn",
 })
 _NO_SELL = frozenset({"fact", "afac", "proc"})
 SELL_HP = 0.12
@@ -223,6 +228,23 @@ def _cell_mask_ok(aidx, cell_flat) -> bool:
         return True
 
 
+def _is_noncombat_actor(obs, actor_id) -> bool:
+    """True if actor_id is a harvester or MCV (not a combat unit)."""
+    try:
+        aid = int(actor_id or 0)
+    except (TypeError, ValueError):
+        return False
+    if aid <= 0:
+        return False
+    for u in getattr(obs, "units", None) or []:
+        try:
+            if int(getattr(u, "actor_id", 0) or 0) == aid:
+                return not _is_combat(u)
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
 def apply_dest_credit(obs, action, type_name, cell_flat, aidx, last_push=None):
     """cell_flat de army/attack_move = dest de soporte (el que mueve el ejército).
 
@@ -231,9 +253,20 @@ def apply_dest_credit(obs, action, type_name, cell_flat, aidx, last_push=None):
     'clickeaste el mineral y ganaste'. Mutar el comando de política y devolver
     el flat del dest; el caller recalcula log π(a_ejecutada|s).
     TRAIN/BUILD/PLACE no se tocan.
+    attack_move per-unit sobre harv/mcv tampoco: el C# de army_attack_move
+    salta Harvester, pero AttackMove por actor_id no, y el crédito mandaba
+    la recolectora al beacon (visor 921).
     """
     if type_name not in COMBAT_PUSH_TYPES:
         return int(cell_flat), None
+    if type_name == "attack_move":
+        actor_id = 0
+        for c in getattr(action, "commands", None) or []:
+            if _cmd_name(c) == "attack_move":
+                actor_id = int(getattr(c, "actor_id", 0) or 0)
+                break
+        if _is_noncombat_actor(obs, actor_id):
+            return int(cell_flat), None
     dest = _push_cell(obs, last_push)
     dest = _snap_passable(obs, dest, aidx)
     if dest is None:
@@ -249,9 +282,13 @@ def apply_dest_credit(obs, action, type_name, cell_flat, aidx, last_push=None):
     if not _cell_mask_ok(aidx, new_flat):
         return int(cell_flat), None
     for c in getattr(action, "commands", None) or []:
-        if _cmd_name(c) in COMBAT_PUSH_TYPES:
-            c.target_x = x
-            c.target_y = y
+        if _cmd_name(c) not in COMBAT_PUSH_TYPES:
+            continue
+        if (_cmd_name(c) == "attack_move"
+                and _is_noncombat_actor(obs, getattr(c, "actor_id", 0))):
+            continue
+        c.target_x = x
+        c.target_y = y
     return int(new_flat), (x, y)
 
 
@@ -457,6 +494,7 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
                     break
 
     # 4) Rally al dest — e1 spawnea y camina (Capa 0, no la política).
+    #    Solo tents/barr/kenn. weap produce HARV: no marchar ore al dest.
     if dest is not None and has_proc:
         px, py = dest
         for b in blds:

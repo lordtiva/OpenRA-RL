@@ -69,7 +69,8 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Dest pasable (SIL -1e9) + rally al dest + stance AttackAnything.
+# Harv no va al dest: rally solo tent/barr/kenn; credit skip attack_move
+# harv/mcv; adapter move/attack_move harv -> harvest.
 # Resume best.pt 899 vs beginner. No Capa 2. lambda_bc=0.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",

@@ -437,6 +437,12 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     if t_name in COMBAT_MOVE_TYPES and not owns_proc(obs):
         t_name = "no_op"
 
+    # Recolectora no combate: move/attack_move/attack sobre harv es harvest.
+    # Dest credit + rally weap la mandaban al beacon (visor 921). El C#
+    # army_attack_move sí salta Harvester; el per-unit no.
+    if t_name in ("move", "attack_move", "attack") and _is_harvester(obs, actor_id):
+        t_name = "harvest"
+
     if t_name == "train" and not owns_proc(obs):
         t_name = "no_op"
     elif t_name == "train" and not economy_ready_for_combat(obs):
@@ -531,6 +537,22 @@ def _pending_building_type(obs):
         if p.queue_type == "Building" and p.progress >= 1.0:
             return p.item
     return None
+
+
+def _is_harvester(obs, actor_id) -> bool:
+    try:
+        aid = int(actor_id or 0)
+    except (TypeError, ValueError):
+        return False
+    if aid <= 0:
+        return False
+    for u in getattr(obs, "units", None) or []:
+        try:
+            if int(getattr(u, "actor_id", 0) or 0) == aid:
+                return "harv" in str(getattr(u, "type", "")).lower()
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _any_harvester(obs):

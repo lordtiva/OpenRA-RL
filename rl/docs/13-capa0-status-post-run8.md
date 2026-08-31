@@ -24,6 +24,8 @@
 > **Corte 977 (Run 12 dest-credit):** 78 iters, wr 0.19, **incomplete ~70%** plano, wr20 0.20, 0 tandas 4/4, `best.pt` sigue 899. El visor 915–921: `last_push=[95,11]` (crédito OK) pero el blob oscila x=40–50 hasta timeout. Causa: after recall el dest vuelve a beacon y **no se re-emite** `army_attack_move` (unidades caminando a casa). Archivo: `rl/ckpts/Run 12 (a_short dest-credit beginner 900-977)/`. Resume **899**. Parche: re-asalto si dest es beacon/hunt, ≥4 combate en casa y <4 en dest. No Capa 2. Bar: incomplete <40% y wr20 ≥0.40.
 >
 > **Corte 923 (Run 13 SIL bomba):** re-asalto no se pudo juzgar. `sil_nll` 2–4 → **7.8e6** (`1e9/128` = un dest en celda con logit −1e9). Hunt `y=36` pisa agua. `pi_loss` 1e24–1e28, `grad_norm` inf, incomplete 75%. Archivo: `rl/ckpts/Run 13 (a_short reassault sil-bomb 900-923)/`. Resume **899**. Este corte: (1) dest/hunt → `remap_move_cell` + skip si sigue tapada; SIL `lp.clamp(-20)`; `HUNT_Y_MAX` 36→32. (2) **Capa 0 de la tabla órdenes:** rally al dest en tent/weap + stance AttackAnything al nacer + sell hp&lt;12% (no fact/proc). No Capa 2.
+>
+> **Corte 939 (Run 14 harv al dest):** dest pasable + rally/stance. SIL sano (`sil_nll` ~4–11, no 7e6). wr ~0.10, wr20 0, incomplete alto, `attack_move` 90–150/iter. Visor: la recolectora camina al NE. Causa: (1) dest credit reescribe `attack_move` per-unit al dest y el slot puede ser harv (C# `army_attack_move` salta `Harvester`, el per-unit no); (2) rally de `weap` al dest — HARV sale de Vehicle queue. Live #3: weap=1, **11 harvs**, dest `[95,11]`. Archivo: `rl/ckpts/Run 14 (a_short dest-passable harv-leak 900-939)/`. Resume **899**. Parche: rally combate solo `tent`/`barr`/`kenn`; credit no toca `attack_move` de harv/mcv; adapter `move`/`attack_move`/`attack` sobre harv → `harvest`. No Capa 2.
 
 ---
 
@@ -216,13 +218,14 @@ El C# (`ActionHandler`) ya traduce casi todo lo que usa `examples/scripted_bot.p
 Cortes (un régimen por vez):
 
 1. **Hecho (corte 923):** dest pasable (SIL) + rally al dest + stance AttackAnything al spawn + sell ruinas. Resume 899.
-2. **Siguiente:** juzgar incomplete/wr20. Si el blob sigue idle en el tent, el rally no está pegando (visor: `set_rally_point`). No Capa 2 todavía.
-3. **Capa 2:** transformer + scatter + `celda|unidad`. APC / guard-aprendido **después**, corte aparte.
-4. **Capa 3:** easy / self-play. Cero de esta lista pendiente.
+2. **Hecho (corte 939):** harv no marcha al dest (rally `weap` off, credit skip harv/mcv, adapter harvest). Resume 899.
+3. **Siguiente:** juzgar incomplete/wr20. Rally de combate = tent/barr/kenn (no weap). Si incomplete sigue ≥70% a ~20 iters, clavar rally al **beacon** (no al dest de este bloque). No Capa 2 todavía.
+4. **Capa 2:** transformer + scatter + `celda|unidad`. APC / guard-aprendido **después**, corte aparte.
+5. **Capa 3:** easy / self-play. Cero de esta lista pendiente.
 
 | Orden | Dónde | Cuándo | Notas |
 |---|---|---|---|
-| `set_rally_point` | **support**, no la red | **Hecho corte 923** | e1 spawnea y camina al dest. Un rally/bloque si `rally_x/y` ≠ dest. |
+| `set_rally_point` | **support**, no la red | **Hecho corte 923; weap off 939** | e1 (tent/barr/kenn) spawnea y camina al dest. **No** weap/hpad/syrd: HARV sale de Vehicle. |
 | `set_stance` AttackAnything al nacer | **support** | **Hecho corte 923** | `target_x=3` si `stance≠3`. Un unit/bloque. |
 | `sell` HP muy baja | **support** (como repair) | **Hecho corte 923** | hp&lt;0.12, no fact/proc. Un sell/bloque. |
 | `guard` | **no es tipo nuevo ahora** | Capa 0 ya tiene recall a casa. “Dejá 2 en la fact” = regla de dest, no `GUARD` | A la política, **después de Capa 2** (unidad + edificio). |
@@ -230,7 +233,7 @@ Cortes (un régimen por vez):
 | `enter_transport` / `unload` | política, **después del pointer** | **Capa 2 cerrada** (smoke 20 iters, `last_push` sigue al sujeto) **y** wr20 vs beginner ≥0.40 | Sin `celda\|unidad` el APC es un click a Ch6. No es Capa 0. Mask v0 los tiene apagados a propósito. |
 | `surrender` | **nunca** en la política | — | Mask apagado. El win lo declara el engine. |
 
-Ya cubierto en support (no reabrir): repair HP&lt;35%, harvest idle, power_down brownout, deploy MCV, auto-proc/harv, `army_attack_move` de grupo, dest credit, defend recall, re-asalto.
+Ya cubierto en support (no reabrir): repair HP&lt;35%, harvest idle, power_down brownout, deploy MCV, auto-proc/harv, `army_attack_move` de grupo, dest credit (no harv/mcv per-unit), defend recall, re-asalto, rally tent-only.
 
 ---
 
@@ -324,4 +327,4 @@ Ckpts del Run 8: `rl/ckpts/Run 8 (a_short collapse no_op 220-408)/`. Resume vivo
 
 ---
 
-*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 923: dest pasable + rally/stance/sell (Run 13 SIL archivado).*
+*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 939: harv no marcha al dest (Run 14 archivado; resume 899).*
