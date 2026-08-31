@@ -15,12 +15,12 @@ Diseño:
 - Cosecha: si harv está idle y hay proc, emite 1 harvest (auto al ore más cercano).
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
 - Push keep-alive: ociosos de combate hacia enemigo visible / beacon / hunt.
-- Asalto sostenido (Capa 0, corte Run9 iter 442 + visor 817): con proc+harv
-  y ≥N rifles, el entorno manda el ejército al enemigo visible o al beacon
-  aunque la red elija train/build. NO usa last_push de la política (la
-  cabeza de celda apunta al blob propio → hormiguero en casa). NO re-emite
-  army_attack_move a unidades que ya caminan (el re-order cada 80 ticks
-  cancelaba el path).
+- Asalto sostenido (Capa 0, corte Run9 iter 442 + visor 817, pack 12
+  corte 947): con proc+harv y ≥N rifles EN CASA, el entorno manda el
+  ejército al enemigo visible o al beacon. Rally staging hasta el pack;
+  no attack_move de 1–3 ociosos (visor 6am: oleadas de 4 mueren en x≈45).
+  NO usa last_push de la política. NO re-emite army_attack_move a
+  unidades que ya caminan salvo recall/re-asalto.
 - Hunt (iter ~854): si ≥N combate ya están en el beacon y no hay objetivo
   visible, el destino rota por waypoints al sur/oeste del NE. El pile-up
   en (95,11) dejaba edificios resagados en niebla y el episodio iba a
@@ -56,7 +56,14 @@ _POWER_DOWN_TYPES = {"dome", "tsla", "mslo", "atag", "stag"}
 _NON_COMBAT = ("harv", "mcv")
 # Don't march a 1-rifle scout; wait for a real army (Run7 collapse was
 # combat-without-eco; this gate is the army half of that lesson).
-MIN_ARMY_FOR_ASSAULT = 4
+# Visor 6am 947: 4 idle → army_attack_move + rally-to-beacon = oleada de 4
+# que muere en x≈45 (nd≥4≈0, incomplete 81%). Pack at HOME, not total nc.
+MIN_ARMY_FOR_ASSAULT = 12
+# Already piled on the enemy half: 4 is enough to hunt leftover buildings.
+MIN_PILE_FOR_HUNT = 4
+# Rally staging: toward dest from the conyard, not the beacon, until the pack
+# is ready. STAGING_STEPS cells (~10) keeps new e1 in the yard.
+STAGING_STEPS = 10
 # Pile-up at the beacon (visor 851: 230 e1, dist 2.8, then timeout if a
 # powr/tent sits in fog 15 cells south). Hunt only after this many combat
 # units are actually there — home spawns must not start the sweep.
@@ -202,6 +209,35 @@ _BARRACKS_ITEMS = ("tent", "barr")
 TENT_COST = 500
 
 
+def _own_anchor(obs):
+    """Construction yard / first civic building (rally origin)."""
+    for b in getattr(obs, "buildings", None) or []:
+        t = str(getattr(b, "type", "") or "").lower()
+        if t in ("fact", "afac", "proc", "tent", "barr", "powr", "apwr"):
+            try:
+                return _xy(b)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _staging_cell(obs, dest, aidx=None):
+    """A cell ~STAGING_STEPS toward dest from the yard. Pack gathers here."""
+    origin = _own_anchor(obs) or (12, 16)
+    if dest is None:
+        raw = (int(origin[0]) + STAGING_STEPS, int(origin[1]))
+    else:
+        dx = int(dest[0]) - int(origin[0])
+        dy = int(dest[1]) - int(origin[1])
+        n = max(abs(dx), abs(dy), 1)
+        raw = (
+            int(origin[0]) + int(round(STAGING_STEPS * dx / n)),
+            int(origin[1]) + int(round(STAGING_STEPS * dy / n)),
+        )
+    snapped = _snap_passable(obs, raw, aidx)
+    return snapped if snapped is not None else (int(raw[0]), int(raw[1]))
+
+
 def _snap_passable(obs, dest, aidx=None):
     """Dest de soporte/hunt en tierra. Hunt y=36 era agua → sil_nll 7e6."""
     if dest is None:
@@ -343,7 +379,7 @@ def _push_cell(obs, last_push):
         return _nearest_xy(bldgs, origin)
     combat = _combat_units(getattr(obs, "units", None) or [])
     n_at = _n_combat_at(combat, beacon, ARRIVED_CELLS) if beacon is not None else 0
-    piled = n_at >= MIN_ARMY_FOR_ASSAULT
+    piled = n_at >= MIN_PILE_FOR_HUNT
     if ene_u:
         e = _nearest_xy(ene_u, origin)
         if piled and beacon is not None and _dist2(e, beacon) > STRAY_FROM_BEACON ** 2:
@@ -476,28 +512,34 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
                     out.append(CommandModel(action=ActionType.POWER_DOWN, actor_id=int(b.actor_id)))
                     break  # uno por bloque
 
-    # 3) Asalto sostenido + keep-alive. Gratis para PPO.
+    # 3) Asalto sostenido. Gratis para PPO.
     #    Destino = raid-en-casa / edificio visible / unidad / hunt / beacon
-    #    (no last_push). army_attack_move de grupo SOLO si hay ≥MIN_ARMY
-    #    ociosos; si no, ATTACK_MOVE a ociosos (cap 16). Re-emitir el grupo
-    #    cada bloque cancelaba el path (visor) — EXCEPTO:
+    #    (no last_push). Group army_attack_move only if ≥MIN_ARMY are HOME
+    #    (visor 6am: 4 idle + rally-to-beacon = feed). Do NOT attack_move
+    #    leftover 1–3 idles to dest — that was the drip.
     #    - defend recall: raid en casa y el blob no está ahí (Run 11).
-    #    - re-asalto: dest volvió a beacon/hunt y el blob sigue en casa
-    #      caminando (Run 12: post-recall el viaje a casa no se cancelaba).
+    #    - re-asalto: dest volvió a beacon/hunt y el pack sigue en casa
+    #      caminando (Run 12).
     combat = _combat_units(units)
     has_harv = _has_harvester(obs, eco, units, prod)
     raw_dest = _push_cell(obs, last_push)
     waypoint = _is_beacon_or_hunt(obs, raw_dest)
     dest = _snap_passable(obs, raw_dest, aidx)
     defending = bool(home_raid_targets(obs))
+    n_home = _n_combat_near_own_base(obs, combat)
+    n_at_dest = 0
+    if dest is not None:
+        n_at_dest = _n_combat_at(combat, dest, ARRIVED_CELLS)
+    beacon = resolve_beacon(obs)
+    n_at_beacon = (_n_combat_at(combat, beacon, ARRIVED_CELLS)
+                   if beacon is not None else 0)
     assault = (has_proc and has_harv and dest is not None
-               and len(combat) >= MIN_ARMY_FOR_ASSAULT)
+               and n_home >= MIN_ARMY_FOR_ASSAULT)
     if dest is not None and (has_proc or defending):
         px, py = dest
         idles = [u for u in combat if bool(getattr(u, "is_idle", False))]
-        n_at_dest = _n_combat_at(combat, (px, py), ARRIVED_CELLS)
-        n_home = _n_combat_near_own_base(obs, combat)
-        recall = bool(defending and combat and n_at_dest < MIN_ARMY_FOR_ASSAULT)
+        idles_home = [u for u in idles if _near_own_base(obs, _xy(u))]
+        recall = bool(defending and combat and n_at_dest < MIN_PILE_FOR_HUNT)
         reassault = bool(
             assault
             and not defending
@@ -505,38 +547,42 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
             and n_home >= MIN_ARMY_FOR_ASSAULT
             and waypoint
         )
-        if recall or reassault or (assault and len(idles) >= MIN_ARMY_FOR_ASSAULT):
+        pack_idle = assault and len(idles_home) >= MIN_ARMY_FOR_ASSAULT
+        # Already on the enemy half: hunt/visible dest. Idle pile only —
+        # don't cancel a walk to the next waypoint every 80 ticks.
+        sweep = (not defending and has_proc and has_harv
+                 and n_at_beacon >= MIN_PILE_FOR_HUNT
+                 and len(idles) >= MIN_PILE_FOR_HUNT)
+        if recall or reassault or pack_idle or sweep:
             out.append(CommandModel(
                 action=ActionType.ARMY_ATTACK_MOVE, target_x=px, target_y=py))
-        else:
-            n_push = 0
-            for u in idles:
-                out.append(CommandModel(
-                    action=ActionType.ATTACK_MOVE,
-                    actor_id=int(u.actor_id),
-                    target_x=int(px),
-                    target_y=int(py),
-                ))
-                n_push += 1
-                if n_push >= 16:
-                    break
 
-    # 4) Rally al dest — e1 spawnea y camina (Capa 0, no la política).
+    # 4) Rally. Staging near the yard until the pack is ready; dest only
+    #    when ≥MIN_ARMY are home (or already arriving / defending).
     #    Solo tents/barr/kenn. weap produce HARV: no marchar ore al dest.
-    if dest is not None and has_proc:
-        px, py = dest
+    if has_proc:
+        pack_committed = bool(
+            defending
+            or n_home >= MIN_ARMY_FOR_ASSAULT
+            or n_at_dest >= MIN_PILE_FOR_HUNT
+            or n_at_beacon >= MIN_PILE_FOR_HUNT
+        )
+        if dest is not None and pack_committed:
+            rx_t, ry_t = dest
+        else:
+            rx_t, ry_t = _staging_cell(obs, dest, aidx)
         for b in blds:
             if str(getattr(b, "type", "")).lower() not in _RALLY_BUILDINGS:
                 continue
             rx = int(getattr(b, "rally_x", -1) if getattr(b, "rally_x", -1) is not None else -1)
             ry = int(getattr(b, "rally_y", -1) if getattr(b, "rally_y", -1) is not None else -1)
-            if rx == int(px) and ry == int(py):
+            if rx == int(rx_t) and ry == int(ry_t):
                 continue
             out.append(CommandModel(
                 action=ActionType.SET_RALLY_POINT,
                 actor_id=int(b.actor_id),
-                target_x=int(px),
-                target_y=int(py),
+                target_x=int(rx_t),
+                target_y=int(ry_t),
             ))
             break
 

@@ -203,9 +203,19 @@ class AlphaLiteNet(nn.Module):
         new_hidden = self.core(fused, hidden)
         return fmap, feat_map_flat, new_hidden
 
+    @staticmethod
+    def _categorical(logits):
+        """Categorical that does not crash on NaN/all-masked rows (PPO 947)."""
+        logits = torch.nan_to_num(logits, nan=-1e9, posinf=1e9, neginf=-1e9)
+        dead = (logits <= -1e8).all(dim=-1)
+        if dead.any():
+            logits = logits.clone()
+            logits[dead, 0] = 0.0
+        return torch.distributions.Categorical(logits=logits)
+
     def dist_type(self, hidden, type_mask):
         logits = self._logits_type(hidden, type_mask)
-        return torch.distributions.Categorical(logits=logits)
+        return self._categorical(logits)
 
     def _logits_type(self, hidden, type_mask):
         return self.head_type(hidden).masked_fill(~type_mask, -1e9)
@@ -227,7 +237,7 @@ class AlphaLiteNet(nn.Module):
         son distinguibles desde las features.
         """
         logits = self._scores_unit(hidden, chosen_type, unit_feats, unit_valid)
-        return torch.distributions.Categorical(logits=logits)
+        return self._categorical(logits)
 
     def _logits_cell(self, fmap, chosen_type, cell_mask, hidden):
         """Logits crudos [B, H*W] de la cabeza de celda.
@@ -247,7 +257,7 @@ class AlphaLiteNet(nn.Module):
 
     def dist_cell(self, fmap, chosen_type, cell_mask, hidden):
         logits = self._logits_cell(fmap, chosen_type, cell_mask, hidden)
-        return torch.distributions.Categorical(logits=logits)
+        return self._categorical(logits)
 
     def _scores_item(self, hidden, chosen_type, item_indices, item_mask):
         """Logits crudos de la cabeza de ítems. item_indices: [B,V]
@@ -260,7 +270,7 @@ class AlphaLiteNet(nn.Module):
 
     def dist_item(self, hidden, chosen_type, item_indices, item_mask):
         logits = self._scores_item(hidden, chosen_type, item_indices, item_mask)
-        return torch.distributions.Categorical(logits=logits)
+        return self._categorical(logits)
 
     def _item_cat_mask(self, batch, t_idx):
         """Máscara de ítems ESTRICTAMENTE condicional a la cabeza de tipo.
@@ -306,31 +316,31 @@ class AlphaLiteNet(nn.Module):
         greedy = temperature <= 0.0
 
         lt = self._logits_type(new_hidden, batch["type_mask"])
-        dist_t = torch.distributions.Categorical(logits=lt)
+        dist_t = self._categorical(lt)
         t_idx = lt.argmax(dim=-1) if greedy else \
-            torch.distributions.Categorical(logits=lt / temperature).sample()
+            self._categorical(lt / temperature).sample()
 
         ls_u = self._scores_unit(new_hidden, t_idx, batch["unit_feats"],
                                  batch["unit_valid"])
-        dist_u = torch.distributions.Categorical(logits=ls_u)
+        dist_u = self._categorical(ls_u)
         u_idx = ls_u.argmax(dim=-1) if greedy else \
-            torch.distributions.Categorical(logits=ls_u / temperature).sample()
+            self._categorical(ls_u / temperature).sample()
 
         lc = self._logits_cell(fmap, t_idx, batch["cell_mask"], new_hidden)
-        dist_c = torch.distributions.Categorical(logits=lc)
+        dist_c = self._categorical(lc)
         c_idx = lc.argmax(dim=-1) if greedy else \
-            torch.distributions.Categorical(logits=lc / temperature).sample()
+            self._categorical(lc / temperature).sample()
 
         has_items = batch["item_mask"].any(dim=-1)
         safe_item_mask = self._item_cat_mask(batch, t_idx).clone()
         safe_item_mask[~has_items] = True  # fila dummy si no hay items
         li = self._scores_item(new_hidden, t_idx, batch["item_indices"],
                                safe_item_mask)
-        dist_i = torch.distributions.Categorical(logits=li)
+        dist_i = self._categorical(li)
         # SAMPLEAR (no argmax) salvo greedy: argmax mataba la exploración
         # entre edificios y el agente colapsaba en producir siempre el mismo
         i_sampled = li.argmax(dim=-1) if greedy else \
-            torch.distributions.Categorical(logits=li / temperature).sample()
+            self._categorical(li / temperature).sample()
         i_idx = torch.where(has_items, i_sampled, torch.zeros_like(t_idx))
 
         # F3 (auditoría 2026-08-24): log_prob SOLO de las cabezas que el

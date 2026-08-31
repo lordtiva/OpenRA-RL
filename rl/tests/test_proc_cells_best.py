@@ -23,7 +23,8 @@ from rl.action_adapter import (
 )
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.auto_support import (
-    HUNT_OFFSETS, STANCE_ATTACK_ANYTHING, apply_dest_credit, support_commands,
+    HUNT_OFFSETS, MIN_ARMY_FOR_ASSAULT, STAGING_STEPS, STANCE_ATTACK_ANYTHING,
+    apply_dest_credit, support_commands, _staging_cell,
 )
 from rl.best_ckpt import (
     batch_is_dead,
@@ -209,43 +210,52 @@ check("support no keep-alive attack sin proc",
       not any(c.action.value == "attack_move" for c in cmds_push))
 cmds_push2 = support_commands(
     _obs(bldgs=("fact", "proc"), units=[_u(1, "e1", 12, 16)]), last_push=(90, 12))
-check("support keep-alive attack CON proc",
-      any(c.action.value == "attack_move" for c in cmds_push2))
+check("support keep-alive NO drip 1 rifle CON proc",
+      not any(c.action.value in ("attack_move", "army_attack_move")
+              for c in cmds_push2))
 
 army4 = [_u(i, "e1", 12 + i, 16) for i in range(1, 5)] + [_u(9, "harv", 14, 16)]
+army12 = [_u(i, "e1", 12 + (i % 4), 16 + (i // 4)) for i in range(1, 13)] + [
+    _u(9, "harv", 14, 16)]
+check("pack size", MIN_ARMY_FOR_ASSAULT == 12 and STAGING_STEPS == 10)
 cmds_has_tent = support_commands(
     _obs(harv=1, cash=5000, bldgs=("fact", "proc", "tent"),
          avail=("e1", "tent", "proc"), units=army4))
 check("auto-tent no spamea si ya hay tent",
       not any(c.action.value == "build" and c.item_type in ("tent", "barr")
               for c in cmds_has_tent))
-cmds_assault = support_commands(
+cmds_drip4 = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army4, enemies=[_u(99, "e1", 90, 12)]))
-check("asalto sostenido: army_attack_move con 4 rifles + proc + harv",
+check("4 rifles NO asaltan (pack 12, visor 6am)",
+      not any(c.action.value in ("army_attack_move", "attack_move")
+              for c in cmds_drip4))
+cmds_assault = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army12, enemies=[_u(99, "e1", 90, 12)]))
+check("asalto sostenido: army_attack_move con 12 rifles EN CASA + proc + harv",
       any(c.action.value == "army_attack_move" for c in cmds_assault))
 am = next(c for c in cmds_assault if c.action.value == "army_attack_move")
 check("asalto apunta al enemigo visible", am.target_x == 90 and am.target_y == 12)
 cmds_no_eco = support_commands(
-    _obs(bldgs=("fact",), units=army4, enemies=[_u(99, "e1", 90, 12)]))
+    _obs(bldgs=("fact",), units=army12, enemies=[_u(99, "e1", 90, 12)]))
 check("asalto NO arranca sin proc",
       not any(c.action.value == "army_attack_move" for c in cmds_no_eco))
 cmds_no_harv = support_commands(
-    _obs(harv=0, bldgs=("fact", "proc"), units=army4[:4],
+    _obs(harv=0, bldgs=("fact", "proc"), units=army12[:12],
          enemies=[_u(99, "e1", 90, 12)]))
 check("asalto NO arranca sin harv",
       not any(c.action.value == "army_attack_move" for c in cmds_no_harv))
 cmds_beacon = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army4))
+    _obs(harv=1, bldgs=("fact", "proc"), units=army12))
 check("asalto sin enemigo visible usa beacon a_short",
       any(c.action.value == "army_attack_move" and c.target_x == 95 and c.target_y == 11
           for c in cmds_beacon))
 cmds_home = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army4), last_push=(12, 16))
+    _obs(harv=1, bldgs=("fact", "proc"), units=army12), last_push=(12, 16))
 check("asalto ignora last_push en casa, usa beacon",
       any(c.action.value == "army_attack_move" and c.target_x == 95 and c.target_y == 11
           for c in cmds_home))
 cmds_title = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"), units=army4, map_name="Singles"),
+    _obs(harv=1, bldgs=("fact", "proc"), units=army12, map_name="Singles"),
     last_push=(12, 16))
 check("asalto con Title=Singles (obs real) usa beacon, no last_push",
       any(c.action.value == "army_attack_move" and c.target_x == 95 and c.target_y == 11
@@ -338,11 +348,20 @@ _flat_w, xy_w = apply_dest_credit(
     obs_wat, act_wat, "army_attack_move", home_flat, aidx_wat,
     last_push=(0, 53))
 check("credit no deja dest en agua", xy_w is None or xy_w[1] < 40)
+stg = _staging_cell(_obs(harv=1, bldgs=("fact", "proc", "tent"), units=army4),
+                    (95, 11))
 cmds_rally = support_commands(
     _obs(harv=1, bldgs=("fact", "proc", "tent"), units=army4))
-check("rally de tent al beacon",
+check("rally de tent a staging (no beacon) con 4 rifles",
+      any(c.action.value == "set_rally_point" and c.target_x == stg[0]
+          and c.target_y == stg[1] for c in cmds_rally)
+      and not any(c.action.value == "set_rally_point" and c.target_x == 95
+                  and c.target_y == 11 for c in cmds_rally))
+cmds_rally12 = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc", "tent"), units=army12))
+check("rally de tent al beacon con pack 12",
       any(c.action.value == "set_rally_point" and c.target_x == 95
-          and c.target_y == 11 for c in cmds_rally))
+          and c.target_y == 11 for c in cmds_rally12))
 cmds_weap = support_commands(
     _obs(harv=1, bldgs=("fact", "proc", "weap"), units=army4))
 check("weap no rally al beacon (HARV sale de weap)",
@@ -412,11 +431,12 @@ cmds_walk = support_commands(
          enemies=[_u(99, "e1", 90, 12)]))
 check("no re-emite army_attack si el blob ya camina",
       not any(c.action.value in ("army_attack_move", "attack_move") for c in cmds_walk))
-army_walk_home = [_u(i, "e1", 12 + i, 16, idle=False) for i in range(1, 5)] + [
-    _u(9, "harv", 14, 16)]
+army_walk_home = [
+    _u(i, "e1", 12 + (i % 4), 16 + (i // 4), idle=False) for i in range(1, 13)
+] + [_u(9, "harv", 14, 16)]
 cmds_reassault = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army_walk_home))
-check("re-asalto: blob en casa caminando (post-recall) va al beacon",
+check("re-asalto: pack 12 en casa caminando (post-recall) va al beacon",
       any(c.action.value == "army_attack_move" and c.target_x == 95
           and c.target_y == 11 for c in cmds_reassault))
 army_mid = [_u(i, "e1", 48 + i, 20, idle=False) for i in range(1, 5)] + [
@@ -430,10 +450,9 @@ army_mix = [_u(1, "e1", 12, 16, idle=True)] + [
 cmds_mix = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army_mix,
          enemies=[_u(99, "e1", 90, 12)]))
-check("blob caminando: solo ATTACK_MOVE al ocioso, no army_attack",
-      any(c.action.value == "attack_move" and c.actor_id == 1
-          and c.target_x == 90 for c in cmds_mix)
-      and not any(c.action.value == "army_attack_move" for c in cmds_mix))
+check("blob caminando: 1 ocioso no drip al dest",
+      not any(c.action.value in ("army_attack_move", "attack_move")
+              for c in cmds_mix))
 
 h, w = 64, 128
 grid = np.ones((h, w), dtype=np.float32)
@@ -548,6 +567,7 @@ with tempfile.TemporaryDirectory() as td:
           maybe_update_best(d, row, latest_path=str(latest)) is False
           and (d / "best.pt").read_bytes() == b"CKPT-A")
 
+from rl.play_skirmish import action_to_dicts, obs_from_dict
 from rl.play_vs_checkpoint_live import _harv_xy, _n_combat, _tape_row
 obs_t = _obs(harv=1, bldgs=("fact", "proc"),
              units=[_u(1, "e1", 12, 16), _u(9, "harv", 14, 17)])
@@ -558,6 +578,41 @@ row_t = _tape_row(obs_t, ep="x", ckpt=899, dec=3, pol="train",
 check("tape row dest y harv",
       row_t["sup"] == [95, 11] and row_t["harv"] == [[14, 17]]
       and row_t["pol"] == "train" and row_t["nh"] == 1)
+
+import torch
+from rl.network import AlphaLiteNet
+net_nan = AlphaLiteNet()
+bad = torch.full((1, 22), float("nan"))
+cat_nan = AlphaLiteNet._categorical(bad)
+check("categorical nan no crashea", torch.isfinite(cat_nan.logits).all().item())
+check("categorical nan cae a no_op (slot 0)",
+      int(cat_nan.probs.argmax(-1).item()) == 0)
+
+act_sk = OpenRAAction(commands=[
+    CommandModel(action=ActionType.ARMY_ATTACK_MOVE, target_x=95, target_y=11),
+    CommandModel(action=ActionType.TRAIN, item_type="e1"),
+])
+dicts_sk = action_to_dicts(act_sk)
+check("skirmish action_to_dicts names",
+      dicts_sk[0]["action"] == "army_attack_move" and dicts_sk[1]["item_type"] == "e1")
+obs_sk = obs_from_dict({
+    "tick": 80,
+    "economy": {"cash": 5000},
+    "military": {},
+    "units": [{"actor_id": 1, "type": "e1", "cell_x": 12, "cell_y": 16}],
+    "buildings": [],
+    "production": [],
+    "visible_enemies": [],
+    "visible_enemy_buildings": [],
+    "map_info": {"width": 112, "height": 54, "map_name": "Singles"},
+    "available_production": ["e1"],
+    "done": False,
+    "spatial_map": "",
+    "spatial_channels": 9,
+})
+check("skirmish obs_from_dict",
+      obs_sk.tick == 80 and obs_sk.map_info.map_name == "Singles"
+      and obs_sk.units[0].type == "e1" and obs_sk.economy.cash == 5000)
 
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS"))
 sys.exit(0 if ok else 1)

@@ -48,6 +48,7 @@ BEACON_BY_MAP = {
     # ObservationSerializer writes world.Map.Title, not the filename.
     # All fase2_*.oramap currently ship Title: Singles (live_games 2026-08-30).
     "Singles": (95, 11),
+    "A-short (PPO train)": (95, 11),
 }
 
 

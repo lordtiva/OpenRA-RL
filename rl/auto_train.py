@@ -69,7 +69,7 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Muros = BUILD (no train:sbag). Auto-tent tras proc.
+# Pack 12 en casa + rally staging (no oleadas de 4). NaN logits → no crash.
 # Resume best.pt 899 vs beginner. No Capa 2. lambda_bc=0.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",

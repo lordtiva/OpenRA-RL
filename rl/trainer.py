@@ -80,9 +80,15 @@ class PPOTrainer:
                 # vez → memoria SÓLO del segmento actual, no de todo el batch.
                 self.net.zero_grad(set_to_none=True)
                 coef = None
+                n_back = 0
                 for seg in mb:
                     lp_new, entropy, value = self.net.evaluate_actions_seq(
                         seg, self.device)
+                    if (not torch.isfinite(lp_new).all()
+                            or not torch.isfinite(value).all()
+                            or not torch.isfinite(entropy).all()):
+                        continue
+                    n_back += 1
                     if coef is None:
                         h_mean = float(entropy.mean().item())
                         coef = self.ent_lo + self.ent_hi * max(
@@ -128,6 +134,8 @@ class PPOTrainer:
                         stats["clip_frac"].append(float(clip_frac.item()))
                         stats["kl"].append(float(kl.item()))
 
+                if n_back == 0:
+                    continue
                 gn = torch.nn.utils.clip_grad_norm_(
                     self.net.parameters(), self.max_grad_norm).item()
                 self.opt.step()
@@ -166,10 +174,14 @@ class PPOTrainer:
                 loss = None
                 for seg in mb:
                     lp, _, _ = self.net.evaluate_actions_seq(seg, self.device)
+                    if not torch.isfinite(lp).all():
+                        continue
                     # Dest ilegal (agua) daba logit -1e9 → sil_nll ~7e6 (Run 13).
                     lp = lp.clamp(min=-20.0)
                     nll = -lp.mean() / len(mb)
                     loss = nll if loss is None else loss + nll
+                if loss is None:
+                    continue
                 (coef * loss).backward()
                 torch.nn.utils.clip_grad_norm_(
                     self.net.parameters(), self.max_grad_norm)

@@ -50,6 +50,28 @@ cd C:\Users\lordc\Desktop\OpenRA-RL; .\.venv\Scripts\python.exe -m http.server 8
 * Lee `rl/ckpts/metrics.jsonl` cada 2s. No tocar `rl/ckpts/metrics.jsonl` mientras corre el train (append-only).
 * Si ves `interrupts: {}` eternamente, es bug F6 previo a 2026-08-24; hoy debe venir poblado.
 
+### 4) Skirmish humano vs PPO (cliente Windows, no Docker)
+
+El Docker sigue siendo el train headless. Para **jugar vos** contra el checkpoint (o contra beginner/easy) se usa el OpenRA de este repo (ya hay un `OpenRA.exe` self-contained en `OpenRA\bin`, compilado desde Docker a win-x64). No hace falta NSIS ni el SDK de .NET en Windows:
+
+```powershell
+cd C:\Users\lordc\Desktop\OpenRA-RL\OpenRA
+.\launch-game.cmd Game.Mod=ra
+```
+
+Si recompilás: `.\make.cmd all` (pide el SDK) o el publish Docker `win-x64 --self-contained`.
+
+En el lobby: **Skirmish** → oponente **PPO Agent** (o beginner/easy/…). El engine pausa, levanta gRPC `:9999` y spawnea `python -m rl.play_skirmish --attach` contra `rl/ckpts/best.pt`. El mundo corre a 25 tps (`FastAdvance ticks=0` solo inyecta órdenes).
+
+* Primera vez: el juego baja el pack de assets de RA.
+* Mapa: `Singles` / `a-short` (el de train). Otros mapas arrancan, la política no está entrenada ahí.
+* Sidecar a mano (si `OPENRA_RL_AUTOSTART=0`): `.\play_skirmish.ps1`
+* Logs: `%APPDATA%\OpenRA\Logs\rl-bridge.log` y `ppo-agent.log`
+* Ckpt: `OPENRA_RL_CKPT` (default `best.pt`). Python: `OPENRA_RL_PYTHON` / repo `.venv`.
+* **No** uses el visor `:8786` para esto: ese es el canvas headless vs beginner.
+* **Puerto:** el lobby usa gRPC **:10001**. Train/Docker se queda en `:9999`. Podés dejar el train corriendo; no compartan el puerto. (Si el PPO se engancha a 9999, el MCV de *tu* partida no despliega: las órdenes van a un episodio del train.)
+* **Facción / spawn:** el ckpt se entrenó Alliados, slot SW, beacon NE `(95,11)`. Soviéticos suelen funcionar (roles), pero el spawn invertido hace que el dest apunte a su propia base. Poné al PPO en el spawn suroeste de A-short y a vos en el NE. Alliados para el PPO la primera vez.
+
 ## Reglas de run limpio
 
 1. **Un cambio de régimen por vez** (reward *o* red *o* vocab, nunca juntos). Incluye estado latente: cambiar reward y hacer resume con vocab viejo invalida el experimento (lección era económica).
