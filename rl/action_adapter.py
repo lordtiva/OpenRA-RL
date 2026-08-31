@@ -85,10 +85,14 @@ BUILDING_ITEM_TYPES = {
     # energía
     "powr", "apwr",
     # producción militar
-    "barr", "tent", "kenn", "weap", "hpad", "dome", "fix", "atek", "stek",
+    "barr", "tent", "kenn", "weap", "hpad", "afld", "dome", "fix", "atek", "stek",
     # defensa y navales
     "gun", "ftur", "tsla", "agun", "pbox", "hbox", "sam", "gap",
     "spen", "syrd",
+    # muros: si faltan, _split_production los manda a TRAIN y el C# los
+    # mete en la cola de edificios (visor 985: train:sbag / train:brik,
+    # 0 rifles, lose ~10k).
+    "sbag", "brik", "fenc",
 }
 
 # Combat TRAIN roles: masked until proc + harvester. Without a standing
@@ -386,8 +390,9 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
 
     # --- Correcciones de seguridad (determinísticas, mantienen índices) ---
     if t_name == "train":
-        if item_type not in train_set:
-            # elegimos un ítem de edificio: usar el primer entrenable
+        concrete = str(aidx.rol_a_concreto.get(item_type, item_type) or "").lower()
+        if item_type not in train_set or concrete in BUILDING_ITEM_TYPES:
+            # Slot de edificio/muro (sbag/brik) no es unidad. Primer entrenable.
             if aidx.train_items:
                 item_type = aidx.train_items[0]
             else:

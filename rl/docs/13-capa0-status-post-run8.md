@@ -26,6 +26,8 @@
 > **Corte 923 (Run 13 SIL bomba):** re-asalto no se pudo juzgar. `sil_nll` 2–4 → **7.8e6** (`1e9/128` = un dest en celda con logit −1e9). Hunt `y=36` pisa agua. `pi_loss` 1e24–1e28, `grad_norm` inf, incomplete 75%. Archivo: `rl/ckpts/Run 13 (a_short reassault sil-bomb 900-923)/`. Resume **899**. Este corte: (1) dest/hunt → `remap_move_cell` + skip si sigue tapada; SIL `lp.clamp(-20)`; `HUNT_Y_MAX` 36→32. (2) **Capa 0 de la tabla órdenes:** rally al dest en tent/weap + stance AttackAnything al nacer + sell hp&lt;12% (no fact/proc). No Capa 2.
 >
 > **Corte 939 (Run 14 harv al dest):** dest pasable + rally/stance. SIL sano (`sil_nll` ~4–11, no 7e6). wr ~0.10, wr20 0, incomplete alto, `attack_move` 90–150/iter. Visor: la recolectora camina al NE. Causa: (1) dest credit reescribe `attack_move` per-unit al dest y el slot puede ser harv (C# `army_attack_move` salta `Harvester`, el per-unit no); (2) rally de `weap` al dest — HARV sale de Vehicle queue. Live #3: weap=1, **11 harvs**, dest `[95,11]`. Archivo: `rl/ckpts/Run 14 (a_short dest-passable harv-leak 900-939)/`. Resume **899**. Parche: rally combate solo `tent`/`barr`/`kenn`; credit no toca `attack_move` de harv/mcv; adapter `move`/`attack_move`/`attack` sobre harv → `harvest`. No Capa 2.
+>
+> **Corte 987 (Run 15 train-sbag):** harv OK. Latest 985 vs best 899: 3/4 lose desnudo vs 1/4. Cinta: `train:sbag`/`train:brik` (muros no estaban en `BUILDING_ITEM_TYPES` → cola de edificios, 0 rifles, beginner a tick 7k). Incomplete de ambos = mismo mill (dest beacon, `nd≥4`≈0, centroide x≈45). Archivo: `rl/ckpts/Run 15 (a_short train-sbag 900-987)/`. Resume **899**. Parche: `sbag`/`brik`/`fenc` son BUILD; auto-tent después de proc (como auto-proc). No Capa 2.
 
 ---
 
@@ -219,9 +221,10 @@ Cortes (un régimen por vez):
 
 1. **Hecho (corte 923):** dest pasable (SIL) + rally al dest + stance AttackAnything al spawn + sell ruinas. Resume 899.
 2. **Hecho (corte 939):** harv no marcha al dest (rally `weap` off, credit skip harv/mcv, adapter harvest). Resume 899.
-3. **Siguiente:** juzgar incomplete/wr20. Rally de combate = tent/barr/kenn (no weap). Si incomplete sigue ≥70% a ~20 iters, clavar rally al **beacon** (no al dest de este bloque). No Capa 2 todavía.
-4. **Capa 2:** transformer + scatter + `celda|unidad`. APC / guard-aprendido **después**, corte aparte.
-5. **Capa 3:** easy / self-play. Cero de esta lista pendiente.
+3. **Hecho (corte 987):** muros no van a TRAIN; auto-tent tras proc. Resume 899.
+4. **Siguiente:** juzgar lose-desnudo (visor: `iss=e1`, tent en pie antes de tick 4k) y incomplete (`nd≥4`). No Capa 2 todavía.
+5. **Capa 2:** transformer + scatter + `celda|unidad`. APC / guard-aprendido **después**, corte aparte.
+6. **Capa 3:** easy / self-play. Cero de esta lista pendiente.
 
 | Orden | Dónde | Cuándo | Notas |
 |---|---|---|---|
@@ -233,7 +236,7 @@ Cortes (un régimen por vez):
 | `enter_transport` / `unload` | política, **después del pointer** | **Capa 2 cerrada** (smoke 20 iters, `last_push` sigue al sujeto) **y** wr20 vs beginner ≥0.40 | Sin `celda\|unidad` el APC es un click a Ch6. No es Capa 0. Mask v0 los tiene apagados a propósito. |
 | `surrender` | **nunca** en la política | — | Mask apagado. El win lo declara el engine. |
 
-Ya cubierto en support (no reabrir): repair HP&lt;35%, harvest idle, power_down brownout, deploy MCV, auto-proc/harv, `army_attack_move` de grupo, dest credit (no harv/mcv per-unit), defend recall, re-asalto, rally tent-only.
+Ya cubierto en support (no reabrir): repair HP&lt;35%, harvest idle, power_down brownout, deploy MCV, auto-proc/harv, auto-tent, `army_attack_move` de grupo, dest credit (no harv/mcv per-unit), defend recall, re-asalto, rally tent-only. Muros = BUILD.
 
 ---
 
@@ -327,4 +330,4 @@ Ckpts del Run 8: `rl/ckpts/Run 8 (a_short collapse no_op 220-408)/`. Resume vivo
 
 ---
 
-*Guardado: 2026-08-30 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 939: harv no marcha al dest (Run 14 archivado; resume 899).*
+*Guardado: 2026-08-31 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 987: muros=BUILD + auto-tent (Run 15 archivado; resume 899).*

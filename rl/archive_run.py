@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CKPT = ROOT / "rl" / "ckpts"
-DEFAULT_NAME = "Run 14 (a_short dest-passable harv-leak 900-939)"
+DEFAULT_NAME = "Run 15 (a_short train-sbag 900-987)"
 
 KEEP_ROOT = {"best.pt", "best.json", "latest.pt"}
 
@@ -43,6 +43,7 @@ def main() -> int:
         "metrics.jsonl",
         "economy_race.jsonl",
         "live_games.jsonl",
+        "live_tape.jsonl",
         "best.json",
         "best.pt",
         "latest.pt",
@@ -75,6 +76,9 @@ def main() -> int:
     live = src / "live_games.jsonl"
     if live.exists():
         live.write_text("", encoding="utf-8")
+    tape = src / "live_tape.jsonl"
+    if tape.exists():
+        tape.write_text("", encoding="utf-8")
 
     print(f"OK {dest}")
     print(f"  copied {len(copied)} logs/ckpts: {copied}")

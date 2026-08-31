@@ -15,7 +15,9 @@ Uso (PowerShell, UN comando):
     http://localhost:8786/
 
 Al terminar cada partida append a rl/ckpts/live_games.jsonl (histograma,
-destino de asalto, centroide del ejército vs beacon). Ctrl+C no pisa el train.
+destino de asalto, centroide vs beacon, tape cada 10 decs). Cada decisión
+también va a rl/ckpts/live_tape.jsonl (política, dest de soporte, harv xy,
+centroide). Ctrl+C no pisa el train.
 """
 import argparse
 import asyncio
@@ -62,20 +64,122 @@ def _tally_types(objs) -> dict:
     return dict(sorted(c.items(), key=lambda kv: -kv[1]))
 
 
+def _unit_xy(u):
+    try:
+        return [int(u.cell_x), int(u.cell_y)]
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_noncombat_type(typ: str) -> bool:
+    t = (typ or "").lower()
+    return "harv" in t or "mcv" in t
+
+
 def _combat_centroid(units):
     pts = []
     for u in units or []:
-        t = str(getattr(u, "type", "") or "").lower()
-        if "harv" in t or "mcv" in t:
+        if _is_noncombat_type(str(getattr(u, "type", "") or "")):
             continue
-        try:
-            pts.append((int(u.cell_x), int(u.cell_y)))
-        except (TypeError, ValueError):
-            continue
+        xy = _unit_xy(u)
+        if xy is not None:
+            pts.append(xy)
     if not pts:
         return None
     return [round(sum(p[0] for p in pts) / len(pts), 1),
             round(sum(p[1] for p in pts) / len(pts), 1)]
+
+
+def _harv_xy(units, cap: int = 6):
+    out = []
+    for u in units or []:
+        if "harv" not in str(getattr(u, "type", "") or "").lower():
+            continue
+        xy = _unit_xy(u)
+        if xy is None:
+            continue
+        out.append(xy)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _n_combat(units) -> int:
+    n = 0
+    for u in units or []:
+        if not _is_noncombat_type(str(getattr(u, "type", "") or "")):
+            n += 1
+    return n
+
+
+def _n_near(units, cell, radius: int, combat_only: bool = True) -> int:
+    if cell is None:
+        return 0
+    r2 = int(radius) * int(radius)
+    n = 0
+    for u in units or []:
+        if combat_only and _is_noncombat_type(str(getattr(u, "type", "") or "")):
+            continue
+        xy = _unit_xy(u)
+        if xy is None:
+            continue
+        if (xy[0] - int(cell[0])) ** 2 + (xy[1] - int(cell[1])) ** 2 <= r2:
+            n += 1
+    return n
+
+
+def _n_combat_home(obs, radius: int = 18) -> int:
+    n = 0
+    for u in getattr(obs, "units", None) or []:
+        if _is_noncombat_type(str(getattr(u, "type", "") or "")):
+            continue
+        xy = _unit_xy(u)
+        if xy is None:
+            continue
+        for b in getattr(obs, "buildings", None) or []:
+            bxy = _unit_xy(b)
+            if bxy is None:
+                continue
+            if (xy[0] - bxy[0]) ** 2 + (xy[1] - bxy[1]) ** 2 <= radius * radius:
+                n += 1
+                break
+    return n
+
+
+def _cmd_xy(cmd):
+    try:
+        x, y = int(getattr(cmd, "target_x", -1)), int(getattr(cmd, "target_y", -1))
+    except (TypeError, ValueError):
+        return None
+    if x < 0 or y < 0:
+        return None
+    return [x, y]
+
+
+def _tape_row(obs, *, ep, ckpt, dec, pol, cell, item, sup, supk, iss=None):
+    dest = sup or cell
+    return {
+        "ep": ep,
+        "ckpt": int(ckpt),
+        "dec": int(dec),
+        "tick": int(getattr(obs, "tick", 0) or 0),
+        "pol": pol,
+        "cell": cell,
+        "item": item,
+        "iss": iss,
+        "sup": sup,
+        "supk": supk,
+        "cent": _combat_centroid(obs.units),
+        "harv": _harv_xy(obs.units),
+        "nc": _n_combat(obs.units),
+        "nu": len(obs.units or []),
+        "nb": len(getattr(obs, "buildings", None) or []),
+        "nh": _n_combat_home(obs),
+        "nd": _n_near(obs.units, dest, 8),
+        "ne": (len(obs.visible_enemies or [])
+               + len(obs.visible_enemy_buildings or [])),
+        "cash": int(getattr(getattr(obs, "economy", None), "cash", 0) or 0),
+    }
 
 
 def _dist(a, b):
@@ -209,12 +313,15 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
     last_action_str = "—"
     macro_final = None
     last_push_cell = None
+    ep_id = f"{int(ckpt_iter)}-{int(time.time())}"
+    tape_path = getattr(args, "tape_file", "") or ""
     trace = {
         "policy_push_cells": [],
         "support_dests": [],
         "n_support_army": 0,
         "n_support_am": 0,
         "centroid": [],
+        "tape": [],
     }
 
     # estado inicial
@@ -225,6 +332,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
         can_decide = use_macro or step % args.k_skip == 0
         action = None
         atype_str = "no_op"
+        step_meta = None
         if can_decide:
             batch, aidx = _batch_of(obs, vocab, device)
             h_in = hidden.detach().clone()
@@ -264,7 +372,11 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                 eff_c = int(new_c)
             # texto acción: the cell ACTUALLY issued (after water/OOB remap).
             # TRAIN/BUILD ignore cell — show em-dash so live does not display south-water.
-            item_name = aidx.items[int(out["item_slot"])] if int(out["item_slot"]) < len(aidx.items) else "—"
+            # item = rol EFECTIVO (post-coerce). iss = item_type del comando C#.
+            item_name = (aidx.items[int(eff_i)] if int(eff_i) < len(aidx.items) else "—")
+            issued_item = None
+            if action.commands:
+                issued_item = getattr(action.commands[0], "item_type", None) or None
             if atype_str in ("train", "build", "no_op", "deploy", "harvest",
                              "stop", "cancel_production"):
                 cell_txt = "cell=—"
@@ -273,13 +385,18 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                 cell_txt = f"cell={int(getattr(c0, 'target_x', 0))},{int(getattr(c0, 'target_y', 0))}"
             else:
                 cell_txt = f"cell={int(eff_c) % aidx.w},{int(eff_c) // aidx.w}"
-            last_action_str = f"{atype_str}  {cell_txt}  item={item_name}  units={len(obs.units)} cash={obs.economy.cash}"
+            last_action_str = f"{atype_str}  {cell_txt}  item={issued_item or item_name}  units={len(obs.units)} cash={obs.economy.cash}"
+            pol_cell = None
+            if atype_str in ("army_attack_move", "attack_move", "move", "attack") and action.commands:
+                pol_cell = _cmd_xy(action.commands[0])
             # Pilar B: auto-harvest/repair gratis (no roba decisión PPO)
             if atype_str in ("army_attack_move", "attack_move") and action.commands:
                 c0 = action.commands[0]
                 if getattr(c0, "target_x", None) is not None:
                     last_push_cell = (int(c0.target_x), int(c0.target_y))
                     _remember_cell(trace["policy_push_cells"], last_push_cell)
+            sup_xy = None
+            sup_kind = None
             if args.auto_support:
                 for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx):
                     action.commands.append(cmd)
@@ -289,9 +406,23 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                         dest = [int(cmd.target_x), int(cmd.target_y)]
                         if name == "army_attack_move":
                             trace["n_support_army"] += 1
+                            sup_kind = "army"
                         else:
                             trace["n_support_am"] += 1
+                            if sup_kind is None:
+                                sup_kind = "am"
+                        sup_xy = dest
                         _remember_cell(trace["support_dests"], dest)
+            step_meta = {
+                "pol": atype_str,
+                "cell": pol_cell,
+                "item": (item_name if atype_str in ("train", "build", "place_building",
+                                                    "cancel_production")
+                         else None),
+                "iss": issued_item,
+                "sup": sup_xy,
+                "supk": sup_kind,
+            }
         else:
             # mantener último comando (frame-skip)
             action = action  # type: ignore
@@ -336,16 +467,32 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
 
         # push live cada decisión (throttle: solo si can_decide para no spamear)
         if can_decide:
+            if step_meta is not None:
+                row = _tape_row(
+                    obs, ep=ep_id, ckpt=ckpt_iter, dec=decs,
+                    pol=step_meta["pol"], cell=step_meta["cell"],
+                    item=step_meta["item"], sup=step_meta["sup"],
+                    supk=step_meta["supk"], iss=step_meta.get("iss"))
+                trace["tape"].append(row)
+                if tape_path:
+                    p_tape = Path(tape_path)
+                    if not p_tape.is_absolute():
+                        p_tape = Path(__file__).resolve().parent.parent / p_tape
+                    try:
+                        _append_live_game(p_tape, row)
+                    except OSError:
+                        pass
             if decs == 1 or decs % 50 == 0:
-                n_cbt = 0
-                for u in obs.units or []:
-                    t = str(getattr(u, "type", "") or "").lower()
-                    if "harv" not in t and "mcv" not in t:
-                        n_cbt += 1
+                n_cbt = _n_combat(obs.units)
+                dest = (step_meta or {}).get("sup") or last_push_cell
+                dest_xy = list(dest) if dest is not None else None
                 trace["centroid"].append({
                     "dec": decs, "tick": obs.tick,
                     "xy": _combat_centroid(obs.units),
+                    "harv": _harv_xy(obs.units),
                     "n_combat": n_cbt,
+                    "n_home": _n_combat_home(obs),
+                    "n_at_dest": _n_near(obs.units, dest_xy, 8),
                     "n_units": len(obs.units or []),
                     "n_ene": (len(obs.visible_enemies or [])
                               + len(obs.visible_enemy_buildings or [])),
@@ -382,6 +529,9 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
         "n_support_army": trace["n_support_army"],
         "n_support_am": trace["n_support_am"],
         "centroid": trace["centroid"],
+        "tape": [t for i, t in enumerate(trace["tape"])
+                 if i == 0 or (i + 1) % 10 == 0 or i + 1 == len(trace["tape"])],
+        "ep": ep_id,
         "centroid_end": xy_end,
         "dist_to_beacon": _dist(xy_end, beacon_xy),
         "n_units_end": len(obs.units or []),
@@ -401,7 +551,8 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
         try:
             _append_live_game(p, log_row)
             print(f"  logged {p}  dist_beacon={log_row['dist_to_beacon']} "
-                  f"support_dests={trace['support_dests']}", flush=True)
+                  f"tape={len(trace['tape'])} support_dests={trace['support_dests']}",
+                  flush=True)
         except OSError as e:
             print(f"  [live log] no pude escribir {p}: {e}", flush=True)
     return {"result": final_result, "ticks": obs.tick, "decisions": decs,
@@ -504,6 +655,8 @@ def main():
     ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")
     ap.add_argument("--log-file", default="rl/ckpts/live_games.jsonl",
                     help="jsonl por partida del visor. Vacío = no loguear.")
+    ap.add_argument("--tape-file", default="rl/ckpts/live_tape.jsonl",
+                    help="jsonl una línea por decisión (política, dest, harv, centroide). Vacío = off.")
     args = ap.parse_args()
     # --bot-type "" mantiene "" (dummy), solo None es "no tocar". --ai-slot "" desactiva enemigo.
     if args.bot_type == "__none__":

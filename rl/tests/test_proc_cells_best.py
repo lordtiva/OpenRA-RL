@@ -167,6 +167,43 @@ prod_ready = [NS(queue_type="Building", item="proc", progress=1.0, paused=False)
 cmds_p = support_commands(_obs(bldgs=("fact",), avail=("proc",), prod=prod_ready))
 check("auto-support PLACE proc listo",
       any(c.action.value == "place_building" and c.item_type == "proc" for c in cmds_p))
+cmds_tent = support_commands(
+    _obs(harv=1, cash=5000, bldgs=("fact", "proc"),
+         avail=("e1", "tent", "proc", "powr"), units=[_u(9, "harv", 14, 16)]))
+check("auto-tent BUILD tent con proc",
+      any(c.action.value == "build" and c.item_type == "tent" for c in cmds_tent))
+cmds_barr = support_commands(
+    _obs(harv=1, cash=5000, bldgs=("fact", "proc"),
+         avail=("e1", "barr", "proc"), units=[_u(9, "harv", 14, 16)]))
+check("auto-tent usa barr si no hay tent en avail",
+      any(c.action.value == "build" and c.item_type == "barr" for c in cmds_barr))
+cmds_tent_no = support_commands(
+    _obs(harv=1, cash=5000, bldgs=("fact",),
+         avail=("e1", "tent", "proc"), units=[_u(9, "harv", 14, 16)]))
+check("auto-tent NO antes de proc",
+      not any(c.action.value == "build" and c.item_type in ("tent", "barr")
+              for c in cmds_tent_no))
+prod_tent = [NS(queue_type="Building", item="tent", progress=1.0, paused=False)]
+cmds_ptent = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), avail=("tent",), prod=prod_tent,
+         units=[_u(9, "harv", 14, 16)]))
+check("auto-tent PLACE tent listo",
+      any(c.action.value == "place_building" and c.item_type == "tent"
+          for c in cmds_ptent))
+obs_wall = _obs(harv=1, bldgs=("fact", "proc", "tent"),
+                avail=("e1", "sbag", "brik", "fenc", "tent", "proc"),
+                units=[_u(1, "e1", 12, 16), _u(9, "harv", 14, 16)])
+aidx_wall = ActionIndex(obs_wall, Vocab())
+check("sbag/brik son BUILD civic, no TRAIN",
+      "civic" in aidx_wall.build_items and "civic" not in aidx_wall.train_items)
+cslot = (len(aidx_wall.train_items) + aidx_wall.build_items.index("civic")
+         if "civic" in aidx_wall.build_items else 0)
+act_wall, _ = index_to_command_effective(
+    obs_wall, TYPE_TO_IDX["train"], 0, 0, cslot, aidx_wall)
+iss_wall = act_wall.commands[0].item_type
+check("train+muro no emite sbag/brik",
+      act_wall.commands[0].action.value != "train"
+      or str(iss_wall).lower() not in ("sbag", "brik", "fenc"))
 cmds_push = support_commands(_obs(bldgs=("fact",), units=[_u(1, "e1", 12, 16)]), last_push=(90, 12))
 check("support no keep-alive attack sin proc",
       not any(c.action.value == "attack_move" for c in cmds_push))
@@ -176,6 +213,12 @@ check("support keep-alive attack CON proc",
       any(c.action.value == "attack_move" for c in cmds_push2))
 
 army4 = [_u(i, "e1", 12 + i, 16) for i in range(1, 5)] + [_u(9, "harv", 14, 16)]
+cmds_has_tent = support_commands(
+    _obs(harv=1, cash=5000, bldgs=("fact", "proc", "tent"),
+         avail=("e1", "tent", "proc"), units=army4))
+check("auto-tent no spamea si ya hay tent",
+      not any(c.action.value == "build" and c.item_type in ("tent", "barr")
+              for c in cmds_has_tent))
 cmds_assault = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army4, enemies=[_u(99, "e1", 90, 12)]))
 check("asalto sostenido: army_attack_move con 4 rifles + proc + harv",
@@ -504,6 +547,17 @@ with tempfile.TemporaryDirectory() as td:
     check("igual no flap",
           maybe_update_best(d, row, latest_path=str(latest)) is False
           and (d / "best.pt").read_bytes() == b"CKPT-A")
+
+from rl.play_vs_checkpoint_live import _harv_xy, _n_combat, _tape_row
+obs_t = _obs(harv=1, bldgs=("fact", "proc"),
+             units=[_u(1, "e1", 12, 16), _u(9, "harv", 14, 17)])
+check("tape harv xy", _harv_xy(obs_t.units) == [[14, 17]])
+check("tape n_combat ignora harv", _n_combat(obs_t.units) == 1)
+row_t = _tape_row(obs_t, ep="x", ckpt=899, dec=3, pol="train",
+                  cell=None, item="infantry_basic", sup=[95, 11], supk="army")
+check("tape row dest y harv",
+      row_t["sup"] == [95, 11] and row_t["harv"] == [[14, 17]]
+      and row_t["pol"] == "train" and row_t["nh"] == 1)
 
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS"))
 sys.exit(0 if ok else 1)

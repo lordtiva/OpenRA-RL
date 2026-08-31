@@ -40,6 +40,9 @@ Diseño:
   caminar al beacon. Tanques idle los recoge army_attack_move.
 - Stance AttackAnything al nacer (Capa 0): Defend no caza; el scripted sí.
   Solo combate (no harv/mcv).
+- Auto-tent (Capa 0, corte 987): con proc en pie y sin tent/barr, BUILD/PLACE
+  el cuartel (como auto-proc). Sin eso latest 985 TRAIN-eaba sbag y moría
+  a los 10k sin un rifle.
 
 No genera reward — evita defense_loss/hold_zero ya existentes.
 """
@@ -195,6 +198,8 @@ _RALLY_BUILDINGS = frozenset({
 })
 _NO_SELL = frozenset({"fact", "afac", "proc"})
 SELL_HP = 0.12
+_BARRACKS_ITEMS = ("tent", "barr")
+TENT_COST = 500
 
 
 def _snap_passable(obs, dest, aidx=None):
@@ -388,11 +393,12 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
                 out.append(CommandModel(action=ActionType.HARVEST, actor_id=int(u.actor_id)))
                 break  # uno por bloque (no spamear)
 
-    # 0b) Auto-proc + auto-harv — push the economy if the policy is rifle-spamming.
+    # 0b) Auto-proc + auto-harv + auto-tent — push eco then the first barracks.
     #     Missing proc: BUILD if it is in available_production (do not deadlock
     #     BUILD/PLACE of proc — those stay unmasked even when we cannot build yet).
     #     Proc ready in the queue: PLACE near the conyard. Has proc but no harvester:
-    #     TRAIN harv if the war factory lists it.
+    #     TRAIN harv if the war factory lists it. Has proc, no tent/barr: BUILD/PLACE
+    #     the faction barracks (visor 985: sin cuartel, TRAIN sbag, lose 10k).
     avail = set(getattr(obs, "available_production", []) or [])
     prod = list(getattr(obs, "production", []) or [])
     proc_queued = any(str(getattr(p, "item", "")).lower() == "proc" for p in prod)
@@ -416,6 +422,28 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
         harv_queued = any("harv" in str(getattr(p, "item", "")).lower() for p in prod)
         if (not has_harv) and (not harv_queued) and "harv" in avail:
             out.append(CommandModel(action=ActionType.TRAIN, item_type="harv"))
+        # Auto-tent: primer cuartel, después de proc. tent (allies) o barr.
+        has_barracks = any(
+            str(getattr(b, "type", "")).lower() in _BARRACKS_ITEMS for b in blds)
+        barr_ready = next(
+            (str(getattr(p, "item", "")).lower()
+             for p in prod
+             if str(getattr(p, "item", "")).lower() in _BARRACKS_ITEMS
+             and float(getattr(p, "progress", 0) or 0) >= 1.0),
+            None,
+        )
+        barr_queued = any(
+            str(getattr(p, "item", "")).lower() in _BARRACKS_ITEMS for p in prod)
+        barr_item = next((n for n in _BARRACKS_ITEMS if n in avail), None)
+        if not has_barracks:
+            if barr_ready:
+                ax, ay = _place_near_base(obs)
+                out.append(CommandModel(
+                    action=ActionType.PLACE_BUILDING, item_type=barr_ready,
+                    target_x=ax, target_y=ay))
+            elif (not barr_queued) and barr_item and cash >= TENT_COST:
+                out.append(CommandModel(
+                    action=ActionType.BUILD, item_type=barr_item))
 
     # 1) Auto-repair — umbral hard (35%)
     if cash > 500:

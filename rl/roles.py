@@ -124,7 +124,7 @@ ROLE_OF_ITEM: dict[str, str] = {
     "fix": ROLE_REPAIR,
     "hpad": ROLE_AIRBASE, "afld": ROLE_AIRBASE,
     "spen": ROLE_NAVAL, "syrd": ROLE_NAVAL,
-    "fenc": ROLE_CIVIL, "brik": ROLE_CIVIL,
+    "fenc": ROLE_CIVIL, "brik": ROLE_CIVIL, "sbag": ROLE_CIVIL,
 }
 
 # --------------------------------------------------------------------------
