@@ -23,7 +23,9 @@ from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_command_effective
 from rl.imitation import command_to_indices, pick_bc_command
 from rl.network import ACTION_TYPES, HIDDEN_DIM
-from rl.obs_encoding import MAX_UNITS, decode_spatial, scalar_features, unit_slots
+from rl.obs_encoding import (
+    MAX_UNITS, UNIT_FEAT_DIM, decode_spatial, scalar_features, unit_slots,
+)
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
 from rl.economy_race import EconomyRace
@@ -43,12 +45,12 @@ def _batch_of(obs, vocab, device):
 
     units_feats, unit_valid = unit_slots(obs)
     if len(units_feats) == 0:
-        units_feats = np.zeros((0, 10), dtype=np.float32)
+        units_feats = np.zeros((0, UNIT_FEAT_DIM), dtype=np.float32)
         unit_valid = np.zeros(0, dtype=bool)
     pad = MAX_UNITS - units_feats.shape[0]
     if pad > 0:
-        units_feats = np.vstack([units_feats,
-                                 np.zeros((pad, 10), dtype=np.float32)])
+        units_feats = np.vstack([
+            units_feats, np.zeros((pad, UNIT_FEAT_DIM), dtype=np.float32)])
         unit_valid = np.concatenate([unit_valid, np.zeros(pad, dtype=bool)])
 
     aidx = ActionIndex(obs, vocab)

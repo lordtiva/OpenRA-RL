@@ -12,7 +12,9 @@ Diseño:
 - Flag --auto-support (default False en Run2, True en Run3/v4). Sin flag, 0 impacto.
 - Reparación: si cash>500 y edificio hp<35% y no está ya reparándose, emite 1
   repair por bloque (máx 2 para no spamear). Es el umbral del hard.
-- Cosecha: si harv está idle y hay proc, emite 1 harvest (auto al ore más cercano).
+- Cosecha: 1 harvest/bloque si harv idle O está en migajas (Ch2 local <<
+  mejor parche explorado). El order lleva celda: si no, el engine se queda
+  en el ore más cercano aunque esté vacío.
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
 - Asalto / hunt / recall / rally-al-beacon / crédito de dest: APAGADOS
   (corte 950). Era estrategia spawn-asimétrica (siempre (95,11)). La red
@@ -28,7 +30,7 @@ No genera reward — evita defense_loss/hold_zero ya existentes.
 
 from openra_env.models import ActionType, CommandModel
 from rl.action_adapter import nearest_passable, remap_move_cell
-from rl.obs_encoding import resolve_beacon
+from rl.obs_encoding import decode_spatial, resolve_beacon
 
 # Tipos que el hard apaga cuando hay brownout (ai.yaml PowerDownBotModule)
 _POWER_DOWN_TYPES = {"dome", "tsla", "mslo", "atag", "stag"}
@@ -380,6 +382,54 @@ def _push_cell(obs, last_push):
     return None
 
 
+# Migajas: densidad local < esta fracción del mejor parche explorado.
+_ORE_STALE_FRAC = 0.35
+
+
+def _spatial_chw(obs):
+    """Tensor espacial (C,H,W) o None. Ch2=ore, Ch3=passable, Ch4=fog."""
+    info = getattr(obs, "map_info", None)
+    h = int(getattr(info, "height", 0) or 0)
+    w = int(getattr(info, "width", 0) or 0)
+    raw = getattr(obs, "spatial_map", "") or ""
+    ch = int(getattr(obs, "spatial_channels", 0) or 9)
+    if not raw or h < 1 or w < 1:
+        return None
+    try:
+        return decode_spatial(raw, h, w, ch, beacon=None)
+    except (ValueError, TypeError):
+        return None
+
+
+def _best_ore_cell(arr):
+    """Celda de mineral más rica entre exploradas y pasables. (x,y,dens) o None."""
+    import numpy as np
+    if arr is None or arr.shape[0] < 5:
+        return None
+    ch2, ch3, ch4 = arr[2], arr[3], arr[4]
+    mask = (ch4 >= 0.45) & (ch3 > 0.5)
+    if not bool(mask.any()):
+        return None
+    vals = np.where(mask, ch2, -1.0)
+    if float(vals.max()) <= 0.0:
+        return None
+    y, x = [int(i) for i in np.unravel_index(int(vals.argmax()), vals.shape)]
+    return int(x), int(y), float(vals[y, x])
+
+
+def _harv_local_ore(u, arr) -> float:
+    if arr is None:
+        return 0.0
+    try:
+        x, y = int(u.cell_x), int(u.cell_y)
+    except (TypeError, ValueError):
+        return 0.0
+    _, h, w = arr.shape
+    if not (0 <= y < h and 0 <= x < w):
+        return 0.0
+    return float(arr[2, y, x])
+
+
 def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
 
     """Lista de CommandModel de soporte para esta observación.
@@ -404,16 +454,33 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
                     action=ActionType.DEPLOY, actor_id=int(u.actor_id)))
                 break
 
-    # 0) Auto-harvest — si harv está idle y hay proc, mandarlo a cosechar.
-    #    Gratis para PPO (igual que repair): no roba decisión estratégica.
-    #    El engine con actor_id solo hace auto-harvest al ore más cercano.
+    # 0) Auto-harvest — idle O migajas (Ch2 local << mejor parche explorado).
+    #    Con celda: el engine no se clava en el ore vacío de casa.
     has_proc = any(getattr(b, "type", "") == "proc" for b in blds)
     if has_proc:
+        arr = _spatial_chw(obs)
+        best = _best_ore_cell(arr)
         for u in units:
             ut = str(getattr(u, "type", "")).lower()
-            if "harv" in ut and bool(getattr(u, "is_idle", False)):
-                out.append(CommandModel(action=ActionType.HARVEST, actor_id=int(u.actor_id)))
-                break  # uno por bloque (no spamear)
+            if "harv" not in ut:
+                continue
+            idle = bool(getattr(u, "is_idle", False))
+            stale = False
+            if best is not None:
+                bx, by, bden = best
+                local = _harv_local_ore(u, arr)
+                stale = bden > 0.0 and local < _ORE_STALE_FRAC * bden
+            if not (idle or stale):
+                continue
+            if best is not None:
+                bx, by, _ = best
+                out.append(CommandModel(
+                    action=ActionType.HARVEST, actor_id=int(u.actor_id),
+                    target_x=int(bx), target_y=int(by)))
+            else:
+                out.append(CommandModel(
+                    action=ActionType.HARVEST, actor_id=int(u.actor_id)))
+            break  # uno por bloque (no spamear)
 
     # 0b) Auto-proc + auto-harv + auto-tent — push eco then the first barracks.
     #     Missing proc: BUILD if it is in available_production (do not deadlock

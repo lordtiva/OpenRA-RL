@@ -17,6 +17,8 @@ import math
 import numpy as np
 
 SPATIAL_CHANNELS = 9
+# Colas que terminan en PLACE (no Infantry/Vehicle). Defense = pbox/gun/ftur.
+PLACE_QUEUE_TYPES = frozenset({"building", "defense"})
 
 # Normalización por canal (escala aproximada a [0,1])
 CHANNEL_SCALE = {
@@ -196,32 +198,166 @@ def scalar_features(obs) -> np.ndarray:
     ], dtype=np.float32)
 
 
-MAX_UNITS = 48  # slots de unidades que ve la red (padding con máscara)
+MAX_UNITS = 96  # Capa 2c-A: techo de slots (pesos del xf no crecen con n)
+UNIT_FEAT_DIM = 10
+# Mismo radio que el dest-defend viejo: combate que ve el raid entra al set
+# aunque tenga actor_id alto (los e1 nuevos no cabían en oldest-48).
+THREAT_RADIUS = 18
+
+
+def _actor_id(u) -> int:
+    try:
+        return int(getattr(u, "actor_id", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _xy(u) -> tuple[int, int]:
+    try:
+        return int(getattr(u, "cell_x", 0) or 0), int(getattr(u, "cell_y", 0) or 0)
+    except (TypeError, ValueError):
+        return 0, 0
+
+
+def _is_harv_or_mcv(u) -> bool:
+    t = str(getattr(u, "type", "") or "").lower()
+    return "harv" in t or "mcv" in t
+
+
+def _is_combat(u) -> bool:
+    if _is_harv_or_mcv(u):
+        return False
+    return bool(getattr(u, "can_attack", False))
+
+
+def _manhattan(a, b) -> int:
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
+
+
+def _near_any(u, others, radius: int) -> bool:
+    ux, uy = _xy(u)
+    for o in others:
+        if _manhattan((ux, uy), _xy(o)) <= radius:
+            return True
+    return False
+
+
+def _base_under_attack(obs, radius: int = THREAT_RADIUS) -> bool:
+    bldgs = list(getattr(obs, "buildings", None) or [])
+    threats = list(getattr(obs, "visible_enemies", None) or []) + list(
+        getattr(obs, "visible_enemy_buildings", None) or [])
+    if not bldgs or not threats:
+        return False
+    return any(_near_any(t, bldgs, radius) for t in threats)
+
+
+def select_unit_slots(obs, max_units: int = MAX_UNITS):
+    """Hasta max_units propias: amenaza, resto combate, no-combate.
+
+    Cubos (actor_id ascendente dentro de cada uno; el tensor final se
+    reordena por id para que el slot no salte entre bloques):
+      1. combate a ≤THREAT_RADIUS de enemigo visible / edificio enemigo,
+         o combate a ≤THREAT_RADIUS de edificio propio si la base está
+         bajo ataque (raid en casa)
+      2. resto de combate
+      3. harv / mcv / otros
+    """
+    units = list(getattr(obs, "units", None) or [])
+    if not units:
+        return []
+    threats = list(getattr(obs, "visible_enemies", None) or []) + list(
+        getattr(obs, "visible_enemy_buildings", None) or [])
+    bldgs = list(getattr(obs, "buildings", None) or [])
+    raid = _base_under_attack(obs)
+    c1, c2, c3 = [], [], []
+    for u in units:
+        if _is_combat(u):
+            near_ene = bool(threats) and _near_any(u, threats, THREAT_RADIUS)
+            near_home = raid and _near_any(u, bldgs, THREAT_RADIUS)
+            if near_ene or near_home:
+                c1.append(u)
+            else:
+                c2.append(u)
+        else:
+            c3.append(u)
+    picked = []
+    for cubo in (c1, c2, c3):
+        cubo.sort(key=_actor_id)
+        need = max_units - len(picked)
+        if need <= 0:
+            break
+        picked.extend(cubo[:need])
+    picked.sort(key=_actor_id)
+    return picked
+
+
+def _unit_feat(u) -> list:
+    return [
+        float(getattr(u, "hp_percent", 1.0) or 0.0),
+        1.0 if getattr(u, "can_attack", False) else 0.0,
+        1.0 if getattr(u, "is_idle", True) else 0.0,
+        min(float(getattr(u, "speed", 0) or 0) / 100.0, 1.0),
+        min(float(getattr(u, "attack_range", 0) or 0) / 6000.0, 1.0),
+        float(getattr(u, "experience_level", 0) or 0) / 3.0,
+        float(getattr(u, "stance", 0) or 0) / 3.0,
+        float(getattr(u, "cell_x", 0) or 0) / 128.0,
+        float(getattr(u, "cell_y", 0) or 0) / 128.0,
+        float(getattr(u, "facing", 0) or 0) / 1023.0,
+    ]
 
 
 def unit_slots(obs):
     """Lista de hasta MAX_UNITS unidades propias como vectores de features.
 
-    Devuelve (features [N,F], válidos bool[N]) ordenadas por id para
-    estabilidad temporal del slot (la cabeza 2 selecciona por slot).
+    Selección = select_unit_slots (combat-first). Devuelve
+    (features [N,UNIT_FEAT_DIM], válidos bool[N]) ordenadas por id.
     """
-    feats = []
-    units = sorted(obs.units, key=lambda u: u.actor_id)[:MAX_UNITS]
-    for u in units:
-        feats.append([
-            u.hp_percent,
-            1.0 if u.can_attack else 0.0,
-            1.0 if u.is_idle else 0.0,
-            min(u.speed / 100.0, 1.0),
-            min(u.attack_range / 6000.0, 1.0),  # WDist típico rifle ~4-5 celdas
-            u.experience_level / 3.0,
-            u.stance / 3.0,
-            u.cell_x / 128.0,
-            u.cell_y / 128.0,
-            u.facing / 1023.0,
-        ])
-    valid = np.ones(len(feats), dtype=bool)
-    return np.array(feats, dtype=np.float32), valid
+    units = select_unit_slots(obs)
+    if not units:
+        return (np.zeros((0, UNIT_FEAT_DIM), dtype=np.float32),
+                np.zeros(0, dtype=bool))
+    feats = np.array([_unit_feat(u) for u in units], dtype=np.float32)
+    valid = np.ones(len(units), dtype=bool)
+    return feats, valid
+
+
+def ready_place_items(obs) -> list:
+    """Ítems con progress≥1 en colas Building o Defense (se pueden PLACE)."""
+    out = []
+    for p in getattr(obs, "production", None) or []:
+        qt = str(getattr(p, "queue_type", "") or "").lower()
+        if qt not in PLACE_QUEUE_TYPES:
+            continue
+        if float(getattr(p, "progress", 0) or 0) < 1.0:
+            continue
+        item = str(getattr(p, "item", "") or "").lower()
+        if item:
+            out.append(item)
+    return out
+
+
+def pending_place_item(obs, prefer: str | None = None,
+                       also=None) -> str | None:
+    """Edificio listo para PLACE.
+
+    1) `prefer` si está listo (concreto barato del rol)
+    2) el primero de `also` que esté listo (otros concretos del mismo rol:
+       encoló gun, el rol prefiere pbox)
+    3) el primero listo de cualquier cola Building/Defense
+    """
+    ready = ready_place_items(obs)
+    if not ready:
+        return None
+    if prefer:
+        pref = str(prefer).lower()
+        if pref in ready:
+            return pref
+    if also:
+        also_set = {str(x).lower() for x in also if x}
+        for it in ready:
+            if it in also_set:
+                return it
+    return ready[0]
 
 
 def type_to_index(type_str: str, vocab: dict) -> int:

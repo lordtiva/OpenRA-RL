@@ -61,5 +61,10 @@ rol_b = R.role_of("2tnk")
 check("mismo rol de tanque en ambas facciones (equivalencia funcional)",
       rol_a == rol_b)
 
+check("pbox más barato que gun/agun",
+      R.cheapest_of(["gun", "agun", "pbox"]) == "pbox")
+check("ftur más barato que tsla",
+      R.cheapest_of(["tsla", "ftur", "sam"]) == "ftur")
+
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS ❌"))
 sys.exit(0 if ok else 1)

@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rl.obs_encoding import MAX_UNITS, SCALAR_DIM
+from rl.obs_encoding import MAX_UNITS, SCALAR_DIM, ready_place_items
 
 ACTION_TYPES = [
     "no_op", "move", "attack_move", "attack", "stop", "harvest",
@@ -37,7 +37,7 @@ N_ACTION_TYPES = len(ACTION_TYPES)
 TYPE_TO_IDX = {t: i for i, t in enumerate(ACTION_TYPES)}
 
 HIDDEN_DIM = 416
-# Capa 2 (doc 12): set de 48 slots + scatter al fmap + dist_cell|unidad.
+# Capa 2 (doc 12) + 2c-A: set de 96 slots combat-first + scatter + dist_cell|unidad.
 # Residual/zero-init para Net2Net desde 922 (GRU y U-Net se conservan).
 XF_DIM = 64
 XF_HEADS = 4
@@ -92,10 +92,7 @@ def build_type_masks(obs) -> torch.Tensor:
         for t in ("sell", "repair", "power_down", "set_primary", "set_rally_point"):
             m[TYPE_TO_IDX[t]] = True
 
-    building_done = any(
-        p.queue_type == "Building" and p.progress >= 1.0 for p in obs.production
-    )
-    if building_done:
+    if ready_place_items(obs):
         m[TYPE_TO_IDX["place_building"]] = True
     if obs.available_production:
         m[TYPE_TO_IDX["train"]] = True   # unidades

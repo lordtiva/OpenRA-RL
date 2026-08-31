@@ -88,6 +88,8 @@ En el lobby: **Skirmish** → oponente **PPO Agent** (o beginner/easy/…). El e
 | wr20 ≥0.40 vs beginner y incomplete <40% (visor: blob llega al NE, no mill mid-map) | Capa 2 (transformer + scatter + `celda\|unidad`). Un PR. No easy hasta entonces. Dest-credit Run 12: crédito OK, incomplete 70% → re-asalto post-recall. |
 | Re-asalto no baja incomplete / blob sigue idle en el tent | Rally+stance+sell **hechos corte 923**. Corte 939: rally no en weap. Corte 987: muros=BUILD + auto-tent. Visor lose-desnudo: `iss=sbag` era el bug; ahora `iss=e1` y tent antes de tick 4k. |
 | Capa 2 pointer ok (20 iters, `last_push` sigue al sujeto) y wr20 ≥0.40 | Recién ahí `enter_transport`/`unload` (y `guard` de política). No antes. |
+| wr global ~30% vs easy @980, `defense_loss` / 48 slots oldest | **Capa 2c-A hecho** (96+combat-first). Corte 1002: PLACE Defense + harvest Ch2, resume **999**. PR-B si `defense_loss` sigue −4. |
+| Otro mod / soviet / Random\* | **No reentrenar cada país.** Un train `ra` Aliados. Soviet = mismo ckpt (mezclar partidas después). `cnc`/`d2k` = otro ckpt. Random = el lobby resuelve. Detalle: `15-facciones-mods-roles.md`. |
 | `winrate >0.4` en `easy` + `harvest_edge` positivo | Pasar a `--bot-type medium` |
 | `winrate >0.3` en `medium` + `raze` y `n_buildings.enemy` bajando | Evaluar `hard` (=`normal`) |
 | Meseta sin `w_mass`/`w_tech` | Considerar Pilar C/D de `06-filosofia-rl.md` (escalar `military_ratio`, PBRS por Tier) |

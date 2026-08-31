@@ -41,7 +41,13 @@
 >
 > **Corte 952 (Run 20 Capa 2 cerrada vs beginner → Capa 3 easy):** 30 iters, **102/116 win (87.9%)**, incomplete 9.5%, wr20 **1.0**, 17 tandas 4/4, `best.pt` **951**. Capa 2 del 12 (transformer + scatter + `celda|unidad`) **hecha**; 2b (QSA/GDN/GRU 512) no: Ch6 ya no es el techo vs beginner. Archivo: `rl/ckpts/Run 20 (a_short capa2 beginner 923-952)/`. Resume **951**, `--bot-type easy`, asalto support sigue off. Expectativa: wr20 se cae (easy pega en casa). Si lose>25% ~15 iters → restore 951. No self-play, no APC, no MAX_UNITS este corte.
 >
-> **Corte 978 (Run 21 easy 80t → APM 50 ticks):** 27 iters vs easy, win **8.8%**, lose 70%, incomplete 21%, `defense_loss`≈−4 (raid en casa). wr20 0→0.30 (967–971). `best.pt` quedó en **951 beginner** (iwr 1.0 congela easy). 971 fue el mejor easy (`lwlw`) pero no hay snapshot; resume **970**. Archivo: `rl/ckpts/Run 21 (a_short easy 80t 952-978)/`. `--macro-ticks 50` `--max-steps 1000` (mismo techo ~50k ticks, ~2 s/decisión). `best.json` lleva `bot_type`; un 4/4 beginner no pisa easy. Seguir vs easy. No hard, no QSA, no MAX_UNITS.
+> **Corte 978 (Run 21 easy 80t → APM 50 ticks):** 27 iters vs easy, win **8.8%**, lose 70%, incomplete 21%, `defense_loss`≈−4 (raid en casa). wr20 0→0.30 (967–971). `best.pt` quedó en **951 beginner** (iwr 1.0 congela easy). 971 fue el mejor easy (`lwlw`) pero no hay snapshot; resume **970**. Archivo: `rl/ckpts/Run 21 (a_short easy 80t 952-978)/`. `--macro-ticks 50` `--max-steps 1000` (mismo techo ~50k ticks, ~2 s/decisión). `best.json` lleva `bot_type`; un 4/4 beginner no pisa easy. Seguir vs easy. No hard, no QSA, no MAX_UNITS este corte.
+>
+> **Iter 980 (easy 50 t, operador):** wr **global** (`wins/total` del log) ~**30%**. No es wr20; no promociona hard. El piso 80 t era 8.8% — APM 50 está cobrando. Techo que queda: 48 slots oldest + sin rol + sin enemigos en el xf. Spec: `14-capa2c-identidad-matchup.md`.
+>
+> **Corte 983 (Run 22 easy 50t → Capa 2c-A 96 slots):** 13 iters (971–983), **15/52 win (28.8%)**, wr20 0.2 last / pico **0.4 @976**, `defense_loss` −1.8 a −4.4 (sigue raid). `best.pt` **976** easy lwlw wr20 0.4. Archivo: `rl/ckpts/Run 22 (a_short easy 50t 970-983)/`. Resume **976**. **PR-A hecho:** `MAX_UNITS` 48→96 + `select_unit_slots` combat-first (amenaza → combate → harv/mcv; tensor por `actor_id`). Ckpt 1:1, sin pesos nuevos. No rol, no enemigos en xf, no attack-actor, no 128, no QSA, no hard. Smoke: H no colapsa; mirar `defense_loss` y wr20.
+>
+> **Corte 1002 (Run 23 96 slots → PLACE Defense + harvest Ch2):** 26 iters (977–1002), **15/104 (14.4%)**, wr20 last 0.25, `best.pt` **999** iwr 0.75. Shock del set (977–979 llll) + wr20 pegado ~0.15; no es colapso (H~1.2). Archivo: `rl/ckpts/Run 23 (a_short capa2c-A 96 977-1002)/`. Resume **999**. Este corte **no toca la red**: (1) PLACE legal en cola **Defense** (`pbox`/`gun`/`ftur`); el tape encolaba gun y plantaba tent. (2) concreto del rol = **más barato** (`pbox` no `agun`). (3) auto-harvest retarget si Ch2 local << mejor parche explorado (las harv se clavaban en migajas). Facciones: `15-facciones-mods-roles.md`. No PR-B, no hard, no 128.
 
 ---
 
@@ -242,7 +248,9 @@ Cortes (un régimen por vez):
 7. **Hecho (corte 950):** asalto de soporte OFF (pack/hunt/rally/dest-credit/recall). Eco/micro on. Resume **922**.
 8. **Hecho (corte 952):** Capa 2 vs beginner cerrada (wr 88%). Resume **951**, Capa 3 **easy**.
 9. **Hecho (corte 978):** APM 80→50 ticks (1000 steps). Resume **970**. `best` por `bot_type`.
-10. **Siguiente:** wr20 vs easy y `defense_loss`. Si sigue −4 con 2 s, **entonces** `MAX_UNITS` 48→96 (los e1 nuevos no entran en 48). No hard.
+10. **Hecho (corte 983):** Capa 2c-A `MAX_UNITS` 96 + combat-first. Resume **976**. Spec `14-capa2c-identidad-matchup.md`.
+11. **Hecho (corte 1002):** PLACE cola Defense + `cheapest_of` + harvest retarget Ch2. Resume **999**.
+12. **Siguiente:** smoke vs easy (¿aparecen `pbox` en el visor? ¿harv deja el ore muerto?). Si `defense_loss` sigue −4, **PR-B**. No hard, no 128.
 
 | Orden | Dónde | Cuándo | Notas |
 |---|---|---|---|
@@ -348,4 +356,4 @@ Ckpts del Run 8: `rl/ckpts/Run 8 (a_short collapse no_op 220-408)/`. Resume vivo
 
 ---
 
-*Guardado: 2026-08-31 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`; no modifica el plan. Corte 1010: Capa 2 Net2Net desde 922 (Run 18 plateau archivado).*
+*Guardado: 2026-08-31 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`. Corte 1002: PLACE Defense + harvest Ch2, resume 999.*

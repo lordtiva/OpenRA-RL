@@ -137,6 +137,31 @@ def role_of(item: str) -> str:
     return ROLE_OF_ITEM.get(item.lower(), "misc")
 
 
+def item_cost(item: str) -> float:
+    """Costo de catálogo RA; desconocido = caro (no gana el desempate)."""
+    try:
+        from openra_env.game_data import get_building_stats, get_unit_stats
+    except Exception:
+        return 1e9
+    key = str(item or "").lower()
+    st = get_building_stats(key) or get_unit_stats(key)
+    if not st:
+        return 1e9
+    return float(st.get("cost", 1e9) or 1e9)
+
+
+def cheapest_of(items) -> str:
+    """Concreto más barato del rol (pbox antes que gun/agun; ftur antes que tsla).
+
+    El adapter decía 'más barato primero' pero ordenaba alfabético (agun < gun
+    < pbox). Desempate alfabético para estabilidad.
+    """
+    its = [str(x).lower() for x in (items or []) if x]
+    if not its:
+        return ""
+    return min(its, key=lambda it: (item_cost(it), it))
+
+
 def concretos_de(rol: str) -> list[str]:
     """Todos los items concretos (del catalogo) que cumplen un rol."""
     return [it for it, r in ROLE_OF_ITEM.items() if r == rol]

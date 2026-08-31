@@ -69,9 +69,8 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 3 easy + APM: 50 ticks/decisión (~2s), 1000 steps ≈ 50k ticks.
-# Asalto support OFF. Resume 970 (mejor snapshot easy; 971 no estaba en disco).
-# best.json por bot_type (un 4/4 beginner no congela easy).
+# Capa 2c-A + PLACE Defense/pbox + harvest a parche rico.
+# Resume best easy 999 (Run 23 iwr 0.75). Asalto support OFF. No PR-B.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",

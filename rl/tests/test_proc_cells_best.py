@@ -38,7 +38,10 @@ from rl.best_ckpt import (
     viability_score,
 )
 from rl.network import TYPE_TO_IDX
-from rl.obs_encoding import BEACON_BY_MAP, SCALAR_DIM
+from rl.obs_encoding import (
+    BEACON_BY_MAP, MAX_UNITS, SCALAR_DIM, UNIT_FEAT_DIM, select_unit_slots,
+    unit_slots,
+)
 
 ok = True
 
@@ -63,7 +66,7 @@ def _b(typ="fact", actor_id=10, x=12, y=16, hp=1.0):
 def _obs(*, cash=5000, harv=0, bldgs=("fact",), units=None, prod=(),
          avail=("e1", "proc", "powr", "barr"), w=128, h=128,
          map_name="fase2_a_short.oramap", enemies=(), enemy_bldgs=(),
-         tick=100):
+         tick=100, spatial_map=""):
     if units is None:
         units = [_u(1, "mcv", 12, 16)]
     return NS(
@@ -79,6 +82,8 @@ def _obs(*, cash=5000, harv=0, bldgs=("fact",), units=None, prod=(),
         available_production=list(avail),
         visible_enemies=list(enemies),
         visible_enemy_buildings=list(enemy_bldgs),
+        spatial_map=spatial_map,
+        spatial_channels=9,
     )
 
 
@@ -206,6 +211,77 @@ iss_wall = act_wall.commands[0].item_type
 check("train+muro no emite sbag/brik",
       act_wall.commands[0].action.value != "train"
       or str(iss_wall).lower() not in ("sbag", "brik", "fenc"))
+
+# PLACE cola Defense (pbox/gun): el bug era queue_type=="Building" only.
+obs_def = _obs(
+    harv=1, bldgs=("fact", "proc", "tent"),
+    avail=("e1", "tent", "pbox", "gun", "agun", "proc", "powr"),
+    units=[_u(1, "e1", 12, 16), _u(9, "harv", 14, 16)],
+    prod=[NS(queue_type="Defense", item="gun", progress=1.0, paused=False)],
+)
+aidx_def = ActionIndex(obs_def, Vocab())
+check("PLACE legal con cola Defense",
+      bool(aidx_def.type_mask[TYPE_TO_IDX["place_building"]]))
+check("defense_gun concreto es pbox (más barato)",
+      aidx_def.rol_a_concreto.get("defense_gun") == "pbox")
+dslot = (len(aidx_def.train_items) + aidx_def.build_items.index("defense_gun")
+         if "defense_gun" in aidx_def.build_items else 0)
+act_def, _ = index_to_command_effective(
+    obs_def, TYPE_TO_IDX["place_building"], 0, 16 * 128 + 12, dslot, aidx_def)
+check("PLACE Defense emite el gun listo (no tent)",
+      act_def.commands[0].action.value == "place_building"
+      and act_def.commands[0].item_type == "gun")
+
+obs_both = _obs(
+    harv=1, bldgs=("fact", "proc", "tent"),
+    avail=("e1", "tent", "pbox", "gun", "proc", "powr"),
+    units=[_u(1, "e1", 12, 16), _u(9, "harv", 14, 16)],
+    prod=[
+        NS(queue_type="Building", item="tent", progress=1.0, paused=False),
+        NS(queue_type="Defense", item="gun", progress=1.0, paused=False),
+    ],
+)
+aidx_both = ActionIndex(obs_both, Vocab())
+dslot2 = (len(aidx_both.train_items)
+          + aidx_both.build_items.index("defense_gun"))
+act_both, _ = index_to_command_effective(
+    obs_both, TYPE_TO_IDX["place_building"], 0, 16 * 128 + 12, dslot2, aidx_both)
+check("PLACE sampled defense_gun prefiere gun listo, no tent",
+      act_both.commands[0].item_type == "gun")
+tslot = (len(aidx_both.train_items)
+         + aidx_both.build_items.index("barracks"))
+act_tent_p, _ = index_to_command_effective(
+    obs_both, TYPE_TO_IDX["place_building"], 0, 16 * 128 + 12, tslot, aidx_both)
+check("PLACE sampled barracks sigue poniendo tent",
+      act_tent_p.commands[0].item_type == "tent")
+
+# Harvest: harv en migajas → order con celda al parche rico (Ch2).
+import base64 as _b64
+_h, _w = 32, 32
+_sp = np.zeros((_h, _w, 9), dtype=np.float32)
+_sp[:, :, 3] = 1.0
+_sp[:, :, 4] = 1.0
+_sp[16, 4, 2] = 0.2   # casa agotada
+_sp[16, 28, 2] = 8.0  # parche rico explorado
+_b64map = _b64.b64encode(_sp.tobytes()).decode("ascii")
+obs_ore = _obs(
+    harv=1, bldgs=("fact", "proc"), w=_w, h=_h,
+    avail=("e1", "proc"),
+    units=[_u(9, "harv", 4, 16, idle=False)],
+    spatial_map=_b64map,
+)
+cmds_ore = support_commands(obs_ore)
+harv_cmds = [c for c in cmds_ore if c.action.value == "harvest"]
+check("harv en migajas recibe harvest con celda",
+      len(harv_cmds) == 1 and harv_cmds[0].target_x == 28
+      and harv_cmds[0].target_y == 16)
+obs_idle_h = _obs(
+    harv=1, bldgs=("fact", "proc"),
+    units=[_u(9, "harv", 14, 16, idle=True)])
+cmds_ih = support_commands(obs_idle_h)
+check("harv idle sin spatial sigue harvest",
+      any(c.action.value == "harvest" for c in cmds_ih))
+
 cmds_push = support_commands(_obs(bldgs=("fact",), units=[_u(1, "e1", 12, 16)]), last_push=(90, 12))
 check("support no keep-alive attack sin proc",
       not any(c.action.value == "attack_move" for c in cmds_push))
@@ -562,7 +638,7 @@ check("cell_head Capa 2 in_ch",
       == SPATIAL_CH + SCATTER_CH + 64 + 64 + UNIT_COND_DIM)
 
 H, W = 16, 16
-feats = torch.zeros(1, MAX_UNITS, 10)
+feats = torch.zeros(1, MAX_UNITS, UNIT_FEAT_DIM)
 feats[0, 0, 7], feats[0, 0, 8] = 10 / 128.0, 10 / 128.0
 feats[0, 1, 7], feats[0, 1, 8] = 12 / 128.0, 4 / 128.0
 valid = torch.zeros(1, MAX_UNITS, dtype=torch.bool)
@@ -647,6 +723,90 @@ obs_sk = obs_from_dict({
 check("skirmish obs_from_dict",
       obs_sk.tick == 80 and obs_sk.map_info.map_name == "Singles"
       and obs_sk.units[0].type == "e1" and obs_sk.economy.cash == 5000)
+
+# --- Capa 2c-A: 96 slots + combat-first ---
+check("MAX_UNITS 96", MAX_UNITS == 96)
+check("UNIT_FEAT_DIM 10", UNIT_FEAT_DIM == 10)
+
+raid_enemy = _u(900, "e1", 52, 16)
+old_home = [_u(i + 1, "e1", 12, 16) for i in range(80)]
+new_raid = [_u(200 + i, "e1", 50, 16) for i in range(30)]
+obs_raid = _obs(units=old_home + new_raid, enemies=(raid_enemy,),
+                bldgs=("fact",))
+picked_raid = select_unit_slots(obs_raid)
+ids_raid = [u.actor_id for u in picked_raid]
+check("combat-first: 30 del raid entran",
+      all((200 + i) in ids_raid for i in range(30)))
+check("combat-first: cap 96", len(picked_raid) == 96)
+check("combat-first: tensor ordenado por actor_id",
+      ids_raid == sorted(ids_raid))
+check("combat-first: no hay huecos de sort",
+      ids_raid == sorted(u.actor_id for u in picked_raid))
+
+tiny = [_u(i + 1, "e1", 12, 16) for i in range(10)]
+obs_tiny = _obs(units=tiny)
+feats_t, valid_t = unit_slots(obs_tiny)
+check("10 unidades: feats N=10", feats_t.shape == (10, UNIT_FEAT_DIM))
+check("10 unidades: valid 10", int(valid_t.sum()) == 10)
+
+aidx_raid = ActionIndex(obs_raid, Vocab())
+enc_ids = [u.actor_id for u in select_unit_slots(obs_raid)]
+check("adapter y encoding eligen los mismos actor_id",
+      list(aidx_raid.unit_ids) == enc_ids)
+check("adapter valid[:len] True",
+      bool(aidx_raid.unit_valid[:len(enc_ids)].all())
+      and not bool(aidx_raid.unit_valid[len(enc_ids):].any()))
+
+harvs = [_u(i + 1, "harv", 12, 16) for i in range(20)]
+for h in harvs:
+    h.can_attack = False
+e1s = [_u(100 + i, "e1", 40, 16) for i in range(40)]
+obs_h = _obs(units=harvs + e1s)
+ids_h = [u.actor_id for u in select_unit_slots(obs_h)]
+check("harv no pisa a combate",
+      all((100 + i) in ids_h for i in range(40)))
+check("con cupo, harv rellena",
+      len(ids_h) == 60 and any(i <= 20 for i in ids_h))
+
+home_raid_e = _u(901, "e1", 14, 16)
+old_ore = [_u(i + 1, "e1", 80, 16) for i in range(80)]
+new_yard = [_u(300 + i, "e1", 12, 16) for i in range(30)]
+obs_home = _obs(units=old_ore + new_yard, enemies=(home_raid_e,),
+                bldgs=("fact",))
+ids_home = [u.actor_id for u in select_unit_slots(obs_home)]
+check("raid en casa: e1 del yard entran",
+      all((300 + i) in ids_home for i in range(30)))
+
+empty_obs = _obs(units=[])
+feats_e, valid_e = unit_slots(empty_obs)
+check("sin unidades: feats (0,10)", feats_e.shape == (0, UNIT_FEAT_DIM))
+
+ckpt_a = Path("rl/ckpts/best.pt")
+if ckpt_a.exists():
+    blob_a = __import__("torch").load(
+        ckpt_a, map_location="cpu", weights_only=False)
+    net_a = AlphaLiteNet()
+    adapted_a = adapt_capa2_state_dict(net_a, blob_a["net"])
+    inc_a = net_a.load_state_dict(adapted_a, strict=False)
+    check("2c-A ckpt 1:1 missing=0", len(inc_a.missing_keys) == 0)
+    check("2c-A ckpt 1:1 unexpected=0", len(inc_a.unexpected_keys) == 0)
+    check("2c-A resume iter >=970", int(blob_a.get("iteration", 0) or 0) >= 970)
+    batch_a = {
+        "spatial": torch.zeros(1, 9, 8, 8),
+        "scalars": torch.zeros(1, SCALAR_DIM),
+        "unit_feats": torch.zeros(1, MAX_UNITS, UNIT_FEAT_DIM),
+        "unit_valid": torch.zeros(1, MAX_UNITS, dtype=torch.bool),
+        "type_mask": torch.ones(1, 22, dtype=torch.bool),
+        "cell_mask": torch.ones(1, 8 * 8, dtype=torch.bool),
+        "item_indices": torch.zeros(1, 4, dtype=torch.long),
+        "item_mask": torch.zeros(1, 4, dtype=torch.bool),
+        "train_slot_mask": torch.zeros(1, 4, dtype=torch.bool),
+        "build_slot_mask": torch.zeros(1, 4, dtype=torch.bool),
+    }
+    batch_a["unit_valid"][0, 0] = True
+    out_a = net_a.act(batch_a, torch.zeros(1, HIDDEN_DIM))
+    check("2c-A act(96 slots) log_prob finito",
+          torch.isfinite(out_a["log_prob"]).all().item())
 
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS"))
 sys.exit(0 if ok else 1)

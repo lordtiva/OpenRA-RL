@@ -21,7 +21,10 @@ import torch
 
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.network import TYPE_TO_IDX, build_type_masks
-from rl.obs_encoding import BEACON_BY_MAP, MAX_UNITS, resolve_beacon
+from rl.obs_encoding import (
+    BEACON_BY_MAP, MAX_UNITS, pending_place_item, resolve_beacon,
+    select_unit_slots,
+)
 
 # Tipos habilitados en v0.1 (el resto ni entra en la máscara)
 ENABLED_TYPES = {
@@ -235,7 +238,7 @@ def _split_production(obs):
     available = set(obs.available_production or [])
     buildables = available & BUILDING_ITEM_TYPES
     trainables = available - buildables
-    # roles disponibles + su mejor item concreto (estable, más barato primero)
+    # roles disponibles + concreto más barato (pbox no agun; ftur no tsla)
     def _roles(items):
         from rl.roles import role_of
         por_rol: dict[str, list[str]] = {}
@@ -243,14 +246,14 @@ def _split_production(obs):
             por_rol.setdefault(role_of(it), []).append(it)
         return por_rol
 
+    from rl.roles import cheapest_of
     train_por_rol = _roles(trainables)
     build_por_rol = _roles(buildables)
     train_roles = sorted(train_por_rol)
     build_roles = sorted(build_por_rol)
-    # rol -> ítem concreto preferido de la facción actual
-    rol_a_concreto = {r: items[0] for r, items in train_por_rol.items()}
+    rol_a_concreto = {r: cheapest_of(items) for r, items in train_por_rol.items()}
     for r, items in build_por_rol.items():
-        rol_a_concreto[r] = items[0]
+        rol_a_concreto[r] = cheapest_of(items)
     return train_roles, build_roles, rol_a_concreto
 
 
@@ -283,8 +286,8 @@ class ActionIndex:
             m[TYPE_TO_IDX["build"]] = False
         self.type_mask = torch.from_numpy(m)
 
-        # Cabeza 2: slots de unidades propias móviles
-        units = sorted(obs.units, key=lambda u: u.actor_id)[:MAX_UNITS]
+        # Cabeza 2: mismos slots que unit_slots (combat-first, ≤MAX_UNITS)
+        units = select_unit_slots(obs)
         self.unit_ids = [u.actor_id for u in units]
         self.unit_valid = torch.zeros(MAX_UNITS, dtype=torch.bool)
         for i in range(len(self.unit_ids)):
@@ -418,7 +421,10 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
             else:
                 t_name = "no_op"
     elif t_name == "place_building":
-        pending = _pending_building_type(obs)
+        from rl.roles import concretos_de
+        concrete = str(aidx.rol_a_concreto.get(item_type, item_type) or "").lower()
+        also = concretos_de(item_type) if item_type else ()
+        pending = pending_place_item(obs, prefer=concrete, also=also)
         if not pending:
             t_name = "no_op"
         else:
@@ -537,11 +543,8 @@ def _nearest_enemy_at_cell(obs, cx: int, cy: int):
 
 
 def _pending_building_type(obs):
-    """Tipo del edificio terminado esperando colocación."""
-    for p in obs.production:
-        if p.queue_type == "Building" and p.progress >= 1.0:
-            return p.item
-    return None
+    """Tipo del edificio terminado esperando colocación (Building o Defense)."""
+    return pending_place_item(obs)
 
 
 def _is_harvester(obs, actor_id) -> bool:
