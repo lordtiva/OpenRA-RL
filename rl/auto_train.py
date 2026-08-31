@@ -69,8 +69,9 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 2 Net2Net 922. Asalto de soporte OFF (pack/hunt/rally/dest-credit).
-# Eco/micro on (proc/tent/harvest/repair/deploy/stance). Resume 922. No easy.
+# Capa 3: easy. Misma red Capa 2, asalto de soporte OFF, eco/micro on.
+# Resume best 951 (beginner 88%). Run 11 easy fue 0/140 con script al beacon;
+# ahora la política elige dest. Si lose>25% ~15 iters → restore 951.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
@@ -81,7 +82,7 @@ TRAIN_ARGS = [
     "--lr", "1.5e-4",
     "--batch-size", "128",
     "--scenario", "a_short",
-    "--bot-type", "beginner",
+    "--bot-type", "easy",
     "--shaper-preset", "eradicate_v4",
     "--auto-support",
     "--bc",

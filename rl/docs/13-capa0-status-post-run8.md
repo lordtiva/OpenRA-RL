@@ -38,6 +38,8 @@
 > **Corte 1010 (Run 18 plateau pack12 → Capa 2):** 88 iters post-922, win **35%**, lose 3%, incomplete **62%** plano, wr20 oscila 0.20–0.55 (last 0.45). SIL/H sanos, 0 bombas. `best.pt` sigue **922** (ningún 4/4 nuevo). El pack no baja el mill: la cabeza de celda sigue ciega al sujeto (Ch6). Archivo: `rl/ckpts/Run 18 (a_short pack12 plateau 923-1010)/`. Resume **922** + **Capa 2** (un régimen): transformer 2×4h d=64 residual-gate 0, scatter 8 ch zero-init, `dist_cell|unidad`, Net2Net `cell_head` 224→296. Adam fresco. Criterio 20 iters: H no colapsa, `last_push` sigue al sujeto. Indexer QSA / GDN / easy = **no** este corte.
 >
 > **Corte 950 (Run 19 Capa 2 + script de asalto → rueditas off):** 923–950, incomplete ~63%, mismo mill. Visor 922: con soporte patrón `(95,11)` / pack 12; sin soporte 2/4 win y clicks distintos, 300 unidades que la red no elige (MAX_UNITS=48). El dest hardcoded es spawn-asimétrico (GUI al revés = tropas a la derecha). Archivo: `rl/ckpts/Run 19 (a_short capa2 assault-script 923-950)/`. Resume **922**. `SUPPORT_ASSAULT=False`: no pack/hunt/recall/rally-guerra/crédito de dest. Eco on (deploy/proc/tent/harvest/repair/sell/power/stance). Sin parche Ch7/Ch8 en (95,11). `army_attack_move` sigue legal en la política. No easy.
+>
+> **Corte 952 (Run 20 Capa 2 cerrada vs beginner → Capa 3 easy):** 30 iters, **102/116 win (87.9%)**, incomplete 9.5%, wr20 **1.0**, 17 tandas 4/4, `best.pt` **951**. Capa 2 del 12 (transformer + scatter + `celda|unidad`) **hecha**; 2b (QSA/GDN/GRU 512) no: Ch6 ya no es el techo vs beginner. Archivo: `rl/ckpts/Run 20 (a_short capa2 beginner 923-952)/`. Resume **951**, `--bot-type easy`, asalto support sigue off. Expectativa: wr20 se cae (easy pega en casa). Si lose>25% ~15 iters → restore 951. No self-play, no APC, no MAX_UNITS este corte.
 
 ---
 
@@ -236,8 +238,9 @@ Cortes (un régimen por vez):
 5. **Hecho (corte 977):** clamp ratio PPO + SIL skip nll saturado. Resume **922**.
 6. **Hecho (corte 1010):** Capa 2 transformer + scatter + `celda|unidad` (Net2Net 922).
 7. **Hecho (corte 950):** asalto de soporte OFF (pack/hunt/rally/dest-credit/recall). Eco/micro on. Resume **922**.
-8. **Siguiente:** visor `n_support_army=0`; `last_push` es click crudo (no (95,11) fabricado). Incomplete alto al principio es señal, no bug.
-9. **Capa 2b / 3:** indexer QSA si Ch6 sigue; APC/guard después; easy cuando wr20 se sostenga **sin** el script de asalto.
+8. **Hecho (corte 952):** Capa 2 vs beginner cerrada (wr 88%). Resume **951**, Capa 3 **easy**.
+9. **Siguiente:** juzgar easy (lose media, `defense_loss`, harvest_edge). No QSA/APC/self-play el mismo corte.
+10. **Capa 2b / 3b:** hard cuando wr20 vs easy se sostenga; indexer QSA / `MAX_UNITS` si el incomplete es 300 e1 ciegos; APC/guard después.
 
 | Orden | Dónde | Cuándo | Notas |
 |---|---|---|---|
