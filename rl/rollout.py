@@ -149,7 +149,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
             had_item = aidx.item_mask.any().view(1).to(device)
             if teacher is not None:
                 with torch.no_grad():
-                    _fmap, _, hidden = net.encode(
+                    _fmap, _, hidden, _tok = net.encode(
                         batch["spatial"], batch["scalars"],
                         batch["unit_feats"], batch["unit_valid"], hidden)
                     hidden = hidden.detach()
@@ -453,7 +453,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     if traj and not done and not outcome_error:
         with torch.no_grad():
             b_final, _ = _batch_of(obs, vocab, device)
-            _, _, h_fin = net.encode(
+            _, _, h_fin, _tok = net.encode(
                 b_final["spatial"], b_final["scalars"],
                 b_final["unit_feats"], b_final["unit_valid"], hidden)
             traj[-1]["_v_next"] = float(

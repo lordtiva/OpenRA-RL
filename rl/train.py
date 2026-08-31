@@ -165,6 +165,7 @@ async def amain(args):
 
     print(f"Device: {device} | params: "
           f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M")
+    print("Capa 2: transformer 48 + scatter + cell|unidad (Net2Net)")
     print("Overlap: collect k+1 (infer_net) || update k (thread)")
     print(f"Server: {args.url} | {args.episodes} ep/iter, "
           f"k_skip={args.k_skip}, pool={args.concurrency}"

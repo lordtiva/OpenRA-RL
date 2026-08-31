@@ -69,8 +69,8 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Pack 12 + rally staging. PPO clamp log-ratio / SIL skip nll≥18 (no bomba 923).
-# Resume best.pt 922 vs beginner. No Capa 2. lambda_bc=0.
+# Capa 2: transformer 48 + scatter + cell|unidad (Net2Net desde 922).
+# Resume best.pt 922 vs beginner. Pack 12 intacto. lambda_bc=0. No easy.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",

@@ -3,13 +3,14 @@
 Arquitectura:
     - Encoder espacial: CNN+ResBlocks sobre el tensor 9×H×W
     - Encoder de escalares: MLP sobre economía/militar
-    - Encoder de unidades: MLP por-slot + pooling enmascarado (set encoding)
+    - Encoder de unidades: MLP por-slot + transformer 2×4h d=64 (Capa 2)
+      residual gate=0 al init → GRU ve el mean 922
     - Core: GRU (memoria de parcialmente-observable; hidden se guarda entre
       steps y se DESACOPLA del gradiente — sin BPTT, simplificación deliberada)
     - Cabezas AUTORREGRESIVAS con máscaras de acciones legales:
         1) tipo de acción (21 tipos)
         2) slot de unidad (condicionada al tipo elegido)
-        3) celda objetivo H×W (conv 1×1 sobre el mapa + emb del tipo)
+        3) celda objetivo H×W (conv 1×1: fmap + scatter + tipo + GRU + unidad)
         4) ítem de producción (embedding de tipos de actor)
 
 El log_prob total es la suma SOLO de las cabezas que el tipo elegido usa
@@ -36,6 +37,16 @@ N_ACTION_TYPES = len(ACTION_TYPES)
 TYPE_TO_IDX = {t: i for i, t in enumerate(ACTION_TYPES)}
 
 HIDDEN_DIM = 416
+# Capa 2 (doc 12): set de 48 slots + scatter al fmap + dist_cell|unidad.
+# Residual/zero-init para Net2Net desde 922 (GRU y U-Net se conservan).
+XF_DIM = 64
+XF_HEADS = 4
+XF_LAYERS = 2
+XF_FF = 128
+SCATTER_CH = 8
+UNIT_COND_DIM = 64
+SPATIAL_CH = 96
+CELL_HEAD_OLD_IN = SPATIAL_CH + 64 + 64  # fmap + tipo + hidden (pre Capa 2)
 
 # Qué cabeza usa cada tipo de acción (FUENTE ÚNICA para log_prob condicional;
 # action_adapter debe ser coherente con estos conjuntos). Auditoría 2026-08-24.
@@ -113,7 +124,7 @@ class AlphaLiteNet(nn.Module):
         # Agnóstica al tamaño de mapa: las head convolucionales operan sobre
         # cualquier H×W (adaptive pool para el vector global)
 
-        ch = 96
+        ch = SPATIAL_CH
         # Encoder espacial con CoordConv (canales 9-10: x,y normalizados a
         # [-1,1]) y U-Net lite (2 niveles down/up con skip) para ampliar el
         # campo receptivo (~9 celdas -> ~35-45) sin perder resolución en el
@@ -136,6 +147,16 @@ class AlphaLiteNet(nn.Module):
         self.unit_mlp = nn.Sequential(
             nn.Linear(10, 128), nn.ReLU(), nn.Linear(128, 128), nn.ReLU(),
         )
+        # Transformer de entidades: residual * scale, scale=0 → mean 922.
+        xf_layer = nn.TransformerEncoderLayer(
+            d_model=XF_DIM, nhead=XF_HEADS, dim_feedforward=XF_FF,
+            dropout=0.0, batch_first=True, norm_first=True,
+            activation="relu")
+        self.unit_xf_in = nn.Linear(128, XF_DIM)
+        self.unit_xf = nn.TransformerEncoder(
+            xf_layer, num_layers=XF_LAYERS, enable_nested_tensor=False)
+        self.unit_xf_out = nn.Linear(XF_DIM, 128)
+        self.unit_xf_scale = nn.Parameter(torch.zeros(1))
         fused = ch + 128 + 128
         self.core = nn.GRUCell(fused, HIDDEN_DIM)
 
@@ -154,7 +175,15 @@ class AlphaLiteNet(nn.Module):
             nn.Linear(10 + HIDDEN_DIM + 64, 256), nn.ReLU(),
             nn.Linear(256, 1),
         )
-        self.cell_head = nn.Conv2d(ch + 64 + 64, 1, 1)  # fmap + emb tipo + hidden(gru)
+        # Capa 2: fmap + scatter + tipo + GRU + unidad elegida (o pool).
+        self.scatter_proj = nn.Linear(10, SCATTER_CH)
+        nn.init.zeros_(self.scatter_proj.weight)
+        nn.init.zeros_(self.scatter_proj.bias)
+        self.unit_cond_proj = nn.Linear(128, UNIT_COND_DIM)
+        nn.init.zeros_(self.unit_cond_proj.weight)
+        nn.init.zeros_(self.unit_cond_proj.bias)
+        self.cell_head = nn.Conv2d(
+            ch + SCATTER_CH + 64 + 64 + UNIT_COND_DIM, 1, 1)
         # Proyección del estado global del GRU para broadcast espacial en la
         # cabeza de celda: la decisión (x,y) "ve" hacia dónde va el plan.
         self.hidden_proj = nn.Linear(HIDDEN_DIM, 64)
@@ -187,21 +216,48 @@ class AlphaLiteNet(nn.Module):
              s1], dim=1))
         return x
 
+    def _entity_tokens(self, u, unit_valid):
+        """MLP tokens + transformer residual (scale=0 → identidad 922)."""
+        pad = ~unit_valid
+        all_pad = pad.all(dim=-1)
+        pad = pad.clone()
+        pad[all_pad, 0] = False
+        tok = self.unit_xf(self.unit_xf_in(u), src_key_padding_mask=pad)
+        tok = tok.masked_fill(all_pad[:, None, None], 0.0)
+        return u + self.unit_xf_scale * self.unit_xf_out(tok)
+
+    def _scatter_units(self, unit_feats, unit_valid, hw):
+        """Pinta cada slot (HP/idle/xy) en el fmap. Pesos 0 al init."""
+        B, U, _ = unit_feats.shape
+        H, W = int(hw[0]), int(hw[1])
+        paint = self.scatter_proj(unit_feats) * unit_valid.unsqueeze(-1).float()
+        xs = (unit_feats[..., 7] * 128.0).round().long().clamp(0, W - 1)
+        ys = (unit_feats[..., 8] * 128.0).round().long().clamp(0, H - 1)
+        idx = (ys * W + xs).unsqueeze(1).expand(-1, SCATTER_CH, -1)
+        out = paint.new_zeros(B, SCATTER_CH, H * W)
+        out.scatter_add_(2, idx, paint.transpose(1, 2))
+        return out.view(B, SCATTER_CH, H, W)
+
     def encode(self, spatial, scalars, unit_feats, unit_valid, hidden):
-        """spatial [B,9,H,W], scalars [B,S], units [B,U,F], valid [B,U] bool."""
+        """spatial [B,9,H,W], scalars [B,S], units [B,U,F], valid [B,U] bool.
+
+        Devuelve (fmap, feat_map_flat, new_hidden, tokens). tokens [B,U,128]
+        alimentan dist_cell (Capa 2). feat_map_flat se conserva por firma.
+        """
         fmap = self._enc_spatial(self._coord_conv(spatial))
         feat_map_flat = fmap.flatten(1)
         spatial_vec = F.adaptive_avg_pool2d(fmap, 1).flatten(1)
 
         u = self.unit_mlp(unit_feats)
+        tokens = self._entity_tokens(u, unit_valid)
         valid_f = unit_valid.float().unsqueeze(-1)
         denom = valid_f.sum(1).clamp(min=1.0)
-        unit_vec = (u * valid_f).sum(1) / denom
+        unit_vec = (tokens * valid_f).sum(1) / denom
 
         s = self.scalar_mlp(scalars)
         fused = torch.cat([spatial_vec, s, unit_vec], dim=-1)
         new_hidden = self.core(fused, hidden)
-        return fmap, feat_map_flat, new_hidden
+        return fmap, feat_map_flat, new_hidden, tokens
 
     @staticmethod
     def _categorical(logits):
@@ -239,24 +295,43 @@ class AlphaLiteNet(nn.Module):
         logits = self._scores_unit(hidden, chosen_type, unit_feats, unit_valid)
         return self._categorical(logits)
 
-    def _logits_cell(self, fmap, chosen_type, cell_mask, hidden):
+    def _unit_cond_map(self, tokens, unit_valid, unit_slot, chosen_type, hw):
+        """Broadcast del slot elegido, o del pool si el tipo no usa unidad."""
+        B, U, _ = tokens.shape
+        H, W = int(hw[0]), int(hw[1])
+        slot = unit_slot.clamp(0, max(U - 1, 0))
+        chosen = tokens[torch.arange(B, device=tokens.device), slot]
+        valid_f = unit_valid.float().unsqueeze(-1)
+        pooled = (tokens * valid_f).sum(1) / valid_f.sum(1).clamp(min=1.0)
+        use_u, _, _ = _heads_used(chosen_type, tokens.device)
+        cond = torch.where(use_u.unsqueeze(-1), chosen, pooled)
+        emb = F.relu(self.unit_cond_proj(cond))
+        return emb[:, :, None, None].expand(-1, -1, H, W)
+
+    def _logits_cell(self, fmap, chosen_type, cell_mask, hidden,
+                     tokens, unit_feats, unit_valid, unit_slot):
         """Logits crudos [B, H*W] de la cabeza de celda.
 
-        Recibe fmap (U-Net/CoordConv, campo receptivo amplio) + embedding del
-        tipo + el estado global del GRU proyectado (broadcast): la decisión
-        (x,y) conoce hacia dónde va el plan, no solo el parche local.
+        fmap U-Net + scatter de unidades + emb tipo + GRU + slot (Capa 2).
+        Un rifle y un MCV ya no ven el mismo heatmap.
         """
-        emb = self.type_embedding(chosen_type)  # [B,64]
         b, _, H, W = fmap.shape
+        scatter = self._scatter_units(unit_feats, unit_valid, (H, W))
+        emb = self.type_embedding(chosen_type)
         emb_map = emb[:, :, None, None].expand(-1, -1, H, W)
         hd = F.relu(self.hidden_proj(hidden))[:, :, None, None].expand(-1, -1, H, W)
+        unit_map = self._unit_cond_map(
+            tokens, unit_valid, unit_slot, chosen_type, (H, W))
         logits_map = self.cell_head(
-            torch.cat([fmap, emb_map, hd], dim=1)).squeeze(1)
+            torch.cat([fmap, scatter, emb_map, hd, unit_map], dim=1)).squeeze(1)
         logits_map = logits_map.masked_fill(~cell_mask.view(b, H, W), -1e9)
         return logits_map.reshape(b, -1)
 
-    def dist_cell(self, fmap, chosen_type, cell_mask, hidden):
-        logits = self._logits_cell(fmap, chosen_type, cell_mask, hidden)
+    def dist_cell(self, fmap, chosen_type, cell_mask, hidden,
+                  tokens, unit_feats, unit_valid, unit_slot):
+        logits = self._logits_cell(
+            fmap, chosen_type, cell_mask, hidden,
+            tokens, unit_feats, unit_valid, unit_slot)
         return self._categorical(logits)
 
     def _scores_item(self, hidden, chosen_type, item_indices, item_mask):
@@ -309,7 +384,7 @@ class AlphaLiteNet(nn.Module):
         El log_prob devuelto es el de la POLÍTICA (T=1) sobre lo muestreado:
         es la referencia contra la que PPO mide el drift.
         """
-        fmap, _, new_hidden = self.encode(
+        fmap, _, new_hidden, tokens = self.encode(
             batch["spatial"], batch["scalars"],
             batch["unit_feats"], batch["unit_valid"], hidden,
         )
@@ -326,7 +401,9 @@ class AlphaLiteNet(nn.Module):
         u_idx = ls_u.argmax(dim=-1) if greedy else \
             self._categorical(ls_u / temperature).sample()
 
-        lc = self._logits_cell(fmap, t_idx, batch["cell_mask"], new_hidden)
+        lc = self._logits_cell(
+            fmap, t_idx, batch["cell_mask"], new_hidden,
+            tokens, batch["unit_feats"], batch["unit_valid"], u_idx)
         dist_c = self._categorical(lc)
         c_idx = lc.argmax(dim=-1) if greedy else \
             self._categorical(lc / temperature).sample()
@@ -372,7 +449,7 @@ class AlphaLiteNet(nn.Module):
         tipo usa (mismos conjuntos que act()). Debe llamarse con los índices
         EFECTIVOS de la acción ejecutada.
         """
-        fmap, _, new_hidden = self.encode(
+        fmap, _, new_hidden, tokens = self.encode(
             batch["spatial"], batch["scalars"],
             batch["unit_feats"], batch["unit_valid"], hidden,
         )
@@ -380,7 +457,10 @@ class AlphaLiteNet(nn.Module):
         dist_t = self.dist_type(new_hidden, batch["type_mask"])
         dist_u = self.dist_unit(new_hidden, t_idx, batch["unit_feats"],
                                 batch["unit_valid"])
-        dist_c = self.dist_cell(fmap, t_idx, batch["cell_mask"], new_hidden)
+        dist_c = self.dist_cell(
+            fmap, t_idx, batch["cell_mask"], new_hidden,
+            tokens, batch["unit_feats"], batch["unit_valid"],
+            actions["unit_slot"])
 
         has_items = batch["item_mask"].any(dim=-1)
         safe_item_mask = self._item_cat_mask(batch, t_idx).clone()
@@ -452,13 +532,16 @@ class AlphaLiteNet(nn.Module):
             else:
                 b["train_slot_mask"] = b["item_mask"]
                 b["build_slot_mask"] = b["item_mask"]
-            fmap, _, h = self.encode(
+            fmap, _, h, tokens = self.encode(
                 b["spatial"], b["scalars"], b["unit_feats"],
                 b["unit_valid"], h)  # SIN detach → gradiente a través del time
             t_idx = s["action"]["type"].to(device)
             dist_t = self.dist_type(h, b["type_mask"])
             dist_u = self.dist_unit(h, t_idx, b["unit_feats"], b["unit_valid"])
-            dist_c = self.dist_cell(fmap, t_idx, b["cell_mask"], h)
+            u_idx = s["action"]["unit_slot"].to(device)
+            dist_c = self.dist_cell(
+                fmap, t_idx, b["cell_mask"], h,
+                tokens, b["unit_feats"], b["unit_valid"], u_idx)
             has_items = b["item_mask"].any(dim=-1)
             safe_item = self._item_cat_mask(b, t_idx).clone()
             safe_item[~has_items] = True
@@ -466,7 +549,6 @@ class AlphaLiteNet(nn.Module):
 
             use_u, use_c, use_i = _heads_used(t_idx, t_idx.device)
             zero = torch.zeros_like(dist_t.log_prob(t_idx))
-            u_idx = s["action"]["unit_slot"].to(device)
             c_idx = s["action"]["cell_flat"].to(device)
             i_idx = s["action"]["item_slot"].to(device)
             had_item = bool(s["action"]["had_item"])
@@ -499,3 +581,32 @@ class AlphaLiteNet(nn.Module):
             ent_list.append(entropy)
             val_list.append(value)
         return (torch.cat(lp_list), torch.cat(ent_list), torch.cat(val_list))
+
+
+def adapt_capa2_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
+    """Net2Net: pesos 922 (cell_head 224→1) → Capa 2 (scatter+unidad extra).
+
+    Copia fmap/tipo/GRU a las mismas rebanadas; scatter y unit_cond quedan 0
+    (igual que scatter_proj / unit_cond_proj al init). GRU/U-Net/type-head
+    cargan 1:1. Keys nuevas (transformer) las pone load_state_dict missing.
+    """
+    out = dict(raw)
+    key_w = "cell_head.weight"
+    if key_w not in out:
+        return out
+    old_w = out[key_w]
+    new_w = net.cell_head.weight.detach().clone()
+    if old_w.shape == new_w.shape:
+        return out
+    if old_w.dim() != 4 or old_w.shape[1] != CELL_HEAD_OLD_IN:
+        return out
+    new_w.zero_()
+    # new cat: fmap(96) + scatter(8) + tipo(64) + hidden(64) + unit(64)
+    new_w[:, 0:SPATIAL_CH] = old_w[:, 0:SPATIAL_CH]
+    t0 = SPATIAL_CH + SCATTER_CH
+    new_w[:, t0:t0 + 64] = old_w[:, SPATIAL_CH:SPATIAL_CH + 64]
+    h0 = t0 + 64
+    new_w[:, h0:h0 + 64] = old_w[:, SPATIAL_CH + 64:CELL_HEAD_OLD_IN]
+    out[key_w] = new_w
+    # bias [1] mismo shape
+    return out

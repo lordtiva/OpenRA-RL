@@ -38,7 +38,7 @@ from rl.best_ckpt import (
     viability_score,
 )
 from rl.network import TYPE_TO_IDX
-from rl.obs_encoding import BEACON_BY_MAP
+from rl.obs_encoding import BEACON_BY_MAP, SCALAR_DIM
 
 ok = True
 
@@ -644,6 +644,86 @@ act_sk = OpenRAAction(commands=[
     CommandModel(action=ActionType.TRAIN, item_type="e1"),
 ])
 dicts_sk = action_to_dicts(act_sk)
+from rl.network import (
+    CELL_HEAD_OLD_IN, HIDDEN_DIM, SCATTER_CH, SPATIAL_CH, TYPE_TO_IDX,
+    UNIT_COND_DIM, adapt_capa2_state_dict,
+)
+from rl.obs_encoding import MAX_UNITS
+from rl.trainer import load_checkpoint as _load_ckpt
+
+net_c2 = AlphaLiteNet()
+n_params = sum(p.numel() for p in net_c2.parameters())
+check("capa2 params en rango 2.5-8M", 2.5e6 < n_params < 8e6)
+check("cell_head Capa 2 in_ch",
+      net_c2.cell_head.weight.shape[1]
+      == SPATIAL_CH + SCATTER_CH + 64 + 64 + UNIT_COND_DIM)
+
+H, W = 16, 16
+feats = torch.zeros(1, MAX_UNITS, 10)
+feats[0, 0, 7], feats[0, 0, 8] = 10 / 128.0, 10 / 128.0
+feats[0, 1, 7], feats[0, 1, 8] = 12 / 128.0, 4 / 128.0
+valid = torch.zeros(1, MAX_UNITS, dtype=torch.bool)
+valid[0, 0] = True
+valid[0, 1] = True
+spatial = torch.zeros(1, 9, H, W)
+scalars = torch.zeros(1, SCALAR_DIM)
+h0 = torch.zeros(1, HIDDEN_DIM)
+torch.nn.init.normal_(net_c2.unit_cond_proj.weight, 0.0, 0.3)
+torch.nn.init.zeros_(net_c2.unit_cond_proj.bias)
+fmap, _, h, tokens = net_c2.encode(spatial, scalars, feats, valid, h0)
+t_am = torch.tensor([TYPE_TO_IDX["attack_move"]])
+c_mask = torch.ones(1, H * W, dtype=torch.bool)
+lc0 = net_c2._logits_cell(fmap, t_am, c_mask, h, tokens, feats, valid,
+                          torch.tensor([0]))
+lc1 = net_c2._logits_cell(fmap, t_am, c_mask, h, tokens, feats, valid,
+                          torch.tensor([1]))
+check("dist_cell condiciona al slot (rifle ≠ MCV)",
+      not torch.allclose(lc0, lc1))
+
+torch.nn.init.ones_(net_c2.scatter_proj.weight)
+torch.nn.init.ones_(net_c2.scatter_proj.bias)
+sc = net_c2._scatter_units(feats, valid, (H, W))
+check("scatter pinta la celda de la unidad",
+      float(sc[0, :, 10, 10].abs().sum()) > 0)
+
+old = {k: v.detach().clone() for k, v in net_c2.state_dict().items()
+       if not k.startswith(("unit_xf", "scatter_proj", "unit_cond",
+                            "cell_head"))}
+old["cell_head.weight"] = torch.randn(1, CELL_HEAD_OLD_IN, 1, 1)
+old["cell_head.bias"] = torch.zeros(1)
+fresh = AlphaLiteNet()
+adapted = adapt_capa2_state_dict(fresh, old)
+check("Net2Net cell_head shape Capa 2",
+      adapted["cell_head.weight"].shape == fresh.cell_head.weight.shape)
+check("Net2Net copia fmap 96",
+      torch.allclose(adapted["cell_head.weight"][:, :SPATIAL_CH],
+                     old["cell_head.weight"][:, :SPATIAL_CH]))
+check("Net2Net scatter extra es 0",
+      float(adapted["cell_head.weight"][:, SPATIAL_CH:SPATIAL_CH + SCATTER_CH]
+            .abs().sum()) == 0.0)
+
+ckpt_922 = Path("rl/ckpts/best.pt")
+if ckpt_922.exists():
+    loaded = AlphaLiteNet()
+    it_c2 = _load_ckpt(str(ckpt_922), loaded)
+    check("Capa 2 carga best.pt 922", it_c2 == 922)
+    batch = {
+        "spatial": torch.zeros(1, 9, 8, 8),
+        "scalars": torch.zeros(1, SCALAR_DIM),
+        "unit_feats": feats[:, :, :].contiguous()[:, :MAX_UNITS],
+        "unit_valid": valid,
+        "type_mask": torch.ones(1, 22, dtype=torch.bool),
+        "cell_mask": torch.ones(1, 8 * 8, dtype=torch.bool),
+        "item_indices": torch.zeros(1, 4, dtype=torch.long),
+        "item_mask": torch.zeros(1, 4, dtype=torch.bool),
+        "train_slot_mask": torch.zeros(1, 4, dtype=torch.bool),
+        "build_slot_mask": torch.zeros(1, 4, dtype=torch.bool),
+    }
+    # feats is 16-map coords; act on 8x8 still ok (scatter clamps)
+    out_c2 = loaded.act(batch, torch.zeros(1, HIDDEN_DIM))
+    check("Capa 2 act(922) log_prob finito",
+          torch.isfinite(out_c2["log_prob"]).all().item())
+
 check("skirmish action_to_dicts names",
       dicts_sk[0]["action"] == "army_attack_move" and dicts_sk[1]["item_type"] == "e1")
 obs_sk = obs_from_dict({
