@@ -23,7 +23,7 @@ from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.network import TYPE_TO_IDX, build_type_masks
 from rl.obs_encoding import (
     BEACON_BY_MAP, MAX_UNITS, pending_place_item, resolve_beacon,
-    select_enemy_slots, select_unit_slots,
+    select_unit_slots,
 )
 
 # Tipos habilitados en v0.1 (el resto ni entra en la máscara)
@@ -261,7 +261,7 @@ class ActionIndex:
     """Todo lo que la red necesita para decidir sobre una observación."""
 
     __slots__ = ("type_mask", "unit_valid", "cell_mask", "item_indices",
-                 "item_mask", "unit_ids", "enemy_ids", "items", "train_items",
+                 "item_mask", "unit_ids", "items", "train_items",
                  "build_items", "rol_a_concreto", "h", "w",
                  "train_slot_mask", "build_slot_mask", "pass_grid")
 
@@ -293,8 +293,6 @@ class ActionIndex:
         self.unit_valid = torch.zeros(MAX_UNITS, dtype=torch.bool)
         for i in range(len(self.unit_ids)):
             self.unit_valid[i] = True
-        # Capa 2c-C: pointer de attack. Mismo orden que select_enemy_slots.
-        self.enemy_ids = [u.actor_id for u in select_enemy_slots(obs)]
 
         # Cabeza 3: mapa completo como candidatos de celda
         self.cell_mask = torch.ones(self.h * self.w, dtype=torch.bool)
@@ -361,18 +359,16 @@ class ActionIndex:
 
 
 def index_to_command(obs, chosen_type: int, unit_slot: int, cell_flat: int,
-                     item_slot: int, aidx: ActionIndex,
-                     enemy_slot: int = 0) -> OpenRAAction:
+                     item_slot: int, aidx: ActionIndex) -> OpenRAAction:
     """Convierte la salida cruda de la red en un comando válido y SEGURO."""
     action, _ = index_to_command_effective(
-        obs, chosen_type, unit_slot, cell_flat, item_slot, aidx,
-        enemy_slot=enemy_slot)
+        obs, chosen_type, unit_slot, cell_flat, item_slot, aidx)
     return action
 
 
 def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
                                cell_flat: int, item_slot: int,
-                               aidx: ActionIndex, enemy_slot: int = 0):
+                               aidx: ActionIndex):
     """Igual que index_to_command pero TAMBIÉN devuelve los índices EFECTIVOS.
 
     Las correcciones de seguridad mutan la acción muestreada (ej. 'train'
@@ -447,12 +443,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     # AQUÍ, antes de computar los índices efectivos — así el tipo efectivo
     # refleja la acción realmente ejecutada (antes quedaba "attack" y el
     # buffer atribuía el crédito al tipo equivocado).
-    # 2c-C: pointer válido gana; nearest solo si el slot es pad/muerto.
-    attack_target = None
-    if t_name == "attack":
-        attack_target = _attack_target_id(obs, aidx, enemy_slot, cx, cy)
-        if attack_target is None:
-            t_name = "attack_move"
+    if t_name == "attack" and _nearest_enemy_at_cell(obs, cx, cy) is None:
+        t_name = "attack_move"
 
     if t_name in COMBAT_MOVE_TYPES and not owns_proc(obs):
         t_name = "no_op"
@@ -505,10 +497,9 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         # propias y les emite AttackMove hacia la celda.
         cmd = CommandModel(action=t, target_x=cx, target_y=cy)
     elif t == ActionType.ATTACK:
-        # 2c-C: enemy_slot válido → ese actor, no el más cercano a la celda.
-        target = attack_target
-        if target is None:
-            target = _attack_target_id(obs, aidx, enemy_slot, cx, cy)
+        # Con la degradación temprana F1, acá solo se llega CON enemigo
+        # resolvible; el if queda como defensa en profundidad.
+        target = _nearest_enemy_at_cell(obs, cx, cy)
         if target is None:
             cmd = CommandModel(action=ActionType.ATTACK_MOVE,
                                actor_id=actor_id, target_x=cx, target_y=cy)
@@ -541,39 +532,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
                                           eff_item_slot, eff_cell_flat)
 
 
-def _enemy_alive(obs, actor_id) -> bool:
-    try:
-        aid = int(actor_id or 0)
-    except (TypeError, ValueError):
-        return False
-    if aid <= 0:
-        return False
-    for e in list(getattr(obs, "visible_enemies", None) or []) + list(
-            getattr(obs, "visible_enemy_buildings", None) or []):
-        try:
-            if int(getattr(e, "actor_id", 0) or 0) == aid:
-                return True
-        except (TypeError, ValueError):
-            continue
-    return False
-
-
-def _attack_target_id(obs, aidx, enemy_slot: int, cx: int, cy: int):
-    """Pointer 2c-C: enemy_ids[slot] si vivo; si pad/muerto, nearest (fallback)."""
-    ids = getattr(aidx, "enemy_ids", None) or []
-    try:
-        slot = int(enemy_slot)
-    except (TypeError, ValueError):
-        slot = -1
-    if 0 <= slot < len(ids):
-        eid = ids[slot]
-        if _enemy_alive(obs, eid):
-            return eid
-    return _nearest_enemy_at_cell(obs, cx, cy)
-
-
 def _nearest_enemy_at_cell(obs, cx: int, cy: int):
-    """ID del enemigo visible más cercano a la celda (fallback de attack)."""
+    """ID del enemigo visible más cercano a la celda (para attack)."""
     best, best_d = None, float("inf")
     candidates = list(obs.visible_enemies) + list(obs.visible_enemy_buildings)
     for e in candidates:

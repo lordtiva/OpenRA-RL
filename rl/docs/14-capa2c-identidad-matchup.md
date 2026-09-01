@@ -24,7 +24,7 @@ Bar para **hard** (Capa 3): wr20 vs easy decente **y** `defense_loss` que no sea
 | Slots propios | **PR-A hecho:** `MAX_UNITS=96` + `select_unit_slots` combat-first. |
 | Features / slot | **PR-B:** 11-d (10 + team) + `role_id` paralelo. Own++ene ≤128. |
 | Enemigos | **PR-B:** ≤32 `visible_enemies` en el xf (`team=1`). `dist_unit` los enmascara. |
-| `attack` | **PR-C:** `enemy_slot` → `target_actor_id`. Nearest solo si pad/muerto. |
+| `attack` | Slot propio + celda → `_nearest_enemy_at_cell`. PR-C revertido (smoke wr20→0). |
 | Producción | Cabeza de ítems **sí** usa `rl.roles` (`infantry_basic`, `infantry_antiarmor`, `tank_medium`…). Puede entrenar el counter a ciegas; no ve de qué está hecho el rival. |
 | Capa 2 | xf residual (scale aprendible), scatter 8 ch, `cell_head` 296-in. ~2.89M. Net2Net desde 922 ya probado. |
 | Acción / APM | 1 decisión / 50 ticks (~2 s). AutoTarget cubre el micro en rango. |
@@ -41,11 +41,11 @@ No un mega-PR. No 96 + rol + enemigos + cabeza nueva el mismo resume. Cada corte
 |---|---|---|---|---|---|
 | **A** | Set | `MAX_UNITS` 48→**96** + selección **combat-first** | **1:1** (ni un Linear nuevo) | **Hecho corte 983, resume 976** | H no colapsa; `n_unit_valid` media sube; `defense_loss` no empeora |
 | **B** | Identidad | Embedding de rol + bit de equipo + tokens enemigos visibles + scatter de esas feats | Net2Net (zero-pad) | best de A | H no colapsa; `xf_scale` no explota; wr20 no a 0 |
-| **C** | Pointer de ataque | Cabeza `enemy_slot` solo en `attack`; F1 usa ese `actor_id` | Cabeza nueva en 0; tronco cargado | **Hecho corte 1020, resume 1020** | `attack` deja de ser 100% “más cercano”; no NaN; legal mask |
+| **C** | Pointer de ataque | Cabeza `enemy_slot` solo en `attack`; F1 usa ese `actor_id` | Cabeza nueva en 0; tronco cargado | **Revertido corte 1086** | wr20→0; pointer casi no se usó; restore B 1020 |
 
 Si A no mueve `defense_loss` en ~20–40 iters, **no** saltar a 128. El siguiente palanca de A es el filtro (ya va en A); si el filtro+96 sigue ciego, entonces B (rol: harv vs e1 en el set). No 256.
 
-**No** en estos PRs: QSA, GDN, GRU 512, APC/`enter_transport`, `hard`, self-play, `SUPPORT_ASSAULT=True`, beacon Ch7/Ch8, dest-credit.
+**No** en estos PRs: QSA, GDN, GRU 512, APC/`enter_transport`, `hard`, self-play, `SUPPORT_ASSAULT=True` (pack/hunt/rally/crédito), beacon Ch7/Ch8, dest-credit. `SUPPORT_WAR_NUDGE` (raid peel local + push farthest/prod, **sin** beacon) es un corte aparte, no reabre el script de asalto.
 
 ---
 
@@ -286,4 +286,4 @@ Capa 3 sigue siendo el **cuándo** el matchup importa (composición del rival ca
 4. Boot: print del régimen (`MACRO 50`, `MAX_UNITS 96` / `role+enemy` / `attack-actor`).
 5. 20 iters. Si H/NaN/wr20→0: restore, no el siguiente PR.
 
-*Guardado: 2026-09-01 — rama `exp/rl-2026-08-28-grok`. PR-A shipped (96 + combat-first). PR-B shipped (role+team+32 ene). PR-C shipped (`attack` elige actor, resume 1020). Smoke 20 iters vs easy pendiente.*
+*Guardado: 2026-09-01 — rama `exp/rl-2026-08-28-grok`. PR-A shipped. PR-B shipped (live). PR-C smoke falló (Run 27); código revertido, resume 1020.*

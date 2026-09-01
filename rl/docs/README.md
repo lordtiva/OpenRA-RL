@@ -20,8 +20,8 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | **11** | `10-benchmark-alphastar-openai-five.md` | **Benchmark: dónde estás vs AlphaStar/OpenAI Five — qué ya tenés y las 3 brechas (self-play, imitation, annealing)** | **Posicionamiento — mapa de familia** |
 | **12** | `11-revision-quisquillosa.md` | **Contra-benchmark quisquilloso: dónde infla la tabla, 6 brechas no contadas y veredicto recalibrado (chasis vs motor)** | **Termómetro de nivel** |
 | **13** | `12-plan-4-capas-siguiente-nivel.md` | **Plan 4 capas para tu hardware (2070+5600X): Capa 0 win posible + Capa 1 BC/SIL + Capa 2 transformer/scatter + Capa 3 self-play + throughput** | **Roadmap 6-12 meses (orden por ROI) — no se modifica** |
-| **13b** | `13-capa0-status-post-run8.md` | **2c-C: attack-actor. Resume 1020 (tronco B). No restore 999.** | **Companion del 12 — 2026-09-01** |
-| **13c** | `14-capa2c-identidad-matchup.md` | **Capa 2c: A+B+C shipped. Smoke C pendiente. No 128/256.** | **Spec — PR-C 2026-09-01** |
+| **13b** | `13-capa0-status-post-run8.md` | **2c-B + war nudge v2 (peel local). Resume 1046. Run 29 yank.** | **Companion del 12 — 2026-09-01** |
+| **13c** | `14-capa2c-identidad-matchup.md` | **Capa 2c: A+B shipped. C smoke falló, revertido. Nudge sin beacon. No 128/256.** | **Spec — 2026-09-01** |
 | **13d** | `15-facciones-mods-roles.md` | **No reentrenar cada país. Un train RA Aliados; soviet=mismo ckpt; otro mod=otro ckpt** | **Contrato — 2026-08-31** |
 | **14** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Consolida análisis `ai.yaml` + teoría RL** |
 | **15** | `07-operacion.md` | **Comandos PowerShell (contenedor / train / dashboard / skirmish vs PPO), reglas de run limpio, criterios de promoción** | **Nuevo** |

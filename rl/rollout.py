@@ -154,12 +154,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 raw = teacher.decide(obs)
                 primary = pick_bc_command(raw.commands)
                 t0, u0, c0, i0 = command_to_indices(obs, primary, aidx)
-                e_slot = 0
-                tid = int(getattr(primary, "target_actor_id", 0) or 0)
-                if tid and tid in aidx.enemy_ids:
-                    e_slot = int(aidx.enemy_ids.index(tid))
                 action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
-                    obs, t0, u0, c0, i0, aidx, enemy_slot=e_slot)
+                    obs, t0, u0, c0, i0, aidx)
                 extras = [c for c in (raw.commands or []) if c is not primary]
                 action.commands.extend(extras)
                 sampled = (t0, u0, i0, c0)
@@ -176,17 +172,14 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                             "unit_slot": torch.tensor([eff_u], device=device),
                             "cell_flat": cell_t,
                             "item_slot": torch.tensor([eff_i], device=device),
-                            "enemy_slot": torch.tensor([e_slot], device=device),
                             "had_item": had_item,
                         })
             else:
                 out = net.act(batch, hidden, temperature=temperature)
                 hidden = out["hidden"].detach()
-                e_slot = int(out.get("enemy_slot", 0))
                 action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
                     obs, int(out["type"]), int(out["unit_slot"]),
                     int(out["cell_flat"]), int(out["item_slot"]), aidx,
-                    enemy_slot=e_slot,
                 )
                 sampled = (int(out["type"]), int(out["unit_slot"]),
                            int(out["item_slot"]), int(out["cell_flat"]))
@@ -228,8 +221,6 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                             "cell_flat": cell_t if torch.is_tensor(cell_t) else
                             torch.tensor([int(eff_c)], device=device),
                             "item_slot": torch.tensor([eff_i], device=device),
-                            "enemy_slot": torch.tensor(
-                                [int(e_slot)], device=device),
                             "had_item": had_item,
                         })
                     log_prob = re_lp
@@ -280,7 +271,6 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     "cell_flat": (cell_t.detach().cpu() if torch.is_tensor(cell_t)
                                   else torch.tensor([int(eff_c)])),
                     "item_slot": torch.tensor([effective[2]]),
-                    "enemy_slot": torch.tensor([int(e_slot)]),
                     "had_item": had_item.cpu(),
                     # CONGELADOS: la referencia contra la que PPO mide el drift
                     "log_prob": log_prob.detach().cpu(),

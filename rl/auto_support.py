@@ -17,9 +17,13 @@ Diseño:
   casa: el argmax global mandaba las harv al mineral enemigo (live 1000–1019
   ownH ~450 vs ~1100).
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
-- Asalto / hunt / recall / rally-al-beacon / crédito de dest: APAGADOS
-  (corte 950). Era estrategia spawn-asimétrica (siempre (95,11)). La red
-  elige dónde atacar y si defender. Re-activar: SUPPORT_ASSAULT=True.
+- Asalto FULL / hunt / recall / rally-al-beacon / crédito de dest: APAGADOS
+  (corte 950). Era estrategia spawn-asimétrica (siempre (95,11)).
+  Re-activar: SUPPORT_ASSAULT=True (no este corte).
+- Nudge de guerra (SUPPORT_WAR_NUDGE): raid → attack_move solo idle en
+  casa (no army_attack_move: visor 1099 ping-pong x=8↔70). Push: ≥12 idle
+  en casa + contacto visible → army_attack_move al más lejano / prod, no
+  al tent de la puerta. Sin beacon, sin crédito de dest.
 - Stance AttackAnything al nacer (Capa 0): Defend no caza; el scripted sí.
   Solo combate (no harv/mcv). Micro, no “andá al NE”.
 - Auto-tent (Capa 0, corte 987): con proc en pie y sin tent/barr, BUILD/PLACE
@@ -39,6 +43,16 @@ _NON_COMBAT = ("harv", "mcv")
 # War script (pack/hunt/rally/dest-credit). Off: the policy owns targeting.
 # Eco/micro above stays. Flip True only for a controlled ablation.
 SUPPORT_ASSAULT = False
+# Cheap war nudge vs easy. Visible contact only — never beacon.
+# Independent of SUPPORT_ASSAULT (that flag stays False).
+SUPPORT_WAR_NUDGE = True
+# Raid peel: per-unit AttackMove, not group army_attack_move (Run 29 yank).
+RAID_HOME_ORDERS = 6
+# Production buildings beat a forward powr/scout when choosing the push dest.
+_PROD_BUILDINGS = frozenset({
+    "fact", "afac", "proc", "weap", "tent", "barr", "kenn",
+    "hpad", "afld", "syrd",
+})
 # Don't march a 1-rifle scout; wait for a real army (Run7 collapse was
 # combat-without-eco; this gate is the army half of that lesson).
 # Visor 6am 947: 4 idle → army_attack_move + rally-to-beacon = oleada de 4
@@ -112,6 +126,10 @@ def _nearest_xy(targets, origin) -> tuple[int, int]:
     return _xy(min(targets, key=lambda t: _dist2(_xy(t), origin)))
 
 
+def _farthest_xy(targets, origin) -> tuple[int, int]:
+    return _xy(max(targets, key=lambda t: _dist2(_xy(t), origin)))
+
+
 def _n_combat_at(combat, cell, radius: int) -> int:
     r2 = int(radius) * int(radius)
     n = 0
@@ -172,6 +190,31 @@ def home_raid_targets(obs):
         except (TypeError, ValueError):
             continue
     return out
+
+
+def war_nudge_cell(obs):
+    """Dest del nudge: contacto visible. Nunca beacon.
+
+    Returns (cell, is_raid) or (None, False).
+    Raid: amenaza ≤DEFEND_CELLS, más cercana a la fact (defensores locales).
+    Push: edificio de producción más lejano; si no, contacto más lejano.
+    Un tent/powr de la puerta no gana contra un fact visible al fondo.
+    """
+    origin = _own_anchor(obs) or (12, 16)
+    home = home_raid_targets(obs)
+    if home:
+        return _nearest_xy(home, origin), True
+    bldgs = list(getattr(obs, "visible_enemy_buildings", None) or [])
+    prod = [
+        b for b in bldgs
+        if str(getattr(b, "type", "") or "").lower() in _PROD_BUILDINGS
+    ]
+    if prod:
+        return _farthest_xy(prod, origin), False
+    contacts = bldgs + list(getattr(obs, "visible_enemies", None) or [])
+    if contacts:
+        return _farthest_xy(contacts, origin), False
+    return None, False
 
 
 def _cmd_name(cmd) -> str:
@@ -583,7 +626,42 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
 
     combat = _combat_units(units)
 
-    # 3-4) Asalto / hunt / recall / rally-al-dest: off. La red elige guerra.
+    # 3) War nudge — visible contact only. No beacon, no dest-credit.
+    #    Raid: AttackMove idle-at-home only (group army_attack_move yanks
+    #    the field army back to the door — visor 1099 ping-pong).
+    #    Push: ≥12 idle at home, army_attack_move to farthest/prod contact.
+    if SUPPORT_WAR_NUDGE and not SUPPORT_ASSAULT and combat:
+        raw_dest, is_raid = war_nudge_cell(obs)
+        idles_home = [
+            u for u in combat
+            if bool(getattr(u, "is_idle", False)) and _near_own_base(obs, _xy(u))
+        ]
+        if raw_dest is not None:
+            dest = _snap_passable(obs, raw_dest, aidx)
+            if dest is None:
+                dest = raw_dest
+            if is_raid:
+                n_peel = 0
+                for u in idles_home:
+                    if n_peel >= RAID_HOME_ORDERS:
+                        break
+                    try:
+                        aid = int(getattr(u, "actor_id", 0) or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if aid <= 0:
+                        continue
+                    out.append(CommandModel(
+                        action=ActionType.ATTACK_MOVE,
+                        actor_id=aid,
+                        target_x=int(dest[0]), target_y=int(dest[1])))
+                    n_peel += 1
+            elif len(idles_home) >= MIN_ARMY_FOR_ASSAULT:
+                out.append(CommandModel(
+                    action=ActionType.ARMY_ATTACK_MOVE,
+                    target_x=int(dest[0]), target_y=int(dest[1])))
+
+    # 3b-4) Asalto FULL / hunt / recall / rally-al-dest: off. Ablation only.
     if SUPPORT_ASSAULT:
         has_harv = _has_harvester(obs, eco, units, prod)
         raw_dest = _push_cell(obs, last_push)

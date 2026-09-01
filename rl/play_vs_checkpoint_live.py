@@ -356,10 +356,8 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                 out = net.act(batch, hidden, temperature=args.temperature)
             hidden = out["hidden"].detach()
             had_item = aidx.item_mask.any().view(1).to(device)
-            e_slot = int(out.get("enemy_slot", 0))
             action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
-                obs, int(out["type"]), int(out["unit_slot"]), int(out["cell_flat"]),
-                int(out["item_slot"]), aidx, enemy_slot=e_slot)
+                obs, int(out["type"]), int(out["unit_slot"]), int(out["cell_flat"]), int(out["item_slot"]), aidx)
             # recalc log_prob si hubo coerción (igual que rollout, pero sin grad)
             sampled = (int(out["type"]), int(out["unit_slot"]), int(out["item_slot"]))
             effective = (eff_t, eff_u, eff_i)
@@ -370,7 +368,6 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                         "unit_slot": torch.tensor([eff_u], device=device),
                         "cell_flat": out["cell_flat"],
                         "item_slot": torch.tensor([eff_i], device=device),
-                        "enemy_slot": torch.tensor([e_slot], device=device),
                         "had_item": had_item,
                     })
             atype_str = ACTION_TYPES[eff_t]

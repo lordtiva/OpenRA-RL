@@ -247,15 +247,8 @@ def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False,
     n_unex = len(incompat.unexpected_keys)
     arch_changed = n_miss > 0 or n_unex > 0 or raw.get("cell_head.weight", torch.empty(0)).shape != net.cell_head.weight.shape
     if n_miss or n_unex:
-        miss = list(incompat.missing_keys)
-        if any("enemy_scorer" in k for k in miss):
-            tag = "enemy_scorer; tronco B"
-        elif any("role_emb" in k for k in miss):
-            tag = "role_emb / mlp pad; tronco A"
-        else:
-            tag = "keys nuevas"
         print(f"[ckpt] Capa 2c Net2Net missing={n_miss} unexpected={n_unex} "
-              f"({tag})", flush=True)
+              f"(role_emb / mlp pad; tronco A)", flush=True)
     do_reset = bool(reset_opt or ckpt.get("reset_opt") or arch_changed)
     if opt is not None and "opt" in ckpt and not do_reset:
         try:

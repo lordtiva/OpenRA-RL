@@ -69,12 +69,12 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 2c-C: attack elige actor (enemy_scorer 0-init). Resume latest 1020 (B).
-# PLACE Defense + harvest idle/migajas-casa. Asalto OFF. No 128, no hard, no QSA.
+# Capa 2c-B + war nudge v2 (raid peel local, push farthest/prod, sin beacon).
+# Resume 1046 (Run 29 yank 1047-1099). C revertido. No C, no 128, no hard.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
-    "--iters", "1200",
+    "--iters", "1400",
     "--concurrency", "4",
     "--max-steps", "1000",
     "--macro-ticks", "50",

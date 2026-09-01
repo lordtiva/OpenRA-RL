@@ -24,8 +24,9 @@ from rl.action_adapter import (
 )
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.auto_support import (
-    MIN_ARMY_FOR_ASSAULT, STAGING_STEPS, STANCE_ATTACK_ANYTHING, SUPPORT_ASSAULT,
-    apply_dest_credit, support_commands,
+    MIN_ARMY_FOR_ASSAULT, RAID_HOME_ORDERS, STAGING_STEPS, STANCE_ATTACK_ANYTHING,
+    SUPPORT_ASSAULT, SUPPORT_WAR_NUDGE, apply_dest_credit, support_commands,
+    war_nudge_cell,
 )
 from rl.best_ckpt import (
     batch_is_dead,
@@ -307,7 +308,9 @@ army4 = [_u(i, "e1", 12 + i, 16) for i in range(1, 5)] + [_u(9, "harv", 14, 16)]
 army12 = [_u(i, "e1", 12 + (i % 4), 16 + (i // 4)) for i in range(1, 13)] + [
     _u(9, "harv", 14, 16)]
 check("pack size", MIN_ARMY_FOR_ASSAULT == 12 and STAGING_STEPS == 10)
-check("SUPPORT_ASSAULT off (la red decide guerra)", SUPPORT_ASSAULT is False)
+check("SUPPORT_ASSAULT off (no pack/hunt/rally/crédito)", SUPPORT_ASSAULT is False)
+check("SUPPORT_WAR_NUDGE on (raid + contacto visible)", SUPPORT_WAR_NUDGE is True)
+check("raid peel cap", RAID_HOME_ORDERS == 6)
 cmds_has_tent = support_commands(
     _obs(harv=1, cash=5000, bldgs=("fact", "proc", "tent"),
          avail=("e1", "tent", "proc"), units=army4))
@@ -316,25 +319,58 @@ check("auto-tent no spamea si ya hay tent",
               for c in cmds_has_tent))
 cmds_drip4 = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army4, enemies=[_u(99, "e1", 90, 12)]))
-check("4 rifles NO asaltan (pack 12, visor 6am)",
+check("4 rifles NO asaltan contacto lejano (pack 12)",
       not any(c.action.value in ("army_attack_move", "attack_move")
               for c in cmds_drip4))
 cmds_assault = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army12, enemies=[_u(99, "e1", 90, 12)]))
-check("12 rifles: support NO asalta (la red decide)",
-      not any(c.action.value in ("army_attack_move", "attack_move")
-              for c in cmds_assault))
+aam_as = [c for c in cmds_assault if c.action.value == "army_attack_move"]
+check("12 idle en casa + enemigo visible: army_attack_move a ese contacto",
+      len(aam_as) == 1 and int(aam_as[0].target_x) == 90
+      and int(aam_as[0].target_y) == 12)
 cmds_beacon = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army12))
-check("support no manda al beacon (95,11)",
-      not any(c.action.value == "army_attack_move" and c.target_x == 95
-              and c.target_y == 11 for c in cmds_beacon))
+check("sin contacto visible: no manda al beacon (95,11)",
+      not any(c.action.value in ("army_attack_move", "attack_move")
+              for c in cmds_beacon))
 cmds_raid = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army12,
          enemies=[_u(99, "e1", 14, 17)]))
-check("raid en casa: support no recall (la red decide)",
-      not any(c.action.value in ("army_attack_move", "attack_move")
-              for c in cmds_raid))
+aam_raid = [c for c in cmds_raid if c.action.value == "army_attack_move"]
+am_raid = [c for c in cmds_raid if c.action.value == "attack_move"]
+check("raid en casa: NO army_attack_move (no yank de grupo)",
+      len(aam_raid) == 0)
+check("raid en casa: attack_move idle local al raid",
+      len(am_raid) == RAID_HOME_ORDERS
+      and all(int(c.target_x) == 14 and int(c.target_y) == 17 for c in am_raid)
+      and all(int(c.actor_id) in range(1, 13) for c in am_raid))
+cmds_raid4 = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4,
+         enemies=[_u(99, "e1", 14, 17)]))
+am_r4 = [c for c in cmds_raid4 if c.action.value == "attack_move"]
+check("raid no espera pack 12 (peel local)",
+      len(am_r4) == 4 and all(int(c.target_x) == 14 for c in am_r4)
+      and not any(c.action.value == "army_attack_move" for c in cmds_raid4))
+near_powr = _b("powr", 200, 35, 16)
+far_e1 = _u(99, "e1", 90, 12)
+cell, is_raid = war_nudge_cell(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army12,
+         enemies=[far_e1], enemy_bldgs=[near_powr]))
+check("contacto: el más lejano gana al powr de la puerta",
+      is_raid is False and cell == (90, 12))
+cmds_near_b = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army12,
+         enemies=[far_e1], enemy_bldgs=[near_powr]))
+aam_nb = [c for c in cmds_near_b if c.action.value == "army_attack_move"]
+check("12 idle: marchan al contacto lejano, no al powr (35,16) ni beacon",
+      len(aam_nb) == 1 and int(aam_nb[0].target_x) == 90
+      and int(aam_nb[0].target_y) == 12)
+far_fact = _b("fact", 201, 80, 12)
+cell_prod, is_raid_p = war_nudge_cell(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army12,
+         enemies=[far_e1], enemy_bldgs=[_b("tent", 200, 35, 16), far_fact]))
+check("prod al fondo gana al tent adelantado",
+      is_raid_p is False and cell_prod == (80, 12))
 aidx_cred = NS(w=128, h=64)
 home_flat = 16 * 128 + 12
 act_army = OpenRAAction(commands=[CommandModel(
@@ -404,6 +440,23 @@ cmds_walk = support_commands(
          enemies=[_u(99, "e1", 90, 12)]))
 check("no re-emite army_attack si el blob ya camina",
       not any(c.action.value in ("army_attack_move", "attack_move") for c in cmds_walk))
+cmds_walk_raid = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_walk,
+         enemies=[_u(99, "e1", 14, 17)]))
+check("raid: blob caminando en casa no se yanka (idle only)",
+      not any(c.action.value in ("army_attack_move", "attack_move")
+              for c in cmds_walk_raid))
+field = [_u(i, "e1", 50 + i, 20, idle=False) for i in range(1, 9)]
+home_idle = [_u(i, "e1", 12 + (i % 2), 16, idle=True) for i in range(9, 13)]
+cmds_peel = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"),
+         units=field + home_idle + [_u(99, "harv", 14, 16)],
+         enemies=[_u(200, "e1", 14, 17)]))
+am_peel = [c for c in cmds_peel if c.action.value == "attack_move"]
+check("raid: peel solo idle en casa, el field no se toca",
+      not any(c.action.value == "army_attack_move" for c in cmds_peel)
+      and len(am_peel) == 4
+      and set(int(c.actor_id) for c in am_peel) == {9, 10, 11, 12})
 army_walk_home = [
     _u(i, "e1", 12 + (i % 4), 16 + (i // 4), idle=False) for i in range(1, 13)
 ] + [_u(9, "harv", 14, 16)]
@@ -412,6 +465,12 @@ cmds_reassault = support_commands(
 check("re-asalto off: pack 12 caminando no va al beacon",
       not any(c.action.value in ("army_attack_move", "attack_move")
               for c in cmds_reassault))
+cmds_walk12_far = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army_walk_home,
+         enemies=[_u(99, "e1", 90, 12)]))
+check("12 caminando en casa: no yank a contacto lejano (hace falta idle)",
+      not any(c.action.value in ("army_attack_move", "attack_move")
+              for c in cmds_walk12_far))
 army_mid = [_u(i, "e1", 48 + i, 20, idle=False) for i in range(1, 5)] + [
     _u(9, "harv", 50, 20)]
 cmds_mid = support_commands(
@@ -875,114 +934,6 @@ if ckpt_a.exists():
     check("dist_unit no samplea slot enemigo",
           all(h != MAX_UNITS for h in hits) and all(h < MAX_UNITS for h in hits))
 
-from rl.network import TYPES_USE_ENEMY
-check("TYPES_USE_ENEMY solo attack", TYPES_USE_ENEMY == {"attack"})
-
-obs_atk = _obs(
-    harv=1, bldgs=("fact", "proc", "barr"),
-    units=[_u(1, "e1", 12, 16)],
-    enemies=(_u(50, "e1", 40, 16), _u(51, "2tnk", 80, 16)),
-    avail=("e1", "harv", "proc"),
-)
-aidx_atk = ActionIndex(obs_atk, Vocab())
-check("enemy_ids por actor_id", aidx_atk.enemy_ids == [50, 51])
-cell_near = 16 * aidx_atk.w + 40
-t_atk = TYPE_TO_IDX["attack"]
-act_ptr, _ = index_to_command_effective(
-    obs_atk, t_atk, 0, cell_near, 0, aidx_atk, enemy_slot=1)
-check("attack pointer != nearest",
-      act_ptr.commands[0].action.value == "attack"
-      and int(act_ptr.commands[0].target_actor_id) == 51)
-act_s0, _ = index_to_command_effective(
-    obs_atk, t_atk, 0, cell_near, 0, aidx_atk, enemy_slot=0)
-check("attack slot 0 es el de la celda",
-      int(act_s0.commands[0].target_actor_id) == 50)
-act_pad, _ = index_to_command_effective(
-    obs_atk, t_atk, 0, cell_near, 0, aidx_atk, enemy_slot=31)
-check("attack pad fallback nearest",
-      act_pad.commands[0].action.value == "attack"
-      and int(act_pad.commands[0].target_actor_id) == 50)
-obs_noene = _obs(
-    harv=1, bldgs=("fact", "proc"), units=[_u(1, "e1", 12, 16)],
-    enemies=(), avail=("e1", "harv"))
-aidx_ne = ActionIndex(obs_noene, Vocab())
-act_am, _ = index_to_command_effective(
-    obs_noene, t_atk, 0, 0, 0, aidx_ne, enemy_slot=0)
-check("attack sin enemigo -> attack_move",
-      act_am.commands[0].action.value == "attack_move")
-act_aam, _ = index_to_command_effective(
-    obs_atk, TYPE_TO_IDX["army_attack_move"], 0, cell_near, 0, aidx_atk,
-    enemy_slot=1)
-check("army_attack_move ignora enemy_slot",
-      act_aam.commands[0].action.value == "army_attack_move"
-      and int(act_aam.commands[0].target_actor_id or 0) == 0)
-
-net_c = AlphaLiteNet()
-check("2c-C params < 8M",
-      sum(p.numel() for p in net_c.parameters()) < 8e6)
-batch_c = {
-    "spatial": torch.zeros(1, 9, 8, 8),
-    "scalars": torch.zeros(1, SCALAR_DIM),
-    "unit_feats": torch.zeros(1, MAX_TOKENS, UNIT_FEAT_DIM),
-    "unit_valid": torch.zeros(1, MAX_TOKENS, dtype=torch.bool),
-    "unit_role_ids": torch.zeros(1, MAX_TOKENS, dtype=torch.long),
-    "unit_own_mask": torch.zeros(1, MAX_TOKENS, dtype=torch.bool),
-    "type_mask": torch.ones(1, 22, dtype=torch.bool),
-    "cell_mask": torch.ones(1, 8 * 8, dtype=torch.bool),
-    "item_indices": torch.zeros(1, 4, dtype=torch.long),
-    "item_mask": torch.zeros(1, 4, dtype=torch.bool),
-    "train_slot_mask": torch.zeros(1, 4, dtype=torch.bool),
-    "build_slot_mask": torch.zeros(1, 4, dtype=torch.bool),
-}
-batch_c["unit_valid"][0, 0] = True
-batch_c["unit_own_mask"][0, 0] = True
-batch_c["unit_valid"][0, MAX_UNITS] = True
-batch_c["unit_valid"][0, MAX_UNITS + 1] = True
-batch_c["unit_feats"][0, MAX_UNITS, 10] = 1.0
-batch_c["unit_feats"][0, MAX_UNITS + 1, 10] = 1.0
-batch_c["unit_feats"][0, MAX_UNITS + 1, 0] = 0.4
-h_c = torch.zeros(1, HIDDEN_DIM)
-torch.manual_seed(0)
-with torch.no_grad():
-    net_c.enemy_scorer[-1].weight.normal_(0.0, 0.4)
-out_c = net_c.act(batch_c, h_c)
-check("2c-C act tiene enemy_slot", "enemy_slot" in out_c)
-check("2c-C enemy_slot en 0..31",
-      0 <= int(out_c["enemy_slot"].item()) < MAX_ENEMIES)
-check("2c-C act log_prob finito",
-      torch.isfinite(out_c["log_prob"]).all().item())
-
-def _acts(tname, eslot):
-    return {
-        "type": torch.tensor([TYPE_TO_IDX[tname]]),
-        "unit_slot": torch.tensor([0]),
-        "cell_flat": torch.tensor([0]),
-        "item_slot": torch.tensor([0]),
-        "enemy_slot": torch.tensor([eslot]),
-        "had_item": torch.tensor([False]),
-    }
-
-lp_a0, _, _ = net_c.evaluate_actions(batch_c, h_c, _acts("attack", 0))
-lp_a1, _, _ = net_c.evaluate_actions(batch_c, h_c, _acts("attack", 1))
-lp_m0, _, _ = net_c.evaluate_actions(batch_c, h_c, _acts("move", 0))
-lp_m1, _, _ = net_c.evaluate_actions(batch_c, h_c, _acts("move", 1))
-check("F3 attack suma enemy_slot", not torch.allclose(lp_a0, lp_a1))
-check("F3 move no suma enemy_slot", torch.allclose(lp_m0, lp_m1))
-
-ckpt_b = Path("rl/ckpts/best.pt")
-if ckpt_b.exists():
-    blob_b = torch.load(ckpt_b, map_location="cpu", weights_only=False)
-    net_b2c = AlphaLiteNet()
-    adapted_c = adapt_capa2c_state_dict(
-        net_b2c, adapt_capa2_state_dict(net_b2c, blob_b["net"]))
-    inc_c = net_b2c.load_state_dict(adapted_c, strict=False)
-    check("2c-C missing enemy_scorer",
-          any("enemy_scorer" in k for k in inc_c.missing_keys))
-    check("2c-C tronco B tiene role_emb",
-          not any("role_emb" in k for k in inc_c.missing_keys))
-    check("2c-C unexpected 0", len(inc_c.unexpected_keys) == 0)
-    check("2c-C resume iter >=1000",
-          int(blob_b.get("iteration", 0) or 0) >= 1000)
-
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS"))
 sys.exit(0 if ok else 1)
+

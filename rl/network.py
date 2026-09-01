@@ -12,12 +12,11 @@ Arquitectura:
         2) slot de unidad (condicionada al tipo elegido)
         3) celda objetivo H×W (conv 1×1: fmap + scatter + tipo + GRU + unidad)
         4) ítem de producción (embedding de tipos de actor)
-        5) slot enemigo (solo `attack`: pointer, no el más cercano)
 
 El log_prob total es la suma SOLO de las cabezas que el tipo elegido usa
-(cadena p(tipo)·[p(unidad|tipo)]·[p(celda|tipo)]·[p(ítem|tipo)]·[p(ene|attack)])
-— auditoría 2026-08-24 (F3): antes se sumaban unidad+celda SIEMPRE y ~6000
-logits de celda metían ruido en acciones que ni los miraban.
+(cadena p(tipo)·[p(unidad|tipo)]·[p(celda|tipo)]·[p(ítem|tipo)]) — auditoría
+2026-08-24 (F3): antes se sumaban unidad+celda SIEMPRE y ~6000 logits de
+celda metían ruido en acciones que ni los miraban.
 """
 
 import numpy as np
@@ -25,10 +24,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rl.obs_encoding import (
-    MAX_ENEMIES, MAX_TOKENS, MAX_UNITS, SCALAR_DIM, UNIT_FEAT_DIM,
-    ready_place_items,
-)
+from rl.obs_encoding import MAX_TOKENS, MAX_UNITS, SCALAR_DIM, UNIT_FEAT_DIM, ready_place_items
 from rl.roles import N_ROLES
 
 ACTION_TYPES = [
@@ -42,8 +38,9 @@ N_ACTION_TYPES = len(ACTION_TYPES)
 TYPE_TO_IDX = {t: i for i, t in enumerate(ACTION_TYPES)}
 
 HIDDEN_DIM = 416
-# Capa 2 (doc 12) + 2c-A 96 + 2c-B role/team/32 ene + 2c-C attack pointer.
+# Capa 2 (doc 12) + 2c-A set 96 + 2c-B role/team + 32 enemigos (tokens ≤128).
 # Residual/zero-init para Net2Net desde 922 (GRU y U-Net se conservan).
+# 2c-C (attack-actor) se revirtió: smoke wr20→0, pointer casi no se usó.
 ROLE_EMB_DIM = 8
 UNIT_MLP_IN = UNIT_FEAT_DIM + ROLE_EMB_DIM  # 11 + 8 = 19
 XF_DIM = 64
@@ -62,14 +59,10 @@ TYPES_USE_UNIT = {"move", "attack_move", "attack", "stop", "set_stance",
 TYPES_USE_CELL = {"move", "attack_move", "attack", "place_building",
                   "army_attack_move"}
 TYPES_USE_ITEM = {"train", "build", "place_building", "cancel_production"}
-# Capa 2c-C: pointer de ataque. army_attack_move / attack_move no: AutoTarget.
-TYPES_USE_ENEMY = {"attack"}
-TOKEN_DIM = 128  # unit_mlp / xf residual
-ENEMY_SCORER_IN = TOKEN_DIM + TOKEN_DIM + HIDDEN_DIM + 64  # ene+own+h+type
 
 
 def _heads_used(t_idx: torch.Tensor, device) -> tuple:
-    """Mascaras [B] bool: usa_unidad, usa_celda, usa_item, usa_enemigo."""
+    """Mascaras [B] bool: usa_unidad, usa_celda, usa_item para cada tipo."""
     names = [ACTION_TYPES[int(t)] for t in t_idx]
     use_u = torch.tensor([n in TYPES_USE_UNIT for n in names],
                          dtype=torch.bool, device=device)
@@ -77,9 +70,7 @@ def _heads_used(t_idx: torch.Tensor, device) -> tuple:
                          dtype=torch.bool, device=device)
     use_i = torch.tensor([n in TYPES_USE_ITEM for n in names],
                          dtype=torch.bool, device=device)
-    use_e = torch.tensor([n in TYPES_USE_ENEMY for n in names],
-                         dtype=torch.bool, device=device)
-    return use_u, use_c, use_i, use_e
+    return use_u, use_c, use_i
 
 
 def build_type_masks(obs) -> torch.Tensor:
@@ -187,13 +178,6 @@ class AlphaLiteNet(nn.Module):
             nn.Linear(UNIT_MLP_IN + HIDDEN_DIM + 64, 256), nn.ReLU(),
             nn.Linear(256, 1),
         )
-        # Capa 2c-C: pointer de ataque. Last layer 0 → uniforme entre visibles.
-        self.enemy_scorer = nn.Sequential(
-            nn.Linear(ENEMY_SCORER_IN, 256), nn.ReLU(),
-            nn.Linear(256, 1),
-        )
-        nn.init.zeros_(self.enemy_scorer[-1].weight)
-        nn.init.zeros_(self.enemy_scorer[-1].bias)
         # Capa 2: fmap + scatter + tipo + GRU + unidad elegida (o pool).
         self.scatter_proj = nn.Linear(UNIT_MLP_IN, SCATTER_CH)
         nn.init.zeros_(self.scatter_proj.weight)
@@ -404,42 +388,6 @@ class AlphaLiteNet(nn.Module):
         logits = self._scores_item(hidden, chosen_type, item_indices, item_mask)
         return self._categorical(logits)
 
-    def _enemy_legal(self, unit_valid, unit_own_mask=None):
-        """Máscara [B, MAX_ENEMIES] de slots enemigos visibles (no propias)."""
-        B, U = unit_valid.shape
-        legal = unit_valid.new_zeros(B, MAX_ENEMIES)
-        if U > MAX_UNITS:
-            n = min(MAX_ENEMIES, U - MAX_UNITS)
-            sl = unit_valid[:, MAX_UNITS:MAX_UNITS + n]
-            if unit_own_mask is not None:
-                sl = sl & ~unit_own_mask[:, MAX_UNITS:MAX_UNITS + n]
-            legal[:, :n] = sl
-        return legal
-
-    def _scores_enemy(self, hidden, chosen_type, tokens, unit_slot,
-                      enemy_legal):
-        """Logits [B, MAX_ENEMIES]: token ene + token propio + hidden + type."""
-        B = tokens.size(0)
-        d = tokens.size(-1)
-        ene = tokens.new_zeros(B, MAX_ENEMIES, d)
-        if tokens.size(1) > MAX_UNITS:
-            n = min(MAX_ENEMIES, tokens.size(1) - MAX_UNITS)
-            ene[:, :n] = tokens[:, MAX_UNITS:MAX_UNITS + n]
-        slot = unit_slot.clamp(0, max(tokens.size(1) - 1, 0))
-        own = tokens[torch.arange(B, device=tokens.device), slot]
-        own = own.unsqueeze(1).expand(-1, MAX_ENEMIES, -1)
-        h = hidden.unsqueeze(1).expand(-1, MAX_ENEMIES, -1)
-        t = self.type_embedding(chosen_type).unsqueeze(1).expand(
-            -1, MAX_ENEMIES, -1)
-        scores = self.enemy_scorer(
-            torch.cat([ene, own, h, t], dim=-1)).squeeze(-1)
-        return scores.masked_fill(~enemy_legal, -1e9)
-
-    def dist_enemy(self, hidden, chosen_type, tokens, unit_slot, enemy_legal):
-        logits = self._scores_enemy(
-            hidden, chosen_type, tokens, unit_slot, enemy_legal)
-        return self._categorical(logits)
-
     def _item_cat_mask(self, batch, t_idx):
         """Máscara de ítems ESTRICTAMENTE condicional a la cabeza de tipo.
 
@@ -515,30 +463,22 @@ class AlphaLiteNet(nn.Module):
             self._categorical(li / temperature).sample()
         i_idx = torch.where(has_items, i_sampled, torch.zeros_like(t_idx))
 
-        enemy_legal = self._enemy_legal(valid, own)
-        ls_e = self._scores_enemy(new_hidden, t_idx, tokens, u_idx, enemy_legal)
-        dist_e = self._categorical(ls_e)
-        e_idx = ls_e.argmax(dim=-1) if greedy else \
-            self._categorical(ls_e / temperature).sample()
-        has_ene = enemy_legal.any(dim=-1)
-
         # F3 (auditoría 2026-08-24): log_prob SOLO de las cabezas que el
         # tipo usa. Antes unidad+celda sumaban siempre (~6000 logits de
         # celda dominando con ruido puro en no_op/train/build).
-        use_u, use_c, use_i, use_e = _heads_used(t_idx, t_idx.device)
+        use_u, use_c, use_i = _heads_used(t_idx, t_idx.device)
         zero = torch.zeros_like(dist_t.log_prob(t_idx))
         lp = (dist_t.log_prob(t_idx)
               + torch.where(use_u, dist_u.log_prob(u_idx), zero)
               + torch.where(use_c, dist_c.log_prob(c_idx), zero)
               + torch.where(use_i & has_items, dist_i.log_prob(i_idx.clamp(
-                  min=0, max=safe_item_mask.size(1) - 1)), zero)
-              + torch.where(use_e & has_ene, dist_e.log_prob(e_idx), zero))
+                  min=0, max=safe_item_mask.size(1) - 1)), zero))
 
         value = self.value_head(new_hidden).squeeze(-1)
         return {
             "hidden": new_hidden,
             "type": t_idx, "unit_slot": u_idx, "cell_flat": c_idx,
-            "item_slot": i_idx, "enemy_slot": e_idx,
+            "item_slot": i_idx,
             "log_prob": lp, "value": value,
         }
 
@@ -572,17 +512,7 @@ class AlphaLiteNet(nn.Module):
         dist_i = self.dist_item(new_hidden, t_idx, batch["item_indices"],
                                 safe_item_mask)
 
-        enemy_legal = self._enemy_legal(valid, own)
-        e_idx = actions.get("enemy_slot")
-        if e_idx is None:
-            e_idx = torch.zeros_like(t_idx)
-        else:
-            e_idx = e_idx.to(t_idx.device).long().clamp(0, MAX_ENEMIES - 1)
-        dist_e = self.dist_enemy(
-            new_hidden, t_idx, tokens, actions["unit_slot"], enemy_legal)
-        has_ene = enemy_legal.any(dim=-1)
-
-        use_u, use_c, use_i, use_e = _heads_used(t_idx, t_idx.device)
+        use_u, use_c, use_i = _heads_used(t_idx, t_idx.device)
         zero = torch.zeros_like(dist_t.log_prob(t_idx))
         lp = (dist_t.log_prob(t_idx)
               + torch.where(use_u, dist_u.log_prob(actions["unit_slot"]), zero)
@@ -590,8 +520,7 @@ class AlphaLiteNet(nn.Module):
               + torch.where(use_i & has_items & actions["had_item"],
                             dist_i.log_prob(actions["item_slot"].clamp(
                                 min=0, max=batch["item_mask"].size(1) - 1)),
-                            zero)
-              + torch.where(use_e & has_ene, dist_e.log_prob(e_idx), zero))
+                            zero))
 
         # Entropía TOTAL de las cabezas activas (revisión externa 2026-08-24):
         # antes solo la del tipo ("proxy regularizador"), lo que permitía
@@ -604,20 +533,17 @@ class AlphaLiteNet(nn.Module):
         h_c = dist_c.entropy() * 0.25
         h_i = torch.where(has_items, dist_i.entropy(),
                           torch.zeros_like(h_t)) * 0.5
-        h_e = torch.where(has_ene, dist_e.entropy(), torch.zeros_like(h_t))
         # Entropía ENMASCARADA por cabeza activa (mismo criterio que en el
         # entrenamiento por segmentos): no regularizar cabezas no actuantes.
         zero_h = torch.zeros_like(h_t)
         use_u_f = use_u.float()
         use_c_f = use_c.float() * 0.25
         use_i_f = (use_i & has_items).float() * 0.5
-        use_e_f = (use_e & has_ene).float()
         entropy = ((h_t
                     + torch.where(use_u, h_u, zero_h)
                     + torch.where(use_c, h_c, zero_h)
-                    + torch.where(use_i & has_items, h_i, zero_h)
-                    + torch.where(use_e & has_ene, h_e, zero_h))
-                   / (1.0 + use_u_f + use_c_f + use_i_f + use_e_f))
+                    + torch.where(use_i & has_items, h_i, zero_h))
+                   / (1.0 + use_u_f + use_c_f + use_i_f))
         value = self.value_head(new_hidden).squeeze(-1)
         return lp, entropy, value
 
@@ -671,16 +597,7 @@ class AlphaLiteNet(nn.Module):
             safe_item[~has_items] = True
             dist_i = self.dist_item(h, t_idx, b["item_indices"], safe_item)
 
-            enemy_legal = self._enemy_legal(valid, own)
-            e_raw = s["action"].get("enemy_slot")
-            if e_raw is None:
-                e_idx = torch.zeros_like(t_idx)
-            else:
-                e_idx = e_raw.to(device).long().clamp(0, MAX_ENEMIES - 1)
-            dist_e = self.dist_enemy(h, t_idx, tokens, u_idx, enemy_legal)
-            has_ene = enemy_legal.any(dim=-1)
-
-            use_u, use_c, use_i, use_e = _heads_used(t_idx, t_idx.device)
+            use_u, use_c, use_i = _heads_used(t_idx, t_idx.device)
             zero = torch.zeros_like(dist_t.log_prob(t_idx))
             c_idx = s["action"]["cell_flat"].to(device)
             i_idx = s["action"]["item_slot"].to(device)
@@ -690,14 +607,12 @@ class AlphaLiteNet(nn.Module):
                   + torch.where(use_c, dist_c.log_prob(c_idx), zero)
                   + torch.where(use_i & has_items & had_item,
                                 dist_i.log_prob(i_idx.clamp(
-                                    min=0, max=safe_item.size(1) - 1)), zero)
-                  + torch.where(use_e & has_ene, dist_e.log_prob(e_idx), zero))
+                                    min=0, max=safe_item.size(1) - 1)), zero))
 
             ht = dist_t.entropy()
             hu = dist_u.entropy()
             hc = dist_c.entropy() * 0.25
             hi = torch.where(has_items, dist_i.entropy(), torch.zeros_like(ht)) * 0.5
-            he = torch.where(has_ene, dist_e.entropy(), torch.zeros_like(ht))
 
             # Entropía ENMASCARADA por cabeza activa: no inyectar gradientes de
             # exploración en cabezas que NO participaron en la acción del paso
@@ -706,13 +621,11 @@ class AlphaLiteNet(nn.Module):
             use_u_f = use_u.float()
             use_c_f = use_c.float() * 0.25
             use_i_f = (use_i & has_items).float() * 0.5
-            use_e_f = (use_e & has_ene).float()
             entropy = ((ht
                         + torch.where(use_u, hu, zero)
                         + torch.where(use_c, hc, zero)
-                        + torch.where(use_i & has_items, hi, zero)
-                        + torch.where(use_e & has_ene, he, zero))
-                       / (1.0 + use_u_f + use_c_f + use_i_f + use_e_f))
+                        + torch.where(use_i & has_items, hi, zero))
+                       / (1.0 + use_u_f + use_c_f + use_i_f))
             value = self.value_head(h).squeeze(-1)
             lp_list.append(lp)
             ent_list.append(entropy)
