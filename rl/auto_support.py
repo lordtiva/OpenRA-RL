@@ -12,9 +12,10 @@ Diseño:
 - Flag --auto-support (default False en Run2, True en Run3/v4). Sin flag, 0 impacto.
 - Reparación: si cash>500 y edificio hp<35% y no está ya reparándose, emite 1
   repair por bloque (máx 2 para no spamear). Es el umbral del hard.
-- Cosecha: 1 harvest/bloque si harv idle O está en migajas (Ch2 local <<
-  mejor parche explorado). El order lleva celda: si no, el engine se queda
-  en el ore más cercano aunque esté vacío.
+- Cosecha: 1 harvest/bloque si harv idle (sin celda: el engine va al ore
+  más cercano). Retarget con celda SOLO si está minando migajas junto a
+  casa: el argmax global mandaba las harv al mineral enemigo (live 1000–1019
+  ownH ~450 vs ~1100).
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
 - Asalto / hunt / recall / rally-al-beacon / crédito de dest: APAGADOS
   (corte 950). Era estrategia spawn-asimétrica (siempre (95,11)). La red
@@ -382,8 +383,9 @@ def _push_cell(obs, last_push):
     return None
 
 
-# Migajas: densidad local < esta fracción del mejor parche explorado.
+# Migajas junto a casa (no el argmax del mapa: idle en proc tiene Ch2=0).
 _ORE_STALE_FRAC = 0.35
+_ORE_HOME_RADIUS = 12
 
 
 def _spatial_chw(obs):
@@ -401,13 +403,27 @@ def _spatial_chw(obs):
         return None
 
 
-def _best_ore_cell(arr):
-    """Celda de mineral más rica entre exploradas y pasables. (x,y,dens) o None."""
+def _proc_xy(blds):
+    for b in blds or []:
+        if str(getattr(b, "type", "") or "").lower() == "proc":
+            try:
+                return int(b.cell_x), int(b.cell_y)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _best_ore_near(arr, origin, radius: int = _ORE_HOME_RADIUS):
+    """Celda de mineral más rica en radio de la proc, explorada y pasable."""
     import numpy as np
-    if arr is None or arr.shape[0] < 5:
+    if arr is None or arr.shape[0] < 5 or origin is None:
         return None
+    ox, oy = int(origin[0]), int(origin[1])
     ch2, ch3, ch4 = arr[2], arr[3], arr[4]
-    mask = (ch4 >= 0.45) & (ch3 > 0.5)
+    h, w = ch2.shape
+    yy, xx = np.ogrid[:h, :w]
+    near = (np.abs(xx - ox) + np.abs(yy - oy)) <= int(radius)
+    mask = near & (ch4 >= 0.45) & (ch3 > 0.5)
     if not bool(mask.any()):
         return None
     vals = np.where(mask, ch2, -1.0)
@@ -454,33 +470,33 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
                     action=ActionType.DEPLOY, actor_id=int(u.actor_id)))
                 break
 
-    # 0) Auto-harvest — idle O migajas (Ch2 local << mejor parche explorado).
-    #    Con celda: el engine no se clava en el ore vacío de casa.
+    # 0) Auto-harvest. Idle → sin celda (ore más cercano). Retarget con
+    #    celda solo si está minando migajas (local>0 y << mejor parche
+    #    en radio de la proc). Idle en la fact tiene Ch2=0: no es migaja.
     has_proc = any(getattr(b, "type", "") == "proc" for b in blds)
     if has_proc:
         arr = _spatial_chw(obs)
-        best = _best_ore_cell(arr)
+        home = _best_ore_near(arr, _proc_xy(blds))
         for u in units:
             ut = str(getattr(u, "type", "")).lower()
             if "harv" not in ut:
                 continue
             idle = bool(getattr(u, "is_idle", False))
+            local = _harv_local_ore(u, arr)
             stale = False
-            if best is not None:
-                bx, by, bden = best
-                local = _harv_local_ore(u, arr)
+            if (not idle) and home is not None and local > 0.0:
+                _bx, _by, bden = home
                 stale = bden > 0.0 and local < _ORE_STALE_FRAC * bden
-            if not (idle or stale):
-                continue
-            if best is not None:
-                bx, by, _ = best
+            if idle:
+                out.append(CommandModel(
+                    action=ActionType.HARVEST, actor_id=int(u.actor_id)))
+                break
+            if stale:
+                bx, by, _ = home
                 out.append(CommandModel(
                     action=ActionType.HARVEST, actor_id=int(u.actor_id),
                     target_x=int(bx), target_y=int(by)))
-            else:
-                out.append(CommandModel(
-                    action=ActionType.HARVEST, actor_id=int(u.actor_id)))
-            break  # uno por bloque (no spamear)
+                break
 
     # 0b) Auto-proc + auto-harv + auto-tent — push eco then the first barracks.
     #     Missing proc: BUILD if it is in available_production (do not deadlock

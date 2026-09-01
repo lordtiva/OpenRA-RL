@@ -143,7 +143,8 @@ def decide(net, vocab, device, hidden, obs, args, last_push_cell):
     hidden = out["hidden"].detach()
     action, (eff_t, _eff_u, _eff_i, eff_c) = index_to_command_effective(
         obs, int(out["type"]), int(out["unit_slot"]),
-        int(out["cell_flat"]), int(out["item_slot"]), aidx)
+        int(out["cell_flat"]), int(out["item_slot"]), aidx,
+        enemy_slot=int(out.get("enemy_slot", 0)))
     atype_str = ACTION_TYPES[eff_t]
     H = max(int(obs.map_info.height or 1), 1)
     W = max(int(obs.map_info.width or 1), 1)

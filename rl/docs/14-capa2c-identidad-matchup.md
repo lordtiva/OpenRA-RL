@@ -21,10 +21,10 @@ Bar para **hard** (Capa 3): wr20 vs easy decente **y** `defense_loss` que no sea
 
 | Superficie | Estado |
 |---|---|
-| Slots propios | **PR-A hecho:** `MAX_UNITS=96` + `select_unit_slots` combat-first. Features siguen 10-d anónimas. |
-| Features / slot | 10-d: HP, `can_attack`, idle, speed, range, XP, stance, x, y, facing. **Sin rol.** |
-| Enemigos | Ch8 = conteo. Escalar = `n_enemies`. Transformer = 0 tokens rivales. |
-| `attack` | Slot propio + celda → `_nearest_enemy_at_cell`. No elige actor. |
+| Slots propios | **PR-A hecho:** `MAX_UNITS=96` + `select_unit_slots` combat-first. |
+| Features / slot | **PR-B:** 11-d (10 + team) + `role_id` paralelo. Own++ene ≤128. |
+| Enemigos | **PR-B:** ≤32 `visible_enemies` en el xf (`team=1`). `dist_unit` los enmascara. |
+| `attack` | **PR-C:** `enemy_slot` → `target_actor_id`. Nearest solo si pad/muerto. |
 | Producción | Cabeza de ítems **sí** usa `rl.roles` (`infantry_basic`, `infantry_antiarmor`, `tank_medium`…). Puede entrenar el counter a ciegas; no ve de qué está hecho el rival. |
 | Capa 2 | xf residual (scale aprendible), scatter 8 ch, `cell_head` 296-in. ~2.89M. Net2Net desde 922 ya probado. |
 | Acción / APM | 1 decisión / 50 ticks (~2 s). AutoTarget cubre el micro en rango. |
@@ -41,7 +41,7 @@ No un mega-PR. No 96 + rol + enemigos + cabeza nueva el mismo resume. Cada corte
 |---|---|---|---|---|---|
 | **A** | Set | `MAX_UNITS` 48→**96** + selección **combat-first** | **1:1** (ni un Linear nuevo) | **Hecho corte 983, resume 976** | H no colapsa; `n_unit_valid` media sube; `defense_loss` no empeora |
 | **B** | Identidad | Embedding de rol + bit de equipo + tokens enemigos visibles + scatter de esas feats | Net2Net (zero-pad) | best de A | H no colapsa; `xf_scale` no explota; wr20 no a 0 |
-| **C** | Pointer de ataque | Cabeza `enemy_slot` solo en `attack`; F1 usa ese `actor_id` | Cabeza nueva en 0; tronco cargado | best de B | `attack` deja de ser 100% “más cercano”; no NaN; legal mask |
+| **C** | Pointer de ataque | Cabeza `enemy_slot` solo en `attack`; F1 usa ese `actor_id` | Cabeza nueva en 0; tronco cargado | **Hecho corte 1020, resume 1020** | `attack` deja de ser 100% “más cercano”; no NaN; legal mask |
 
 Si A no mueve `defense_loss` en ~20–40 iters, **no** saltar a 128. El siguiente palanca de A es el filtro (ya va en A); si el filtro+96 sigue ciego, entonces B (rol: harv vs e1 en el set). No 256.
 
@@ -286,4 +286,4 @@ Capa 3 sigue siendo el **cuándo** el matchup importa (composición del rival ca
 4. Boot: print del régimen (`MACRO 50`, `MAX_UNITS 96` / `role+enemy` / `attack-actor`).
 5. 20 iters. Si H/NaN/wr20→0: restore, no el siguiente PR.
 
-*Guardado: 2026-08-31 — rama `exp/rl-2026-08-28-grok`. PR-A shipped (96 + combat-first, resume 976). B y C pendientes.*
+*Guardado: 2026-09-01 — rama `exp/rl-2026-08-28-grok`. PR-A shipped (96 + combat-first). PR-B shipped (role+team+32 ene). PR-C shipped (`attack` elige actor, resume 1020). Smoke 20 iters vs easy pendiente.*

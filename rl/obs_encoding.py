@@ -16,6 +16,8 @@ import math
 
 import numpy as np
 
+from rl.roles import role_id_of
+
 SPATIAL_CHANNELS = 9
 # Colas que terminan en PLACE (no Infantry/Vehicle). Defense = pbox/gun/ftur.
 PLACE_QUEUE_TYPES = frozenset({"building", "defense"})
@@ -198,8 +200,11 @@ def scalar_features(obs) -> np.ndarray:
     ], dtype=np.float32)
 
 
-MAX_UNITS = 96  # Capa 2c-A: techo de slots (pesos del xf no crecen con n)
-UNIT_FEAT_DIM = 10
+MAX_UNITS = 96  # Capa 2c-A: techo de slots propios (pesos del xf no crecen con n)
+MAX_ENEMIES = 32  # Capa 2c-B: visibles en niebla
+MAX_TOKENS = MAX_UNITS + MAX_ENEMIES  # 128: own ++ ene
+UNIT_FEAT_BASE = 10  # HP..facing (A)
+UNIT_FEAT_DIM = 11   # + team (0 propio, 1 enemigo)
 # Mismo radio que el dest-defend viejo: combate que ve el raid entra al set
 # aunque tenga actor_id alto (los e1 nuevos no cabían en oldest-48).
 THREAT_RADIUS = 18
@@ -291,7 +296,7 @@ def select_unit_slots(obs, max_units: int = MAX_UNITS):
     return picked
 
 
-def _unit_feat(u) -> list:
+def _unit_feat(u, team: float = 0.0) -> list:
     return [
         float(getattr(u, "hp_percent", 1.0) or 0.0),
         1.0 if getattr(u, "can_attack", False) else 0.0,
@@ -303,22 +308,50 @@ def _unit_feat(u) -> list:
         float(getattr(u, "cell_x", 0) or 0) / 128.0,
         float(getattr(u, "cell_y", 0) or 0) / 128.0,
         float(getattr(u, "facing", 0) or 0) / 1023.0,
+        float(team),
     ]
 
 
-def unit_slots(obs):
-    """Lista de hasta MAX_UNITS unidades propias como vectores de features.
+def select_enemy_slots(obs, max_enemies: int = MAX_ENEMIES):
+    """Hasta max_enemies visibles, orden estable por actor_id."""
+    enemies = list(getattr(obs, "visible_enemies", None) or [])
+    enemies.sort(key=_actor_id)
+    return enemies[: max(0, int(max_enemies))]
 
-    Selección = select_unit_slots (combat-first). Devuelve
-    (features [N,UNIT_FEAT_DIM], válidos bool[N]) ordenadas por id.
-    """
+
+def unit_slots(obs):
+    """Hasta MAX_UNITS propias: (features [N,11] team=0, válidos bool[N])."""
     units = select_unit_slots(obs)
     if not units:
         return (np.zeros((0, UNIT_FEAT_DIM), dtype=np.float32),
                 np.zeros(0, dtype=bool))
-    feats = np.array([_unit_feat(u) for u in units], dtype=np.float32)
+    feats = np.array([_unit_feat(u, 0.0) for u in units], dtype=np.float32)
     valid = np.ones(len(units), dtype=bool)
     return feats, valid
+
+
+def unit_tokens(obs):
+    """own (≤96) ++ ene (≤32) padded a MAX_TOKENS.
+
+    Devuelve feats[U,11], role_ids[U] int64, valid[U], own_mask[U].
+    Slots 0..MAX_UNITS-1 = propias (cabeza 2 / adapter). 96..127 = enemigos
+    (xf y scatter; ilegales en dist_unit).
+    """
+    feats = np.zeros((MAX_TOKENS, UNIT_FEAT_DIM), dtype=np.float32)
+    role_ids = np.zeros(MAX_TOKENS, dtype=np.int64)
+    valid = np.zeros(MAX_TOKENS, dtype=bool)
+    own_mask = np.zeros(MAX_TOKENS, dtype=bool)
+    for i, u in enumerate(select_unit_slots(obs)[:MAX_UNITS]):
+        feats[i] = _unit_feat(u, 0.0)
+        role_ids[i] = role_id_of(getattr(u, "type", "") or "")
+        valid[i] = True
+        own_mask[i] = True
+    for j, u in enumerate(select_enemy_slots(obs)[:MAX_ENEMIES]):
+        i = MAX_UNITS + j
+        feats[i] = _unit_feat(u, 1.0)
+        role_ids[i] = role_id_of(getattr(u, "type", "") or "")
+        valid[i] = True
+    return feats, role_ids, valid, own_mask
 
 
 def ready_place_items(obs) -> list:

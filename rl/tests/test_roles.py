@@ -41,6 +41,11 @@ check("e1 rifle y e2/e4 anti-infanteria",
       R.role_of("e2") == R.role_of("e4"))
 check("e3 cohete es anti-blindaje (distinto de e1)",
       R.role_of("e3") != R.role_of("e1"))
+check("role_id e1 != e3 y pad=0",
+      R.role_id_of("e1") != R.role_id_of("e3")
+      and R.ROLE_VOCAB["pad"] == 0
+      and R.role_id_of("") == 0
+      and R.role_id_of("no-existe") == R.ROLE_MISC_ID)
 
 # 3) roles_de_available: estable y agrupa por rol
 disp = {"1tnk", "proc", "powr", "e1", "ftrk", "apc", "2tnk", "harv"}

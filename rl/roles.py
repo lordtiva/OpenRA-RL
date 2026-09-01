@@ -134,7 +134,37 @@ ROLE_OF_ITEM: dict[str, str] = {
 
 def role_of(item: str) -> str:
     """Item concreto -> rol funcional. Desconocido -> 'misc'."""
-    return ROLE_OF_ITEM.get(item.lower(), "misc")
+    return ROLE_OF_ITEM.get(str(item or "").lower(), "misc")
+
+
+# Vocab de ENTIDAD para Capa 2c-B (tokens del xf). Distinto del vocab de
+# ítems de producción. 0=pad; nombres sorted congelados al corte B; misc último.
+# Insertar un rol nuevo en el medio recorre ids — no hacerlo en un resume.
+_ENTITY_ROLE_NAMES = tuple(sorted(
+    {ROLE_HARVESTER, ROLE_INFANTRY_BASIC, ROLE_INFANTRY_ANTIINF,
+     ROLE_INFANTRY_ANTIARMOR, ROLE_ROCKET_TRUCK, ROLE_TANK_LIGHT,
+     ROLE_TANK_MEDIUM, ROLE_TANK_HEAVY, ROLE_ARTILLERY, ROLE_APC_TRANSPORT,
+     ROLE_SCOUT, ROLE_MCV, ROLE_COMMANDO_SPY, ROLE_AIRFIGHTER, ROLE_AIRBOMBER,
+     ROLE_HELI, ROLE_TRANSPORTER, ROLE_SHIP_ASW, ROLE_SHIP_COMBAT,
+     ROLE_SHIP_AMPHIB, ROLE_REFINERY, ROLE_POWER_INFRA, ROLE_BARRACKS,
+     ROLE_WARFACTORY, ROLE_TECH, ROLE_DEFENSE_GUN, ROLE_DEFENSE_TURRET,
+     ROLE_REPAIR, ROLE_AIRBASE, ROLE_NAVAL, ROLE_CIVIL}
+    | set(ROLE_OF_ITEM.values()) - {"misc", "pad"}
+))
+ROLE_VOCAB: dict[str, int] = {"pad": 0}
+for _i, _n in enumerate(_ENTITY_ROLE_NAMES, start=1):
+    ROLE_VOCAB[_n] = _i
+ROLE_VOCAB["misc"] = len(ROLE_VOCAB)
+N_ROLES = len(ROLE_VOCAB)
+ROLE_PAD_ID = 0
+ROLE_MISC_ID = ROLE_VOCAB["misc"]
+
+
+def role_id_of(item: str) -> int:
+    """InternalName -> id de ROLE_VOCAB (0=pad, misc si desconocido)."""
+    if not item:
+        return ROLE_PAD_ID
+    return int(ROLE_VOCAB.get(role_of(item), ROLE_MISC_ID))
 
 
 def item_cost(item: str) -> float:

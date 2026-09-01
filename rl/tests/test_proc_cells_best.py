@@ -39,8 +39,8 @@ from rl.best_ckpt import (
 )
 from rl.network import TYPE_TO_IDX
 from rl.obs_encoding import (
-    BEACON_BY_MAP, MAX_UNITS, SCALAR_DIM, UNIT_FEAT_DIM, select_unit_slots,
-    unit_slots,
+    BEACON_BY_MAP, MAX_ENEMIES, MAX_TOKENS, MAX_UNITS, SCALAR_DIM, UNIT_FEAT_DIM,
+    select_unit_slots, unit_slots, unit_tokens,
 )
 
 ok = True
@@ -255,26 +255,38 @@ act_tent_p, _ = index_to_command_effective(
 check("PLACE sampled barracks sigue poniendo tent",
       act_tent_p.commands[0].item_type == "tent")
 
-# Harvest: harv en migajas → order con celda al parche rico (Ch2).
+# Harvest: idle nunca apunta al argmax del mapa (Ch2=0 en la proc).
+# Migajas junto a casa sí retargetean al parche rico CERCANO, no al lejano.
 import base64 as _b64
 _h, _w = 32, 32
 _sp = np.zeros((_h, _w, 9), dtype=np.float32)
 _sp[:, :, 3] = 1.0
 _sp[:, :, 4] = 1.0
-_sp[16, 4, 2] = 0.2   # casa agotada
-_sp[16, 28, 2] = 8.0  # parche rico explorado
+_sp[16, 10, 2] = 0.2   # migajas junto a proc (12,16)
+_sp[16, 14, 2] = 5.0   # parche rico de casa
+_sp[16, 28, 2] = 12.0  # más rico lejos (no ir)
 _b64map = _b64.b64encode(_sp.tobytes()).decode("ascii")
 obs_ore = _obs(
     harv=1, bldgs=("fact", "proc"), w=_w, h=_h,
     avail=("e1", "proc"),
-    units=[_u(9, "harv", 4, 16, idle=False)],
+    units=[_u(9, "harv", 10, 16, idle=False)],
     spatial_map=_b64map,
 )
 cmds_ore = support_commands(obs_ore)
 harv_cmds = [c for c in cmds_ore if c.action.value == "harvest"]
-check("harv en migajas recibe harvest con celda",
-      len(harv_cmds) == 1 and harv_cmds[0].target_x == 28
+check("harv en migajas de casa va al parche cercano, no al lejano",
+      len(harv_cmds) == 1 and harv_cmds[0].target_x == 14
       and harv_cmds[0].target_y == 16)
+obs_idle_far = _obs(
+    harv=1, bldgs=("fact", "proc"), w=_w, h=_h,
+    units=[_u(9, "harv", 12, 16, idle=True)],
+    spatial_map=_b64map,
+)
+cmds_if = support_commands(obs_idle_far)
+ih = [c for c in cmds_if if c.action.value == "harvest"]
+check("harv idle en proc no apunta al ore lejano",
+      len(ih) == 1 and int(ih[0].target_x or 0) == 0
+      and int(ih[0].target_y or 0) == 0)
 obs_idle_h = _obs(
     harv=1, bldgs=("fact", "proc"),
     units=[_u(9, "harv", 14, 16, idle=True)])
@@ -548,7 +560,15 @@ with tempfile.TemporaryDirectory() as td:
           and (d / "best.pt").read_bytes() == b"CKPT-A")
 
 from rl.play_skirmish import action_to_dicts, obs_from_dict
-from rl.play_vs_checkpoint_live import _harv_xy, _n_combat, _tape_row
+from rl.play_vs_checkpoint_live import (
+    _append_live_rows, _harv_xy, _n_combat, _resolve_log_path, _tape_row,
+)
+check("tape path vacío no escribe", _resolve_log_path("") is None)
+with tempfile.TemporaryDirectory() as td:
+    p_tape = Path(td) / "live_tape.jsonl"
+    _append_live_rows(p_tape, [{"ep": "a", "dec": 1}, {"ep": "a", "dec": 2}])
+    lines = p_tape.read_text(encoding="utf-8").strip().splitlines()
+    check("tape se flushea junto al terminar", len(lines) == 2)
 obs_t = _obs(harv=1, bldgs=("fact", "proc"),
              units=[_u(1, "e1", 12, 16), _u(9, "harv", 14, 17)])
 check("tape harv xy", _harv_xy(obs_t.units) == [[14, 17]])
@@ -624,8 +644,9 @@ act_sk = OpenRAAction(commands=[
 ])
 dicts_sk = action_to_dicts(act_sk)
 from rl.network import (
-    CELL_HEAD_OLD_IN, HIDDEN_DIM, SCATTER_CH, SPATIAL_CH, TYPE_TO_IDX,
-    UNIT_COND_DIM, adapt_capa2_state_dict,
+    CELL_HEAD_OLD_IN, HIDDEN_DIM, ROLE_EMB_DIM, SCATTER_CH, SPATIAL_CH,
+    TYPE_TO_IDX, UNIT_COND_DIM, UNIT_MLP_IN, adapt_capa2_state_dict,
+    adapt_capa2c_state_dict,
 )
 from rl.obs_encoding import MAX_UNITS
 from rl.trainer import load_checkpoint as _load_ckpt
@@ -726,7 +747,9 @@ check("skirmish obs_from_dict",
 
 # --- Capa 2c-A: 96 slots + combat-first ---
 check("MAX_UNITS 96", MAX_UNITS == 96)
-check("UNIT_FEAT_DIM 10", UNIT_FEAT_DIM == 10)
+check("UNIT_FEAT_DIM 11", UNIT_FEAT_DIM == 11)
+check("MAX_TOKENS 128", MAX_TOKENS == MAX_UNITS + MAX_ENEMIES == 128)
+check("UNIT_MLP_IN 19", UNIT_MLP_IN == 11 + ROLE_EMB_DIM)
 
 raid_enemy = _u(900, "e1", 52, 16)
 old_home = [_u(i + 1, "e1", 12, 16) for i in range(80)]
@@ -748,6 +771,7 @@ obs_tiny = _obs(units=tiny)
 feats_t, valid_t = unit_slots(obs_tiny)
 check("10 unidades: feats N=10", feats_t.shape == (10, UNIT_FEAT_DIM))
 check("10 unidades: valid 10", int(valid_t.sum()) == 10)
+check("10 unidades team=0", float(feats_t[0, 10]) == 0.0)
 
 aidx_raid = ActionIndex(obs_raid, Vocab())
 enc_ids = [u.actor_id for u in select_unit_slots(obs_raid)]
@@ -779,23 +803,55 @@ check("raid en casa: e1 del yard entran",
 
 empty_obs = _obs(units=[])
 feats_e, valid_e = unit_slots(empty_obs)
-check("sin unidades: feats (0,10)", feats_e.shape == (0, UNIT_FEAT_DIM))
+check("sin unidades: feats (0,11)", feats_e.shape == (0, UNIT_FEAT_DIM))
 
-ckpt_a = Path("rl/ckpts/best.pt")
+from rl.roles import ROLE_VOCAB, role_id_of
+check("e1 y e3 roles distintos",
+      role_id_of("e1") != role_id_of("e3")
+      and role_id_of("e1") == ROLE_VOCAB["infantry_basic"]
+      and role_id_of("e3") == ROLE_VOCAB["infantry_antiarmor"])
+check("role pad id 0", ROLE_VOCAB["pad"] == 0)
+tok_f, tok_r, tok_v, tok_o = unit_tokens(obs_tiny)
+check("tokens padded 128", tok_f.shape == (MAX_TOKENS, UNIT_FEAT_DIM))
+check("tokens 10 own", int(tok_o.sum()) == 10 and int(tok_v.sum()) == 10)
+obs_ene = _obs(units=[_u(1, "e1", 12, 16)],
+               enemies=(_u(50, "2tnk", 40, 16),))
+tf, tr, tv, to = unit_tokens(obs_ene)
+check("enemigo team=1", float(tf[MAX_UNITS, 10]) == 1.0)
+check("enemigo 2tnk tank_medium",
+      int(tr[MAX_UNITS]) == ROLE_VOCAB["tank_medium"])
+check("enemigo valid no-own", bool(tv[MAX_UNITS]) and not bool(to[MAX_UNITS]))
+check("propia team=0", float(tf[0, 10]) == 0.0)
+
+ckpt_a = Path("rl/ckpts/Run 25 (a_short harvest-fix smoke 1000-1013)/best.pt")
+if not ckpt_a.exists():
+    ckpt_a = Path("rl/ckpts/Run 23 (a_short capa2c-A 96 977-1002)/best.pt")
 if ckpt_a.exists():
     blob_a = __import__("torch").load(
         ckpt_a, map_location="cpu", weights_only=False)
     net_a = AlphaLiteNet()
-    adapted_a = adapt_capa2_state_dict(net_a, blob_a["net"])
+    adapted_a = adapt_capa2c_state_dict(
+        net_a, adapt_capa2_state_dict(net_a, blob_a["net"]))
+    old_mlp = blob_a["net"]["unit_mlp.0.weight"]
+    check("2c-B mlp copia feats 10",
+          torch.allclose(adapted_a["unit_mlp.0.weight"][:, :10], old_mlp))
+    check("2c-B mlp extra ≈0",
+          float(adapted_a["unit_mlp.0.weight"][:, 10:].abs().sum()) == 0.0)
+    old_sc = blob_a["net"]["scatter_proj.weight"]
+    check("2c-B scatter copia 10",
+          torch.allclose(adapted_a["scatter_proj.weight"][:, :10], old_sc))
     inc_a = net_a.load_state_dict(adapted_a, strict=False)
-    check("2c-A ckpt 1:1 missing=0", len(inc_a.missing_keys) == 0)
-    check("2c-A ckpt 1:1 unexpected=0", len(inc_a.unexpected_keys) == 0)
-    check("2c-A resume iter >=970", int(blob_a.get("iteration", 0) or 0) >= 970)
+    check("2c-B missing role_emb",
+          any("role_emb" in k for k in inc_a.missing_keys))
+    check("2c-B unexpected 0", len(inc_a.unexpected_keys) == 0)
+    check("2c-B resume iter >=970", int(blob_a.get("iteration", 0) or 0) >= 970)
     batch_a = {
         "spatial": torch.zeros(1, 9, 8, 8),
         "scalars": torch.zeros(1, SCALAR_DIM),
-        "unit_feats": torch.zeros(1, MAX_UNITS, UNIT_FEAT_DIM),
-        "unit_valid": torch.zeros(1, MAX_UNITS, dtype=torch.bool),
+        "unit_feats": torch.zeros(1, MAX_TOKENS, UNIT_FEAT_DIM),
+        "unit_valid": torch.zeros(1, MAX_TOKENS, dtype=torch.bool),
+        "unit_role_ids": torch.zeros(1, MAX_TOKENS, dtype=torch.long),
+        "unit_own_mask": torch.zeros(1, MAX_TOKENS, dtype=torch.bool),
         "type_mask": torch.ones(1, 22, dtype=torch.bool),
         "cell_mask": torch.ones(1, 8 * 8, dtype=torch.bool),
         "item_indices": torch.zeros(1, 4, dtype=torch.long),
@@ -804,9 +860,129 @@ if ckpt_a.exists():
         "build_slot_mask": torch.zeros(1, 4, dtype=torch.bool),
     }
     batch_a["unit_valid"][0, 0] = True
+    batch_a["unit_own_mask"][0, 0] = True
+    batch_a["unit_valid"][0, MAX_UNITS] = True
+    batch_a["unit_feats"][0, MAX_UNITS, 10] = 1.0
     out_a = net_a.act(batch_a, torch.zeros(1, HIDDEN_DIM))
-    check("2c-A act(96 slots) log_prob finito",
+    check("2c-B act(128 tokens) log_prob finito",
           torch.isfinite(out_a["log_prob"]).all().item())
+    net_a.eval()
+    with torch.no_grad():
+        hits = []
+        for _ in range(40):
+            o = net_a.act(batch_a, torch.zeros(1, HIDDEN_DIM), temperature=1.0)
+            hits.append(int(o["unit_slot"].item()))
+    check("dist_unit no samplea slot enemigo",
+          all(h != MAX_UNITS for h in hits) and all(h < MAX_UNITS for h in hits))
+
+from rl.network import TYPES_USE_ENEMY
+check("TYPES_USE_ENEMY solo attack", TYPES_USE_ENEMY == {"attack"})
+
+obs_atk = _obs(
+    harv=1, bldgs=("fact", "proc", "barr"),
+    units=[_u(1, "e1", 12, 16)],
+    enemies=(_u(50, "e1", 40, 16), _u(51, "2tnk", 80, 16)),
+    avail=("e1", "harv", "proc"),
+)
+aidx_atk = ActionIndex(obs_atk, Vocab())
+check("enemy_ids por actor_id", aidx_atk.enemy_ids == [50, 51])
+cell_near = 16 * aidx_atk.w + 40
+t_atk = TYPE_TO_IDX["attack"]
+act_ptr, _ = index_to_command_effective(
+    obs_atk, t_atk, 0, cell_near, 0, aidx_atk, enemy_slot=1)
+check("attack pointer != nearest",
+      act_ptr.commands[0].action.value == "attack"
+      and int(act_ptr.commands[0].target_actor_id) == 51)
+act_s0, _ = index_to_command_effective(
+    obs_atk, t_atk, 0, cell_near, 0, aidx_atk, enemy_slot=0)
+check("attack slot 0 es el de la celda",
+      int(act_s0.commands[0].target_actor_id) == 50)
+act_pad, _ = index_to_command_effective(
+    obs_atk, t_atk, 0, cell_near, 0, aidx_atk, enemy_slot=31)
+check("attack pad fallback nearest",
+      act_pad.commands[0].action.value == "attack"
+      and int(act_pad.commands[0].target_actor_id) == 50)
+obs_noene = _obs(
+    harv=1, bldgs=("fact", "proc"), units=[_u(1, "e1", 12, 16)],
+    enemies=(), avail=("e1", "harv"))
+aidx_ne = ActionIndex(obs_noene, Vocab())
+act_am, _ = index_to_command_effective(
+    obs_noene, t_atk, 0, 0, 0, aidx_ne, enemy_slot=0)
+check("attack sin enemigo -> attack_move",
+      act_am.commands[0].action.value == "attack_move")
+act_aam, _ = index_to_command_effective(
+    obs_atk, TYPE_TO_IDX["army_attack_move"], 0, cell_near, 0, aidx_atk,
+    enemy_slot=1)
+check("army_attack_move ignora enemy_slot",
+      act_aam.commands[0].action.value == "army_attack_move"
+      and int(act_aam.commands[0].target_actor_id or 0) == 0)
+
+net_c = AlphaLiteNet()
+check("2c-C params < 8M",
+      sum(p.numel() for p in net_c.parameters()) < 8e6)
+batch_c = {
+    "spatial": torch.zeros(1, 9, 8, 8),
+    "scalars": torch.zeros(1, SCALAR_DIM),
+    "unit_feats": torch.zeros(1, MAX_TOKENS, UNIT_FEAT_DIM),
+    "unit_valid": torch.zeros(1, MAX_TOKENS, dtype=torch.bool),
+    "unit_role_ids": torch.zeros(1, MAX_TOKENS, dtype=torch.long),
+    "unit_own_mask": torch.zeros(1, MAX_TOKENS, dtype=torch.bool),
+    "type_mask": torch.ones(1, 22, dtype=torch.bool),
+    "cell_mask": torch.ones(1, 8 * 8, dtype=torch.bool),
+    "item_indices": torch.zeros(1, 4, dtype=torch.long),
+    "item_mask": torch.zeros(1, 4, dtype=torch.bool),
+    "train_slot_mask": torch.zeros(1, 4, dtype=torch.bool),
+    "build_slot_mask": torch.zeros(1, 4, dtype=torch.bool),
+}
+batch_c["unit_valid"][0, 0] = True
+batch_c["unit_own_mask"][0, 0] = True
+batch_c["unit_valid"][0, MAX_UNITS] = True
+batch_c["unit_valid"][0, MAX_UNITS + 1] = True
+batch_c["unit_feats"][0, MAX_UNITS, 10] = 1.0
+batch_c["unit_feats"][0, MAX_UNITS + 1, 10] = 1.0
+batch_c["unit_feats"][0, MAX_UNITS + 1, 0] = 0.4
+h_c = torch.zeros(1, HIDDEN_DIM)
+torch.manual_seed(0)
+with torch.no_grad():
+    net_c.enemy_scorer[-1].weight.normal_(0.0, 0.4)
+out_c = net_c.act(batch_c, h_c)
+check("2c-C act tiene enemy_slot", "enemy_slot" in out_c)
+check("2c-C enemy_slot en 0..31",
+      0 <= int(out_c["enemy_slot"].item()) < MAX_ENEMIES)
+check("2c-C act log_prob finito",
+      torch.isfinite(out_c["log_prob"]).all().item())
+
+def _acts(tname, eslot):
+    return {
+        "type": torch.tensor([TYPE_TO_IDX[tname]]),
+        "unit_slot": torch.tensor([0]),
+        "cell_flat": torch.tensor([0]),
+        "item_slot": torch.tensor([0]),
+        "enemy_slot": torch.tensor([eslot]),
+        "had_item": torch.tensor([False]),
+    }
+
+lp_a0, _, _ = net_c.evaluate_actions(batch_c, h_c, _acts("attack", 0))
+lp_a1, _, _ = net_c.evaluate_actions(batch_c, h_c, _acts("attack", 1))
+lp_m0, _, _ = net_c.evaluate_actions(batch_c, h_c, _acts("move", 0))
+lp_m1, _, _ = net_c.evaluate_actions(batch_c, h_c, _acts("move", 1))
+check("F3 attack suma enemy_slot", not torch.allclose(lp_a0, lp_a1))
+check("F3 move no suma enemy_slot", torch.allclose(lp_m0, lp_m1))
+
+ckpt_b = Path("rl/ckpts/best.pt")
+if ckpt_b.exists():
+    blob_b = torch.load(ckpt_b, map_location="cpu", weights_only=False)
+    net_b2c = AlphaLiteNet()
+    adapted_c = adapt_capa2c_state_dict(
+        net_b2c, adapt_capa2_state_dict(net_b2c, blob_b["net"]))
+    inc_c = net_b2c.load_state_dict(adapted_c, strict=False)
+    check("2c-C missing enemy_scorer",
+          any("enemy_scorer" in k for k in inc_c.missing_keys))
+    check("2c-C tronco B tiene role_emb",
+          not any("role_emb" in k for k in inc_c.missing_keys))
+    check("2c-C unexpected 0", len(inc_c.unexpected_keys) == 0)
+    check("2c-C resume iter >=1000",
+          int(blob_b.get("iteration", 0) or 0) >= 1000)
 
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS"))
 sys.exit(0 if ok else 1)

@@ -14,10 +14,10 @@ Uso (PowerShell, UN comando):
     # visor:
     http://localhost:8786/
 
-Al terminar cada partida append a rl/ckpts/live_games.jsonl (histograma,
-destino de asalto, centroide vs beacon, tape cada 10 decs). Cada decisión
-también va a rl/ckpts/live_tape.jsonl (política, dest de soporte, harv xy,
-centroide). Ctrl+C no pisa el train.
+Al terminar cada partida (win/lose/incomplete) append a
+rl/ckpts/live_games.jsonl y el tape completo a rl/ckpts/live_tape.jsonl.
+Ctrl+C / DEADLINE no escriben: un chequeo corto no deja basura del run
+siguiente. No pisa el train.
 """
 import argparse
 import asyncio
@@ -197,10 +197,26 @@ def _remember_cell(bucket: list, xy, cap: int = 24) -> None:
         bucket.append(cell)
 
 
+def _resolve_log_path(path_str: str) -> Path | None:
+    if not path_str:
+        return None
+    p = Path(path_str)
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent.parent / p
+    return p
+
+
 def _append_live_game(path: Path, row: dict) -> None:
+    _append_live_rows(path, [row])
+
+
+def _append_live_rows(path: Path, rows: list) -> None:
+    if not rows:
+        return
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
 def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str, status, done, result):
@@ -314,7 +330,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
     macro_final = None
     last_push_cell = None
     ep_id = f"{int(ckpt_iter)}-{int(time.time())}"
-    tape_path = getattr(args, "tape_file", "") or ""
+    aborted = False
     trace = {
         "policy_push_cells": [],
         "support_dests": [],
@@ -340,8 +356,10 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                 out = net.act(batch, hidden, temperature=args.temperature)
             hidden = out["hidden"].detach()
             had_item = aidx.item_mask.any().view(1).to(device)
+            e_slot = int(out.get("enemy_slot", 0))
             action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
-                obs, int(out["type"]), int(out["unit_slot"]), int(out["cell_flat"]), int(out["item_slot"]), aidx)
+                obs, int(out["type"]), int(out["unit_slot"]), int(out["cell_flat"]),
+                int(out["item_slot"]), aidx, enemy_slot=e_slot)
             # recalc log_prob si hubo coerción (igual que rollout, pero sin grad)
             sampled = (int(out["type"]), int(out["unit_slot"]), int(out["item_slot"]))
             effective = (eff_t, eff_u, eff_i)
@@ -352,6 +370,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                         "unit_slot": torch.tensor([eff_u], device=device),
                         "cell_flat": out["cell_flat"],
                         "item_slot": torch.tensor([eff_i], device=device),
+                        "enemy_slot": torch.tensor([e_slot], device=device),
                         "had_item": had_item,
                     })
             atype_str = ACTION_TYPES[eff_t]
@@ -437,6 +456,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
             try:
                 result = await env.step(OpenRAAction(commands=[CommandModel(action=ActionType.NO_OP)]))
             except Exception:
+                aborted = True
                 break
         obs = result.observation
         r_frame = shaper.step(obs, done=bool(result.done), action_type=atype_str)
@@ -463,6 +483,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
             except Exception as e:
                 if "DEADLINE" in str(e):
                     broadcaster.update({"status": "DEADLINE — sesión envenenada, abortando"})
+                    aborted = True
                     break
 
         # push live cada decisión (throttle: solo si can_decide para no spamear)
@@ -474,14 +495,6 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                     item=step_meta["item"], sup=step_meta["sup"],
                     supk=step_meta["supk"], iss=step_meta.get("iss"))
                 trace["tape"].append(row)
-                if tape_path:
-                    p_tape = Path(tape_path)
-                    if not p_tape.is_absolute():
-                        p_tape = Path(__file__).resolve().parent.parent / p_tape
-                    try:
-                        _append_live_game(p_tape, row)
-                    except OSError:
-                        pass
             if decs == 1 or decs % 50 == 0:
                 n_cbt = _n_combat(obs.units)
                 dest = (step_meta or {}).get("sup") or last_push_cell
@@ -543,18 +556,26 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
         "last_action": last_action_str,
         "last_push": list(last_push_cell) if last_push_cell else None,
     }
-    log_path = getattr(args, "log_file", "") or ""
-    if log_path:
-        p = Path(log_path)
-        if not p.is_absolute():
-            p = Path(__file__).resolve().parent.parent / p
-        try:
-            _append_live_game(p, log_row)
-            print(f"  logged {p}  dist_beacon={log_row['dist_to_beacon']} "
-                  f"tape={len(trace['tape'])} support_dests={trace['support_dests']}",
-                  flush=True)
-        except OSError as e:
-            print(f"  [live log] no pude escribir {p}: {e}", flush=True)
+    if aborted:
+        print("  abort (DEADLINE/sesión): no logueo partida incompleta",
+              flush=True)
+    else:
+        tape_path = _resolve_log_path(getattr(args, "tape_file", "") or "")
+        if tape_path is not None:
+            try:
+                _append_live_rows(tape_path, trace["tape"])
+            except OSError as e:
+                print(f"  [live tape] no pude escribir {tape_path}: {e}",
+                      flush=True)
+        log_path = _resolve_log_path(getattr(args, "log_file", "") or "")
+        if log_path is not None:
+            try:
+                _append_live_game(log_path, log_row)
+                print(f"  logged {log_path}  dist_beacon={log_row['dist_to_beacon']} "
+                      f"tape={len(trace['tape'])} support_dests={trace['support_dests']}",
+                      flush=True)
+            except OSError as e:
+                print(f"  [live log] no pude escribir {log_path}: {e}", flush=True)
     return {"result": final_result, "ticks": obs.tick, "decisions": decs,
             "episode_reward": round(episode_reward, 3), "hist": hist,
             "advanced_ticks": adv_total, "dist_to_beacon": log_row["dist_to_beacon"]}
@@ -654,9 +675,9 @@ def main():
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")
     ap.add_argument("--log-file", default="rl/ckpts/live_games.jsonl",
-                    help="jsonl por partida del visor. Vacío = no loguear.")
+                    help="jsonl por partida completa (win/lose/incomplete). Vacío = off. Ctrl+C no escribe.")
     ap.add_argument("--tape-file", default="rl/ckpts/live_tape.jsonl",
-                    help="jsonl una línea por decisión (política, dest, harv, centroide). Vacío = off.")
+                    help="jsonl del tape al terminar la partida. Vacío = off. Ctrl+C no escribe.")
     args = ap.parse_args()
     # --bot-type "" mantiene "" (dummy), solo None es "no tocar". --ai-slot "" desactiva enemigo.
     if args.bot_type == "__none__":

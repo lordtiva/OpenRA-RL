@@ -69,8 +69,8 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 2c-A + PLACE Defense/pbox + harvest a parche rico.
-# Resume best easy 999 (Run 23 iwr 0.75). Asalto support OFF. No PR-B.
+# Capa 2c-C: attack elige actor (enemy_scorer 0-init). Resume latest 1020 (B).
+# PLACE Defense + harvest idle/migajas-casa. Asalto OFF. No 128, no hard, no QSA.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",

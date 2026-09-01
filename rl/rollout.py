@@ -24,7 +24,7 @@ from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_co
 from rl.imitation import command_to_indices, pick_bc_command
 from rl.network import ACTION_TYPES, HIDDEN_DIM
 from rl.obs_encoding import (
-    MAX_UNITS, UNIT_FEAT_DIM, decode_spatial, scalar_features, unit_slots,
+    decode_spatial, scalar_features, unit_tokens,
 )
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
@@ -43,15 +43,7 @@ def _batch_of(obs, vocab, device):
     if spatial is None:
         spatial = np.zeros((9, h, w), dtype=np.float32)
 
-    units_feats, unit_valid = unit_slots(obs)
-    if len(units_feats) == 0:
-        units_feats = np.zeros((0, UNIT_FEAT_DIM), dtype=np.float32)
-        unit_valid = np.zeros(0, dtype=bool)
-    pad = MAX_UNITS - units_feats.shape[0]
-    if pad > 0:
-        units_feats = np.vstack([
-            units_feats, np.zeros((pad, UNIT_FEAT_DIM), dtype=np.float32)])
-        unit_valid = np.concatenate([unit_valid, np.zeros(pad, dtype=bool)])
+    units_feats, role_ids, unit_valid, own_mask = unit_tokens(obs)
 
     aidx = ActionIndex(obs, vocab)
     # Channel 3 is passability (0/1). Mask illegal cells in the cell head so
@@ -63,6 +55,8 @@ def _batch_of(obs, vocab, device):
         "scalars": torch.from_numpy(scalar_features(obs)).unsqueeze(0).to(device),
         "unit_feats": torch.from_numpy(units_feats).unsqueeze(0).to(device),
         "unit_valid": torch.from_numpy(unit_valid).unsqueeze(0).to(device),
+        "unit_role_ids": torch.from_numpy(role_ids).unsqueeze(0).to(device),
+        "unit_own_mask": torch.from_numpy(own_mask).unsqueeze(0).to(device),
         "type_mask": aidx.type_mask.unsqueeze(0).to(device),
         "cell_mask": aidx.cell_mask.unsqueeze(0).to(device),
         "item_indices": aidx.item_indices.unsqueeze(0).to(device),
@@ -152,14 +146,20 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 with torch.no_grad():
                     _fmap, _, hidden, _tok = net.encode(
                         batch["spatial"], batch["scalars"],
-                        batch["unit_feats"], batch["unit_valid"], hidden)
+                        batch["unit_feats"], batch["unit_valid"], hidden,
+                        unit_role_ids=batch.get("unit_role_ids"),
+                        unit_own_mask=batch.get("unit_own_mask"))
                     hidden = hidden.detach()
                     value_t = net.value_head(hidden).squeeze(-1)
                 raw = teacher.decide(obs)
                 primary = pick_bc_command(raw.commands)
                 t0, u0, c0, i0 = command_to_indices(obs, primary, aidx)
+                e_slot = 0
+                tid = int(getattr(primary, "target_actor_id", 0) or 0)
+                if tid and tid in aidx.enemy_ids:
+                    e_slot = int(aidx.enemy_ids.index(tid))
                 action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
-                    obs, t0, u0, c0, i0, aidx)
+                    obs, t0, u0, c0, i0, aidx, enemy_slot=e_slot)
                 extras = [c for c in (raw.commands or []) if c is not primary]
                 action.commands.extend(extras)
                 sampled = (t0, u0, i0, c0)
@@ -176,14 +176,17 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                             "unit_slot": torch.tensor([eff_u], device=device),
                             "cell_flat": cell_t,
                             "item_slot": torch.tensor([eff_i], device=device),
+                            "enemy_slot": torch.tensor([e_slot], device=device),
                             "had_item": had_item,
                         })
             else:
                 out = net.act(batch, hidden, temperature=temperature)
                 hidden = out["hidden"].detach()
+                e_slot = int(out.get("enemy_slot", 0))
                 action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
                     obs, int(out["type"]), int(out["unit_slot"]),
                     int(out["cell_flat"]), int(out["item_slot"]), aidx,
+                    enemy_slot=e_slot,
                 )
                 sampled = (int(out["type"]), int(out["unit_slot"]),
                            int(out["item_slot"]), int(out["cell_flat"]))
@@ -225,6 +228,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                             "cell_flat": cell_t if torch.is_tensor(cell_t) else
                             torch.tensor([int(eff_c)], device=device),
                             "item_slot": torch.tensor([eff_i], device=device),
+                            "enemy_slot": torch.tensor(
+                                [int(e_slot)], device=device),
                             "had_item": had_item,
                         })
                     log_prob = re_lp
@@ -275,6 +280,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     "cell_flat": (cell_t.detach().cpu() if torch.is_tensor(cell_t)
                                   else torch.tensor([int(eff_c)])),
                     "item_slot": torch.tensor([effective[2]]),
+                    "enemy_slot": torch.tensor([int(e_slot)]),
                     "had_item": had_item.cpu(),
                     # CONGELADOS: la referencia contra la que PPO mide el drift
                     "log_prob": log_prob.detach().cpu(),
@@ -456,7 +462,9 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
             b_final, _ = _batch_of(obs, vocab, device)
             _, _, h_fin, _tok = net.encode(
                 b_final["spatial"], b_final["scalars"],
-                b_final["unit_feats"], b_final["unit_valid"], hidden)
+                b_final["unit_feats"], b_final["unit_valid"], hidden,
+                unit_role_ids=b_final.get("unit_role_ids"),
+                unit_own_mask=b_final.get("unit_own_mask"))
             traj[-1]["_v_next"] = float(
                 net.value_head(h_fin).squeeze(-1).item())
 
