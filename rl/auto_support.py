@@ -12,9 +12,10 @@ Diseño:
 - Flag --auto-support (default False en Run2, True en Run3/v4). Sin flag, 0 impacto.
 - Reparación: si cash>500 y edificio hp<35% y no está ya reparándose, emite 1
   repair por bloque (máx 2 para no spamear). Es el umbral del hard.
-- Cosecha: idle/migajas → Harvest CON celda al parche de CASA con menos
-  camiones (radio 26 de la proc, no el argmax del mapa). Untargeted iba
-  siempre al mismo yacimiento; el easy reparte. Sin Ch2 global (Run 24).
+- Cosecha: idle SIN celda (engine al ore más cercano). Hasta 2 idle/bloque.
+  Retarget con celda SOLO si está minando migajas junto a casa. Spread con
+  celda (Run 31) wr20→0 — no reabrir. Easy nace con 2 harvs; nosotros
+  TRAIN hasta MIN_HARVESTERS=2 si hay cola Vehicle.
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
 - Asalto FULL / hunt / recall / rally-al-beacon / crédito de dest: APAGADOS
   (corte 950). Era estrategia spawn-asimétrica (siempre (95,11)).
@@ -105,12 +106,21 @@ def _combat_units(units):
     return [u for u in units if _is_combat(u)]
 
 
+def _is_harv_type(typ) -> bool:
+    t = str(typ or "").lower()
+    return "harv" in t and "husk" not in t
+
+
+def _n_harvesters(units, prod) -> int:
+    alive = sum(1 for u in units or [] if _is_harv_type(getattr(u, "type", "")))
+    queued = sum(1 for p in prod or [] if _is_harv_type(getattr(p, "item", "")))
+    return int(alive + queued)
+
+
 def _has_harvester(obs, eco, units, prod) -> bool:
     if eco is not None and int(getattr(eco, "harvester_count", 0) or 0) > 0:
         return True
-    if any("harv" in str(getattr(u, "type", "")).lower() for u in units):
-        return True
-    return any("harv" in str(getattr(p, "item", "")).lower() for p in prod)
+    return _n_harvesters(units, prod) > 0
 
 
 def _xy(obj) -> tuple[int, int]:
@@ -234,6 +244,10 @@ _NO_SELL = frozenset({"fact", "afac", "proc"})
 SELL_HP = 0.12
 _BARRACKS_ITEMS = ("tent", "barr")
 TENT_COST = 500
+HARV_COST = 1100
+# Easy InitialHarvesters: 2. We only replaced at 0 → 1 truck vs their 2.
+MIN_HARVESTERS = 2
+_ORE_IDLE_ORDERS = 2
 
 
 def _own_anchor(obs):
@@ -425,14 +439,9 @@ def _push_cell(obs, last_push):
     return None
 
 
-# Casa, no el mapa: idle untargeted = todas al mismo pozo (visor 2+ en
-# [15,17]; easy cosecha 2.7×). Run 24 argmax global = yank al enemigo.
+# Migajas junto a casa (no el argmax del mapa: idle en proc tiene Ch2=0).
 _ORE_STALE_FRAC = 0.35
 _ORE_HOME_RADIUS = 12
-_ORE_ASSIGN_RADIUS = 26
-_ORE_PATCH_SEP = 8
-_ORE_MIN_DENSITY = 0.25
-_ORE_HARVEST_ORDERS = 2
 
 
 def _spatial_chw(obs):
@@ -493,71 +502,6 @@ def _harv_local_ore(u, arr) -> float:
     return float(arr[2, y, x])
 
 
-def _ore_patches(arr, origin, radius: int = _ORE_ASSIGN_RADIUS,
-                 sep: int = _ORE_PATCH_SEP):
-    """Yacimientos explorados cerca de la proc. Nunca el argmax global."""
-    import numpy as np
-    if arr is None or origin is None or arr.shape[0] < 5:
-        return []
-    ox, oy = int(origin[0]), int(origin[1])
-    ch2, ch3, ch4 = arr[2], arr[3], arr[4]
-    h, w = ch2.shape
-    yy, xx = np.ogrid[:h, :w]
-    near = (np.abs(xx - ox) + np.abs(yy - oy)) <= int(radius)
-    mask = near & (ch4 >= 0.45) & (ch3 > 0.5) & (ch2 >= _ORE_MIN_DENSITY)
-    if arr.shape[0] >= 9:
-        mask = mask & ((arr[7] + arr[8]) < 0.15)
-    if not bool(mask.any()):
-        return []
-    vals = np.where(mask, ch2, 0.0)
-    taken = np.zeros((h, w), dtype=bool)
-    patches = []
-    rsep = int(sep)
-    for _ in range(6):
-        work = np.where(taken, -1.0, vals)
-        peak = float(work.max())
-        if peak < _ORE_MIN_DENSITY:
-            break
-        y, x = [int(i) for i in np.unravel_index(int(work.argmax()), work.shape)]
-        patches.append((int(x), int(y), peak))
-        taken |= (np.abs(xx - x) + np.abs(yy - y)) <= rsep
-    return patches
-
-
-def _nearest_patch_idx(xy, patches, sep: int = _ORE_PATCH_SEP):
-    if not patches or xy is None:
-        return None
-    best_i, best_d = None, None
-    try:
-        hx, hy = int(xy[0]), int(xy[1])
-    except (TypeError, ValueError, IndexError):
-        return None
-    for i, (px, py, _den) in enumerate(patches):
-        d = abs(hx - px) + abs(hy - py)
-        if best_i is None or d < best_d:
-            best_i, best_d = i, d
-    if best_i is not None and best_d <= int(sep):
-        return best_i
-    return None
-
-
-def _pick_understaffed_patch(xy, patches, counts):
-    """Parche con menos harvs; empate = más denso, luego más cerca."""
-    try:
-        hx, hy = int(xy[0]), int(xy[1])
-    except (TypeError, ValueError, IndexError):
-        hx, hy = 0, 0
-    best_i = min(
-        range(len(patches)),
-        key=lambda i: (
-            int(counts[i]),
-            -float(patches[i][2]),
-            abs(int(patches[i][0]) - hx) + abs(int(patches[i][1]) - hy),
-        ),
-    )
-    return patches[best_i], best_i
-
-
 def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
 
     """Lista de CommandModel de soporte para esta observación.
@@ -582,86 +526,43 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
                     action=ActionType.DEPLOY, actor_id=int(u.actor_id)))
                 break
 
-    # 0) Auto-harvest. Idle/migajas → celda del parche de casa con menos
-    #    harvs. Untargeted (engine nearest) amontonaba 2+ en un pozo.
-    #    Sin parches explorados: idle sin celda (no yank al mapa).
+    # 0) Auto-harvest. Idle → sin celda (ore más cercano). Hasta 2/bloque
+    #    (Run 30 despertaba 1; el segundo esperaba 50 ticks). Retarget con
+    #    celda solo si está minando migajas. No forzar parche (Run 31).
     has_proc = any(getattr(b, "type", "") == "proc" for b in blds)
     if has_proc:
         arr = _spatial_chw(obs)
-        origin = _proc_xy(blds)
-        patches = _ore_patches(arr, origin)
-        harvs = [
-            u for u in units
-            if "harv" in str(getattr(u, "type", "")).lower()
-        ]
-        counts = [0] * len(patches)
-        for hv in harvs:
-            try:
-                hxy = _xy(hv)
-            except (TypeError, ValueError):
-                continue
-            pi = _nearest_patch_idx(hxy, patches)
-            if pi is not None:
-                counts[pi] += 1
+        home = _best_ore_near(arr, _proc_xy(blds))
         n_h = 0
-        for u in harvs:
-            if n_h >= _ORE_HARVEST_ORDERS:
+        for u in units:
+            if n_h >= _ORE_IDLE_ORDERS:
                 break
+            if not _is_harv_type(getattr(u, "type", "")):
+                continue
             idle = bool(getattr(u, "is_idle", False))
             local = _harv_local_ore(u, arr)
-            try:
-                uxy = _xy(u)
-            except (TypeError, ValueError):
-                continue
-            idx = _nearest_patch_idx(uxy, patches)
             stale = False
-            if (not idle) and patches and local > 0.0:
-                best_den = max(p[2] for p in patches)
-                stale = best_den > 0.0 and local < _ORE_STALE_FRAC * best_den
-            if not idle and not stale:
+            if (not idle) and home is not None and local > 0.0:
+                _bx, _by, bden = home
+                stale = bden > 0.0 and local < _ORE_STALE_FRAC * bden
+            if idle:
+                out.append(CommandModel(
+                    action=ActionType.HARVEST, actor_id=int(u.actor_id)))
+                n_h += 1
                 continue
-            if not idle and not patches:
-                home = _best_ore_near(arr, origin)
-                if home is None:
-                    continue
-                bx, by, bden = home
-                if not (bden > 0.0 and local < _ORE_STALE_FRAC * bden):
-                    continue
+            if stale:
+                bx, by, _ = home
                 out.append(CommandModel(
                     action=ActionType.HARVEST, actor_id=int(u.actor_id),
                     target_x=int(bx), target_y=int(by)))
                 n_h += 1
                 continue
-            if not patches:
-                if idle:
-                    out.append(CommandModel(
-                        action=ActionType.HARVEST, actor_id=int(u.actor_id)))
-                    n_h += 1
-                continue
-            stay = (
-                idx is not None
-                and counts[idx] < min(counts) + 2
-                and not stale
-            )
-            if stay:
-                px, py, _den = patches[idx]
-                new_i = idx
-            else:
-                _patch, new_i = _pick_understaffed_patch(uxy, patches, counts)
-                px, py, _den = _patch
-                if idx is not None:
-                    counts[idx] = max(0, counts[idx] - 1)
-                counts[new_i] += 1
-            out.append(CommandModel(
-                action=ActionType.HARVEST, actor_id=int(u.actor_id),
-                target_x=int(px), target_y=int(py)))
-            n_h += 1
 
     # 0b) Auto-proc + auto-harv + auto-tent — push eco then the first barracks.
     #     Missing proc: BUILD if it is in available_production (do not deadlock
     #     BUILD/PLACE of proc — those stay unmasked even when we cannot build yet).
-    #     Proc ready in the queue: PLACE near the conyard. Has proc but no harvester:
-    #     TRAIN harv if the war factory lists it. Has proc, no tent/barr: BUILD/PLACE
+    #     Proc ready in the queue: PLACE near the conyard. Has proc, <2 harvs:
+    #     TRAIN harv (easy nace con 2). Has proc, no tent/barr: BUILD/PLACE
     #     the faction barracks (visor 985: sin cuartel, TRAIN sbag, lose 10k).
     avail = set(getattr(obs, "available_production", []) or [])
     prod = list(getattr(obs, "production", []) or [])
@@ -683,8 +584,8 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
             out.append(CommandModel(action=ActionType.BUILD, item_type="proc"))
     else:
         has_harv = _has_harvester(obs, eco, units, prod)
-        harv_queued = any("harv" in str(getattr(p, "item", "")).lower() for p in prod)
-        if (not has_harv) and (not harv_queued) and "harv" in avail:
+        n_harv = _n_harvesters(units, prod)
+        if n_harv < MIN_HARVESTERS and "harv" in avail and cash >= HARV_COST:
             out.append(CommandModel(action=ActionType.TRAIN, item_type="harv"))
         # Auto-tent: primer cuartel, después de proc. tent (allies) o barr.
         has_barracks = any(

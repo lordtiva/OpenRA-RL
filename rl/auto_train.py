@@ -69,8 +69,8 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 2c-B + peel + harvest spread (parche casa, no yank). Resume 1046
-# (Run 30 peel 1047-1060). C revertido. No C, no 128, no hard.
+# Capa 2c-B + peel. Harvest spread revertido. 2do harv + 2 idle untargeted.
+# Resume 1046 (Run 31 spread fail). No C, no 128, no hard, no celdas de ore.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",

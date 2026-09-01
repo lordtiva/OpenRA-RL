@@ -62,6 +62,8 @@
 > **Corte 1099 (Run 29 nudge yank → peel local):** 53 iters (1047–1099), **27/212 (12.7%)**. Smoke 22.5% wr20 0.25–0.35, luego 10% → 1.9%. `best` sigue **1046**. El nudge sí dispara (42–142 `army_attack_move` de soporte/partida) pero a la puerta (`[16,21]`…). Visor 1099 incomplete: centroide 8→69→13→71→8. Causa: `ARMY_ATTACK_MOVE` de grupo en cada raid. Archivo: `rl/ckpts/Run 29 (a_short war-nudge-yank 1047-1099)/`. Resume **1046**. Raid → `attack_move` solo idle en casa (máx 6). Push → `army_attack_move` al más lejano / prod visible. Sin beacon. No C, no QSA, no scout todavía, no hard.
 >
 > **Corte 1060 (Run 30 peel → harvest spread):** 14 iters (1047–1060), **6/56 (10.7%)**, wr20 0.15. Peel OK: tape `am` 255 vs `army` 51 (ya no yank de grupo). Wins a x=75–91. `best` **1046**. ownH **903 vs easy 2443**. 2 harvs en el mismo pozo (`[15,17]`/`[10,20]`). Archivo: `rl/ckpts/Run 30 (a_short war-nudge-peel 1047-1060)/`. Resume **1046**. Harvest: parche explorado a ≤26 de la proc con menos camiones; idle/migajas CON celda. No Ch2 global. Peel se queda. No C, no scout, no hard.
+>
+> **Corte 1065 (Run 31 harvest-spread falló → 2do harv, sin celdas):** 19 iters (1047–1065), **4/76 (5.3%)**, wr20 last 0.05, ownH media 778. Celda forzada interrumpe el ciclo nativo. Archivo: `rl/ckpts/Run 31 (a_short harvest-spread 1047-1065)/`. Resume **1046**. Idle **sin celda**. Extra vs Run 30: `MIN_HARVESTERS=2` y hasta **2 idle** untargeted/bloque. Peel se queda. No spread con celda, no C, no scout, no hard.
 
 ---
 
