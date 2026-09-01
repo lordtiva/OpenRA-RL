@@ -60,6 +60,8 @@
 > **Corte 1120 (Run 28 restore-B plateau → war nudge):** 100 iters (1021–1120), **40/392 (10.2%)**. Pico **1046** wr20 0.35 `lwww` def −0.98; 1096 otro `lwww` que no pega. Últimas 18: **1/72**, wr20=0 ×10, def −3.6. H sana, no NaN, no harvest-yank. Visor 1046: raid con `last_push` en el NE; mill con 146 rifles en casa. Archivo: `rl/ckpts/Run 28 (a_short capa2c-B restore 1021-1120)/`. Resume **1046**. **Nudge:** raid → `army_attack_move` a esa celda; ≥12 idle en casa + edificio/unidad visible → al más cercano de nuestra fact. **Sin beacon** (spawn ≠ base viva). Sin crédito, pack, hunt, rally. `SUPPORT_ASSAULT` sigue False. No C, no 128, no QSA, no 25 ticks, no hard.
 >
 > **Corte 1099 (Run 29 nudge yank → peel local):** 53 iters (1047–1099), **27/212 (12.7%)**. Smoke 22.5% wr20 0.25–0.35, luego 10% → 1.9%. `best` sigue **1046**. El nudge sí dispara (42–142 `army_attack_move` de soporte/partida) pero a la puerta (`[16,21]`…). Visor 1099 incomplete: centroide 8→69→13→71→8. Causa: `ARMY_ATTACK_MOVE` de grupo en cada raid. Archivo: `rl/ckpts/Run 29 (a_short war-nudge-yank 1047-1099)/`. Resume **1046**. Raid → `attack_move` solo idle en casa (máx 6). Push → `army_attack_move` al más lejano / prod visible. Sin beacon. No C, no QSA, no scout todavía, no hard.
+>
+> **Corte 1060 (Run 30 peel → harvest spread):** 14 iters (1047–1060), **6/56 (10.7%)**, wr20 0.15. Peel OK: tape `am` 255 vs `army` 51 (ya no yank de grupo). Wins a x=75–91. `best` **1046**. ownH **903 vs easy 2443**. 2 harvs en el mismo pozo (`[15,17]`/`[10,20]`). Archivo: `rl/ckpts/Run 30 (a_short war-nudge-peel 1047-1060)/`. Resume **1046**. Harvest: parche explorado a ≤26 de la proc con menos camiones; idle/migajas CON celda. No Ch2 global. Peel se queda. No C, no scout, no hard.
 
 ---
 

@@ -17,7 +17,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CKPT = ROOT / "rl" / "ckpts"
-DEFAULT_NAME = "Run 30 (a_short war-nudge-peel 1047-xxxx)"
+DEFAULT_NAME = "Run 31 (a_short harvest-spread 1047-xxxx)"
 
 KEEP_ROOT = {"best.pt", "best.json", "latest.pt"}
 

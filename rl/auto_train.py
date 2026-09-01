@@ -69,8 +69,8 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 2c-B + war nudge v2 (raid peel local, push farthest/prod, sin beacon).
-# Resume 1046 (Run 29 yank 1047-1099). C revertido. No C, no 128, no hard.
+# Capa 2c-B + peel + harvest spread (parche casa, no yank). Resume 1046
+# (Run 30 peel 1047-1060). C revertido. No C, no 128, no hard.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",

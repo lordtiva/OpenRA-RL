@@ -12,10 +12,9 @@ Diseño:
 - Flag --auto-support (default False en Run2, True en Run3/v4). Sin flag, 0 impacto.
 - Reparación: si cash>500 y edificio hp<35% y no está ya reparándose, emite 1
   repair por bloque (máx 2 para no spamear). Es el umbral del hard.
-- Cosecha: 1 harvest/bloque si harv idle (sin celda: el engine va al ore
-  más cercano). Retarget con celda SOLO si está minando migajas junto a
-  casa: el argmax global mandaba las harv al mineral enemigo (live 1000–1019
-  ownH ~450 vs ~1100).
+- Cosecha: idle/migajas → Harvest CON celda al parche de CASA con menos
+  camiones (radio 26 de la proc, no el argmax del mapa). Untargeted iba
+  siempre al mismo yacimiento; el easy reparte. Sin Ch2 global (Run 24).
 - Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
 - Asalto FULL / hunt / recall / rally-al-beacon / crédito de dest: APAGADOS
   (corte 950). Era estrategia spawn-asimétrica (siempre (95,11)).
@@ -426,9 +425,14 @@ def _push_cell(obs, last_push):
     return None
 
 
-# Migajas junto a casa (no el argmax del mapa: idle en proc tiene Ch2=0).
+# Casa, no el mapa: idle untargeted = todas al mismo pozo (visor 2+ en
+# [15,17]; easy cosecha 2.7×). Run 24 argmax global = yank al enemigo.
 _ORE_STALE_FRAC = 0.35
 _ORE_HOME_RADIUS = 12
+_ORE_ASSIGN_RADIUS = 26
+_ORE_PATCH_SEP = 8
+_ORE_MIN_DENSITY = 0.25
+_ORE_HARVEST_ORDERS = 2
 
 
 def _spatial_chw(obs):
@@ -489,6 +493,71 @@ def _harv_local_ore(u, arr) -> float:
     return float(arr[2, y, x])
 
 
+def _ore_patches(arr, origin, radius: int = _ORE_ASSIGN_RADIUS,
+                 sep: int = _ORE_PATCH_SEP):
+    """Yacimientos explorados cerca de la proc. Nunca el argmax global."""
+    import numpy as np
+    if arr is None or origin is None or arr.shape[0] < 5:
+        return []
+    ox, oy = int(origin[0]), int(origin[1])
+    ch2, ch3, ch4 = arr[2], arr[3], arr[4]
+    h, w = ch2.shape
+    yy, xx = np.ogrid[:h, :w]
+    near = (np.abs(xx - ox) + np.abs(yy - oy)) <= int(radius)
+    mask = near & (ch4 >= 0.45) & (ch3 > 0.5) & (ch2 >= _ORE_MIN_DENSITY)
+    if arr.shape[0] >= 9:
+        mask = mask & ((arr[7] + arr[8]) < 0.15)
+    if not bool(mask.any()):
+        return []
+    vals = np.where(mask, ch2, 0.0)
+    taken = np.zeros((h, w), dtype=bool)
+    patches = []
+    rsep = int(sep)
+    for _ in range(6):
+        work = np.where(taken, -1.0, vals)
+        peak = float(work.max())
+        if peak < _ORE_MIN_DENSITY:
+            break
+        y, x = [int(i) for i in np.unravel_index(int(work.argmax()), work.shape)]
+        patches.append((int(x), int(y), peak))
+        taken |= (np.abs(xx - x) + np.abs(yy - y)) <= rsep
+    return patches
+
+
+def _nearest_patch_idx(xy, patches, sep: int = _ORE_PATCH_SEP):
+    if not patches or xy is None:
+        return None
+    best_i, best_d = None, None
+    try:
+        hx, hy = int(xy[0]), int(xy[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    for i, (px, py, _den) in enumerate(patches):
+        d = abs(hx - px) + abs(hy - py)
+        if best_i is None or d < best_d:
+            best_i, best_d = i, d
+    if best_i is not None and best_d <= int(sep):
+        return best_i
+    return None
+
+
+def _pick_understaffed_patch(xy, patches, counts):
+    """Parche con menos harvs; empate = más denso, luego más cerca."""
+    try:
+        hx, hy = int(xy[0]), int(xy[1])
+    except (TypeError, ValueError, IndexError):
+        hx, hy = 0, 0
+    best_i = min(
+        range(len(patches)),
+        key=lambda i: (
+            int(counts[i]),
+            -float(patches[i][2]),
+            abs(int(patches[i][0]) - hx) + abs(int(patches[i][1]) - hy),
+        ),
+    )
+    return patches[best_i], best_i
+
+
 def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
 
     """Lista de CommandModel de soporte para esta observación.
@@ -513,33 +582,80 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
                     action=ActionType.DEPLOY, actor_id=int(u.actor_id)))
                 break
 
-    # 0) Auto-harvest. Idle → sin celda (ore más cercano). Retarget con
-    #    celda solo si está minando migajas (local>0 y << mejor parche
-    #    en radio de la proc). Idle en la fact tiene Ch2=0: no es migaja.
+    # 0) Auto-harvest. Idle/migajas → celda del parche de casa con menos
+    #    harvs. Untargeted (engine nearest) amontonaba 2+ en un pozo.
+    #    Sin parches explorados: idle sin celda (no yank al mapa).
     has_proc = any(getattr(b, "type", "") == "proc" for b in blds)
     if has_proc:
         arr = _spatial_chw(obs)
-        home = _best_ore_near(arr, _proc_xy(blds))
-        for u in units:
-            ut = str(getattr(u, "type", "")).lower()
-            if "harv" not in ut:
+        origin = _proc_xy(blds)
+        patches = _ore_patches(arr, origin)
+        harvs = [
+            u for u in units
+            if "harv" in str(getattr(u, "type", "")).lower()
+        ]
+        counts = [0] * len(patches)
+        for hv in harvs:
+            try:
+                hxy = _xy(hv)
+            except (TypeError, ValueError):
                 continue
+            pi = _nearest_patch_idx(hxy, patches)
+            if pi is not None:
+                counts[pi] += 1
+        n_h = 0
+        for u in harvs:
+            if n_h >= _ORE_HARVEST_ORDERS:
+                break
             idle = bool(getattr(u, "is_idle", False))
             local = _harv_local_ore(u, arr)
+            try:
+                uxy = _xy(u)
+            except (TypeError, ValueError):
+                continue
+            idx = _nearest_patch_idx(uxy, patches)
             stale = False
-            if (not idle) and home is not None and local > 0.0:
-                _bx, _by, bden = home
-                stale = bden > 0.0 and local < _ORE_STALE_FRAC * bden
-            if idle:
-                out.append(CommandModel(
-                    action=ActionType.HARVEST, actor_id=int(u.actor_id)))
-                break
-            if stale:
-                bx, by, _ = home
+            if (not idle) and patches and local > 0.0:
+                best_den = max(p[2] for p in patches)
+                stale = best_den > 0.0 and local < _ORE_STALE_FRAC * best_den
+            if not idle and not stale:
+                continue
+            if not idle and not patches:
+                home = _best_ore_near(arr, origin)
+                if home is None:
+                    continue
+                bx, by, bden = home
+                if not (bden > 0.0 and local < _ORE_STALE_FRAC * bden):
+                    continue
                 out.append(CommandModel(
                     action=ActionType.HARVEST, actor_id=int(u.actor_id),
                     target_x=int(bx), target_y=int(by)))
-                break
+                n_h += 1
+                continue
+            if not patches:
+                if idle:
+                    out.append(CommandModel(
+                        action=ActionType.HARVEST, actor_id=int(u.actor_id)))
+                    n_h += 1
+                continue
+            stay = (
+                idx is not None
+                and counts[idx] < min(counts) + 2
+                and not stale
+            )
+            if stay:
+                px, py, _den = patches[idx]
+                new_i = idx
+            else:
+                _patch, new_i = _pick_understaffed_patch(uxy, patches, counts)
+                px, py, _den = _patch
+                if idx is not None:
+                    counts[idx] = max(0, counts[idx] - 1)
+                counts[new_i] += 1
+            out.append(CommandModel(
+                action=ActionType.HARVEST, actor_id=int(u.actor_id),
+                target_x=int(px), target_y=int(py)))
+            n_h += 1
 
     # 0b) Auto-proc + auto-harv + auto-tent — push eco then the first barracks.
     #     Missing proc: BUILD if it is in available_production (do not deadlock

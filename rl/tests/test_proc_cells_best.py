@@ -256,16 +256,16 @@ act_tent_p, _ = index_to_command_effective(
 check("PLACE sampled barracks sigue poniendo tent",
       act_tent_p.commands[0].item_type == "tent")
 
-# Harvest: idle nunca apunta al argmax del mapa (Ch2=0 en la proc).
-# Migajas junto a casa sí retargetean al parche rico CERCANO, no al lejano.
+# Harvest: parches de CASA (radio 26), no argmax del mapa (Run 24 yank).
 import base64 as _b64
 _h, _w = 32, 32
 _sp = np.zeros((_h, _w, 9), dtype=np.float32)
 _sp[:, :, 3] = 1.0
 _sp[:, :, 4] = 1.0
 _sp[16, 10, 2] = 0.2   # migajas junto a proc (12,16)
-_sp[16, 14, 2] = 5.0   # parche rico de casa
-_sp[16, 28, 2] = 12.0  # más rico lejos (no ir)
+_sp[16, 14, 2] = 5.0   # parche A casa
+_sp[28, 4, 2] = 4.0    # parche B casa (sur)
+_sp[1, 31, 2] = 12.0   # más rico lejos (fuera de radio 26: no ir)
 _b64map = _b64.b64encode(_sp.tobytes()).decode("ascii")
 obs_ore = _obs(
     harv=1, bldgs=("fact", "proc"), w=_w, h=_h,
@@ -275,9 +275,10 @@ obs_ore = _obs(
 )
 cmds_ore = support_commands(obs_ore)
 harv_cmds = [c for c in cmds_ore if c.action.value == "harvest"]
-check("harv en migajas de casa va al parche cercano, no al lejano",
-      len(harv_cmds) == 1 and harv_cmds[0].target_x == 14
-      and harv_cmds[0].target_y == 16)
+check("migajas: al parche de casa con menos harvs, no al lejano",
+      len(harv_cmds) == 1
+      and (int(harv_cmds[0].target_x), int(harv_cmds[0].target_y)) == (4, 28)
+      and (int(harv_cmds[0].target_x), int(harv_cmds[0].target_y)) != (31, 1))
 obs_idle_far = _obs(
     harv=1, bldgs=("fact", "proc"), w=_w, h=_h,
     units=[_u(9, "harv", 12, 16, idle=True)],
@@ -285,15 +286,28 @@ obs_idle_far = _obs(
 )
 cmds_if = support_commands(obs_idle_far)
 ih = [c for c in cmds_if if c.action.value == "harvest"]
-check("harv idle en proc no apunta al ore lejano",
-      len(ih) == 1 and int(ih[0].target_x or 0) == 0
-      and int(ih[0].target_y or 0) == 0)
+check("harv idle en proc cosecha parche de casa, no el lejano",
+      len(ih) == 1 and int(ih[0].target_x) == 14 and int(ih[0].target_y) == 16)
 obs_idle_h = _obs(
     harv=1, bldgs=("fact", "proc"),
     units=[_u(9, "harv", 14, 16, idle=True)])
 cmds_ih = support_commands(obs_idle_h)
-check("harv idle sin spatial sigue harvest",
-      any(c.action.value == "harvest" for c in cmds_ih))
+check("harv idle sin spatial sigue harvest untargeted",
+      any(c.action.value == "harvest" and int(c.target_x or 0) == 0
+          for c in cmds_ih))
+obs_spread = _obs(
+    harv=2, bldgs=("fact", "proc"), w=_w, h=_h,
+    units=[_u(9, "harv", 12, 16, idle=True),
+           _u(10, "harv", 13, 16, idle=True)],
+    spatial_map=_b64map,
+)
+cmds_sp = support_commands(obs_spread)
+hsp = [(int(c.target_x), int(c.target_y), int(c.actor_id))
+       for c in cmds_sp if c.action.value == "harvest"]
+cells_sp = {(x, y) for x, y, _aid in hsp}
+check("2 idle: se reparte entre parches de casa",
+      len(hsp) == 2 and cells_sp == {(14, 16), (4, 28)}
+      and (31, 1) not in cells_sp)
 
 cmds_push = support_commands(_obs(bldgs=("fact",), units=[_u(1, "e1", 12, 16)]), last_push=(90, 12))
 check("support no keep-alive attack sin proc",
