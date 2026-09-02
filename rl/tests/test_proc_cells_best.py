@@ -15,10 +15,12 @@ import numpy as np
 
 from rl.action_adapter import (
     ActionIndex,
+    PACK_ARMY,
     Vocab,
     apply_passability,
     economy_ready_for_combat,
     index_to_command_effective,
+    n_combat_near_own_base,
     owns_proc,
     remap_move_cell,
 )
@@ -147,8 +149,9 @@ obs2 = _obs(harv=1, bldgs=("fact", "proc", "barr"), avail=("e1", "harv", "proc")
 check("proc+harv listo para combate", economy_ready_for_combat(obs2) is True)
 aidx2 = ActionIndex(obs2, Vocab())
 check("TRAIN legal con proc+harv", bool(aidx2.type_mask[TYPE_TO_IDX["train"]]) is True)
-check("con proc army_attack_move on", bool(aidx2.type_mask[TYPE_TO_IDX["army_attack_move"]]) is True)
-check("con proc attack_move on", bool(aidx2.type_mask[TYPE_TO_IDX["attack_move"]]) is True)
+check("con proc sin pack: army_attack_move off",
+      bool(aidx2.type_mask[TYPE_TO_IDX["army_attack_move"]]) is False)
+check("con proc attack_move on (peel)", bool(aidx2.type_mask[TYPE_TO_IDX["attack_move"]]) is True)
 slot = aidx2.train_items.index("infantry_basic")
 check("slot infantry_basic on", bool(aidx2.train_slot_mask[slot]) is True)
 
@@ -341,7 +344,41 @@ check("support keep-alive NO drip 1 rifle CON proc",
 army4 = [_u(i, "e1", 12 + i, 16) for i in range(1, 5)] + [_u(9, "harv", 14, 16)]
 army12 = [_u(i, "e1", 12 + (i % 4), 16 + (i // 4)) for i in range(1, 13)] + [
     _u(9, "harv", 14, 16)]
-check("pack size", MIN_ARMY_FOR_ASSAULT == 12 and STAGING_STEPS == 10)
+check("pack size", MIN_ARMY_FOR_ASSAULT == PACK_ARMY == 12 and STAGING_STEPS == 10)
+check("4 e1 en casa no son pack", n_combat_near_own_base(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4)) == 4)
+check("12 e1 en casa son pack", n_combat_near_own_base(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army12)) == 12)
+aidx_drip = ActionIndex(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4), Vocab())
+check("mask: 4 en casa tapo army_attack_move",
+      bool(aidx_drip.type_mask[TYPE_TO_IDX["army_attack_move"]]) is False)
+act_drip, _ = index_to_command_effective(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4),
+    TYPE_TO_IDX["army_attack_move"], 0, 0, 0, aidx_drip)
+check("adapter: army_attack_move con 4 e1 -> no_op",
+      act_drip.commands[0].action.value == "no_op")
+act_peel4, _ = index_to_command_effective(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army4),
+    TYPE_TO_IDX["attack_move"], 0, 16 * 128 + 14, 0, aidx_drip)
+check("adapter: attack_move per-unit sigue con 4 (peel)",
+      act_peel4.commands[0].action.value == "attack_move")
+obs_pack = _obs(harv=1, bldgs=("fact", "proc"), units=army12)
+aidx_pack = ActionIndex(obs_pack, Vocab())
+check("mask: 12 en casa army_attack_move legal",
+      bool(aidx_pack.type_mask[TYPE_TO_IDX["army_attack_move"]]) is True)
+act_pack, _ = index_to_command_effective(
+    obs_pack, TYPE_TO_IDX["army_attack_move"], 0, 16 * 128 + 90, 0, aidx_pack)
+check("adapter: army_attack_move con pack 12 se emite",
+      act_pack.commands[0].action.value == "army_attack_move")
+field12 = [_u(i, "e1", 80 + (i % 4), 12 + (i // 4)) for i in range(1, 13)] + [
+    _u(99, "harv", 14, 16)]
+obs_field = _obs(harv=1, bldgs=("fact", "proc"), units=field12)
+check("12 en el campo, 0 en casa: no son pack",
+      n_combat_near_own_base(obs_field) == 0)
+check("mask: pack en el campo tapo army_attack_move",
+      bool(ActionIndex(obs_field, Vocab()).type_mask[TYPE_TO_IDX["army_attack_move"]])
+      is False)
 check("SUPPORT_ASSAULT off (no pack/hunt/rally/crédito)", SUPPORT_ASSAULT is False)
 check("SUPPORT_WAR_NUDGE on (raid + contacto visible)", SUPPORT_WAR_NUDGE is True)
 check("SUPPORT_REMNANT off (Run 34 wr 33→17)", SUPPORT_REMNANT is False)

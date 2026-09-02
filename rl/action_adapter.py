@@ -114,6 +114,13 @@ MOVE_CELL_TYPES = {"move", "attack_move", "attack", "army_attack_move"}
 # Combat movement: masked until a refinery stands. Otherwise PPO
 # reward-hacks army_attack_move / attack_move (the 201-309 collapse).
 COMBAT_MOVE_TYPES = ("army_attack_move", "attack_move", "attack")
+# Group push: policy army_attack_move is legal only with a pack AT HOME.
+# Support already waits for 12 idle in the yard (Run 16 drip-4). The
+# network could still click army_attack_move with 4 e1 → wipe → counter.
+# attack_move per-unit stays on (raid peel). Same radius as auto_support.
+PACK_ARMY = 12
+PACK_HOME_RADIUS = 18
+_NON_COMBAT_TAGS = ("harv", "mcv")
 
 
 def owns_proc(obs) -> bool:
@@ -138,6 +145,35 @@ def economy_ready_for_combat(obs) -> bool:
         if "harv" in str(getattr(p, "item", "")).lower():
             return True
     return False
+
+
+def _is_combat_unit(u) -> bool:
+    ut = str(getattr(u, "type", "") or "").lower()
+    return not any(tag in ut for tag in _NON_COMBAT_TAGS)
+
+
+def n_combat_near_own_base(obs, radius: int = PACK_HOME_RADIUS) -> int:
+    """Combat units within radius of an own building (yard, not the field)."""
+    r2 = int(radius) * int(radius)
+    blds = list(getattr(obs, "buildings", None) or [])
+    n = 0
+    for u in getattr(obs, "units", None) or []:
+        if not _is_combat_unit(u):
+            continue
+        try:
+            ux, uy = int(u.cell_x), int(u.cell_y)
+        except (TypeError, ValueError):
+            continue
+        for b in blds:
+            try:
+                dx = ux - int(b.cell_x)
+                dy = uy - int(b.cell_y)
+            except (TypeError, ValueError):
+                continue
+            if dx * dx + dy * dy <= r2:
+                n += 1
+                break
+    return n
 
 
 def apply_passability(aidx, pass_hw) -> None:
@@ -356,6 +392,10 @@ class ActionIndex:
             if not bool(self.train_slot_mask.any()):
                 m[TYPE_TO_IDX["train"]] = False
                 self.type_mask = torch.from_numpy(m)
+        # Pack-12: group push only with a real army in the yard (Run 16 drip).
+        if n_combat_near_own_base(obs) < PACK_ARMY:
+            m[TYPE_TO_IDX["army_attack_move"]] = False
+        self.type_mask = torch.from_numpy(m)
 
 
 def index_to_command(obs, chosen_type: int, unit_slot: int, cell_flat: int,
@@ -447,6 +487,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         t_name = "attack_move"
 
     if t_name in COMBAT_MOVE_TYPES and not owns_proc(obs):
+        t_name = "no_op"
+    if t_name == "army_attack_move" and n_combat_near_own_base(obs) < PACK_ARMY:
         t_name = "no_op"
 
     # Recolectora no combate: move/attack_move/attack sobre harv es harvest.

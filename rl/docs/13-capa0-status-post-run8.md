@@ -72,6 +72,8 @@
 > **Corte 1150 (Run 33 drought-sil-wins → remate leftovers):** 69 iters (1082–1150), **91/276 (33%)**, incomplete 23%, wr20 0.25–0.50. Pico **1141** `wwww` iwr 1.0 wr20 0.50, wins 17–30k, ownH 1711. Sequía+SIL-wins cobró (Run 32 era 16% y se moría). Techo: `train` ~47%, leftover al este → timeout 53k. Archivo: `rl/ckpts/Run 33 (a_short drought-sil-wins 1082-1150)/`. Resume **1141**. **Remate:** idle de campo (≥4, no en casa) → `attack_move` al leftover visible (prod/lejos) o sweep de grupo alrededor del centroide (`y≤32`). Per-unit, no `army_attack_move`. Raid/peel/pack-12 se quedan. No assault-full, no scatter, no crédito, no PLACE/`role_of`, no SIL sampling.
 >
 > **Corte 1171 (Run 34 remate falló → SIL even-pick wins cortos):** 30 iters (1142–1171), **21/120 (17.5%)**, lose 64%, incomplete 18%. Arranque 1142–1146 45% y 1143 `wwww`; luego lose 75%, ownB 0, KL 0.46. Sequía restauró 1143@1155; post-restore siguió ~10–25% (remate sigue en el env). Visor: `n_support_am` 300–1815/win; dests agua (`y=35–44`) y beacon `(95,11)` vía `remap_move_cell`. Incomplete → lose, no win. Archivo: `rl/ckpts/Run 34 (a_short remate-sweep 1142-1171)/`. **Revert remate.** Resume **1141** (Run 33, no 1143). **SIL:** even-pick por episodio de win, no la cola del ring; prefiere `ticks<40k`. Mismo λ_sil=0.5, solo wins. No remate-v2, no assault-full, no 3er harv, no PLACE/`role_of`.
+>
+> **Corte 1173 (Run 35 SIL even-pick no levantó piso → pack-12 en la política):** 32 iters (1142–1173), wr ~22%, lose **65%** en el smoke (bar era ≤45%). 1142 `wwww` (el 1141); 1152–1156 0/20 ownB=0. wr20 1.0→0. Hold post-smoke incomplete 32%, `army` 3.6%→1.6%. SIL even-pick se queda (20/27 wins <40k); no era el wipe. Causa: la red manda `army_attack_move` con 4–8 e1, easy los come, contraataca. El support ya espera 12; el adapter no. Archivo: `rl/ckpts/Run 35 (a_short sil-even-short 1142-1173)/`. Resume **1141**. **Pack-12 política:** máscara + adapter `army_attack_move`→`no_op` si <12 combate **en casa**. `attack_move` per-unit sigue (peel). SIL even-pick se queda. No remate, no peel-campo todavía, no C.
 
 ---
 
@@ -388,7 +390,7 @@ Preset vivo: `eradicate_v4`. **No** hay `eradicate_v4b`: el dict existía, nunca
 
 **No mezclar** con sequía/SIL-wins ni con remate: w_timeout/γ, spread, C, QSA, hard, 25 t, assault-full, PLACE/`role_of`, remate-v2.
 
-Orden: smoke 1082–1101 sano → hold 1082–1150 (33% wr, pico 1141) → remate Run 34 **falló** (17.5%, agua/beacon) → **SIL even-pick wins <40k** este corte (resume 1141, remate off). Higiene PPO 1.4+1.3 y peel de raid desde el campo = cortes aparte.
+Orden: smoke 1082–1101 sano → hold 1082–1150 (33% wr, pico 1141) → remate Run 34 **falló** → SIL even-pick Run 35 **no levantó piso** (lose 65%, drip) → **pack-12 en la política** este corte (resume 1141). Peel de campo y PLACE/`role_of` = cortes aparte.
 
 ---
 
@@ -404,4 +406,4 @@ Ckpts del Run 8: `rl/ckpts/Run 8 (a_short collapse no_op 220-408)/`. Resume vivo
 
 ---
 
-*Guardado: 2026-09-02 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`. Resume 1141. Remate off. SIL even-pick wins <40k. `eradicate_v4b` borrado.*
+*Guardado: 2026-09-02 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`. Resume 1141. Pack-12 política. SIL even-pick <40k. Remate off.*

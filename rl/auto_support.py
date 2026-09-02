@@ -36,7 +36,7 @@ No genera reward — evita defense_loss/hold_zero ya existentes.
 """
 
 from openra_env.models import ActionType, CommandModel
-from rl.action_adapter import nearest_passable, remap_move_cell
+from rl.action_adapter import PACK_ARMY, nearest_passable, remap_move_cell
 from rl.obs_encoding import decode_spatial, resolve_beacon
 
 # Tipos que el hard apaga cuando hay brownout (ai.yaml PowerDownBotModule)
@@ -61,7 +61,7 @@ _PROD_BUILDINGS = frozenset({
 # combat-without-eco; this gate is the army half of that lesson).
 # Visor 6am 947: 4 idle → army_attack_move + rally-to-beacon = oleada de 4
 # que muere en x≈45 (nd≥4≈0, incomplete 81%). Pack at HOME, not total nc.
-MIN_ARMY_FOR_ASSAULT = 12
+MIN_ARMY_FOR_ASSAULT = PACK_ARMY
 # Already piled on the enemy half: 4 is enough to hunt leftover buildings.
 MIN_PILE_FOR_HUNT = 4
 # Rally staging: toward dest from the conyard, not the beacon, until the pack

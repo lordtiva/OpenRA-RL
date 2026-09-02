@@ -167,6 +167,7 @@ async def amain(args):
           f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M")
     print("Capa 2c-B: 96 own + 32 ene, role+team (resume 1141; remate off)")
     print("Nudge: raid=attack_move idle casa; push=farthest/prod. Sin beacon/crédito.")
+    print("Pack-12: army_attack_move de la red solo con >=12 combate en casa.")
     print("PLACE: colas Building+Defense. Harvest: idle sin celda (hasta 2). TRAIN 2do harv.")
     print("SIL: solo wins, even-pick por win, prefiere <40k ticks. Sequía wr20 restaura best.")
     print("Overlap: collect k+1 (infer_net) || update k (thread)")
