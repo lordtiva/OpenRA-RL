@@ -24,10 +24,8 @@ Diseño:
   casa (no army_attack_move: visor 1099 ping-pong x=8↔70). Push: ≥12 idle
   en casa + contacto visible → army_attack_move al más lejano / prod, no
   al tent de la puerta. Sin beacon, sin crédito de dest.
-- Remate leftovers (SUPPORT_REMNANT): masa idle YA en el campo (no en
-  casa). Visible → attack_move de esos idle al prod/lejos. Sin visible →
-  barrido de grupo al siguiente waypoint de tierra (y≤32) alrededor del
-  centroide. Per-unit, no army_attack_move (no yank a casa). No scatter.
+- Remate leftovers (SUPPORT_REMNANT): APAGADO (Run 34). Sweep remap a
+  agua/beacon, AM cada idle/bloque, wr 33%→17%. No reabrir en este corte.
 - Stance AttackAnything al nacer (Capa 0): Defend no caza; el scripted sí.
   Solo combate (no harv/mcv). Micro, no “andá al NE”.
 - Auto-tent (Capa 0, corte 987): con proc en pie y sin tent/barr, BUILD/PLACE
@@ -50,9 +48,8 @@ SUPPORT_ASSAULT = False
 # Cheap war nudge vs easy. Visible contact only — never beacon.
 # Independent of SUPPORT_ASSAULT (that flag stays False).
 SUPPORT_WAR_NUDGE = True
-# Leftover sweep+commit. Independent of SUPPORT_ASSAULT (stays False).
-# Field idle only — never army_attack_move (that yanks home, visor 1099).
-SUPPORT_REMNANT = True
+# Leftover sweep+commit. Off: Run 34 wr 33%→17% (agua/beacon + AM spam).
+SUPPORT_REMNANT = False
 # Raid peel: per-unit AttackMove, not group army_attack_move (Run 29 yank).
 RAID_HOME_ORDERS = 6
 # Production buildings beat a forward powr/scout when choosing the push dest.
@@ -231,76 +228,6 @@ def war_nudge_cell(obs):
     if contacts:
         return _farthest_xy(contacts, origin), False
     return None, False
-
-
-def _centroid_xy(units):
-    xs, ys = [], []
-    for u in units or []:
-        try:
-            x, y = _xy(u)
-        except (TypeError, ValueError):
-            continue
-        xs.append(int(x))
-        ys.append(int(y))
-    if not xs:
-        return None
-    return int(sum(xs) / len(xs)), int(sum(ys) / len(ys))
-
-
-def _idle_field_combat(obs, combat):
-    """Idle combat NOT next to our buildings. Remate never yanks home."""
-    out = []
-    for u in combat or []:
-        try:
-            if bool(getattr(u, "is_idle", False)) and not _near_own_base(obs, _xy(u)):
-                out.append(u)
-        except (TypeError, ValueError):
-            continue
-    return out
-
-
-def remate_sweep_cell(obs, field_units, aidx=None):
-    """Next land waypoint around the field centroid. Skip home / water.
-
-    Rotates HUNT_OFFSETS; if that dest is near our base, try the next offset
-    so a mid-bridge pile does not march home. y clamped by _snap_passable.
-    """
-    origin = _centroid_xy(field_units)
-    if origin is None:
-        return None
-    tick = int(getattr(obs, "tick", 0) or 0)
-    n = len(HUNT_OFFSETS)
-    start = (tick // HUNT_PERIOD_TICKS) % n
-    for i in range(n):
-        dx, dy = HUNT_OFFSETS[(start + i) % n]
-        raw = (int(origin[0]) + int(dx), int(origin[1]) + int(dy))
-        dest = _snap_passable(obs, raw, aidx)
-        if dest is None:
-            continue
-        if _near_own_base(obs, dest):
-            continue
-        return dest
-    return None
-
-
-def _attack_move_idle(out, units, dest) -> int:
-    """Per-unit AttackMove. Same cell = group sweep without army_attack_move."""
-    n = 0
-    if dest is None:
-        return 0
-    for u in units or []:
-        try:
-            aid = int(getattr(u, "actor_id", 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        if aid <= 0:
-            continue
-        out.append(CommandModel(
-            action=ActionType.ATTACK_MOVE,
-            actor_id=aid,
-            target_x=int(dest[0]), target_y=int(dest[1])))
-        n += 1
-    return n
 
 
 def _cmd_name(cmd) -> str:
@@ -724,17 +651,12 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
     #    Raid: AttackMove idle-at-home only (group army_attack_move yanks
     #    the field army back to the door — visor 1099 ping-pong).
     #    Push: ≥12 idle at home, army_attack_move to farthest/prod contact.
-    #    Remate: idle IN THE FIELD (≥MIN_PILE_FOR_HUNT). Visible → those
-    #    idle to prod/farthest. Fog → group sweep around the centroid.
-    #    Per-unit AttackMove so home peel is not yanked.
     if SUPPORT_WAR_NUDGE and not SUPPORT_ASSAULT and combat:
         raw_dest, is_raid = war_nudge_cell(obs)
         idles_home = [
             u for u in combat
             if bool(getattr(u, "is_idle", False)) and _near_own_base(obs, _xy(u))
         ]
-        idles_field = _idle_field_combat(obs, combat)
-        pushed = False
         if raw_dest is not None:
             dest = _snap_passable(obs, raw_dest, aidx)
             if dest is None:
@@ -755,22 +677,10 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
                         actor_id=aid,
                         target_x=int(dest[0]), target_y=int(dest[1])))
                     n_peel += 1
-                pushed = True  # raid owns the block; no remnant sweep
             elif len(idles_home) >= MIN_ARMY_FOR_ASSAULT:
                 out.append(CommandModel(
                     action=ActionType.ARMY_ATTACK_MOVE,
                     target_x=int(dest[0]), target_y=int(dest[1])))
-                pushed = True
-            elif (SUPPORT_REMNANT
-                  and len(idles_field) >= MIN_PILE_FOR_HUNT):
-                _attack_move_idle(out, idles_field, dest)
-                pushed = True
-        if (SUPPORT_REMNANT and not pushed
-                and not is_raid
-                and len(idles_field) >= MIN_PILE_FOR_HUNT):
-            sweep = remate_sweep_cell(obs, idles_field, aidx)
-            if sweep is not None:
-                _attack_move_idle(out, idles_field, sweep)
 
     # 3b-4) Asalto FULL / hunt / recall / rally-al-dest: off. Ablation only.
     if SUPPORT_ASSAULT:

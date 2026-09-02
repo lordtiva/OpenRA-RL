@@ -24,10 +24,10 @@ from rl.action_adapter import (
 )
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.auto_support import (
-    HUNT_Y_MAX, MIN_ARMY_FOR_ASSAULT, MIN_HARVESTERS, MIN_PILE_FOR_HUNT,
+    MIN_ARMY_FOR_ASSAULT, MIN_HARVESTERS,
     RAID_HOME_ORDERS, STAGING_STEPS,
     STANCE_ATTACK_ANYTHING, SUPPORT_ASSAULT, SUPPORT_REMNANT, SUPPORT_WAR_NUDGE,
-    apply_dest_credit, remate_sweep_cell, support_commands, war_nudge_cell,
+    apply_dest_credit, support_commands, war_nudge_cell,
 )
 from rl.best_ckpt import (
     DROUGHT_PEAK,
@@ -344,9 +344,8 @@ army12 = [_u(i, "e1", 12 + (i % 4), 16 + (i // 4)) for i in range(1, 13)] + [
 check("pack size", MIN_ARMY_FOR_ASSAULT == 12 and STAGING_STEPS == 10)
 check("SUPPORT_ASSAULT off (no pack/hunt/rally/crédito)", SUPPORT_ASSAULT is False)
 check("SUPPORT_WAR_NUDGE on (raid + contacto visible)", SUPPORT_WAR_NUDGE is True)
-check("SUPPORT_REMNANT on (sweep+commit idle de campo)", SUPPORT_REMNANT is True)
+check("SUPPORT_REMNANT off (Run 34 wr 33→17)", SUPPORT_REMNANT is False)
 check("raid peel cap", RAID_HOME_ORDERS == 6)
-check("pile remate", MIN_PILE_FOR_HUNT == 4)
 cmds_has_tent = support_commands(
     _obs(harv=1, cash=5000, bldgs=("fact", "proc", "tent"),
          avail=("e1", "tent", "proc"), units=army4))
@@ -496,58 +495,13 @@ check("raid: peel solo idle en casa, el field no se toca",
 field_idle = [_u(i, "e1", 80 + i, 12, idle=True) for i in range(1, 5)]
 home_few = [_u(i, "e1", 12 + (i % 2), 16, idle=True) for i in range(20, 22)]
 leftover = _b("tent", 200, 90, 12)
-cmds_rem = support_commands(
+cmds_noreman = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"),
          units=field_idle + home_few + [_u(9, "harv", 14, 16)],
          enemy_bldgs=[leftover]))
-am_rem = [c for c in cmds_rem if c.action.value == "attack_move"]
-check("remate commit: no army_attack_move (no yank casa)",
-      not any(c.action.value == "army_attack_move" for c in cmds_rem))
-check("remate commit: idle de campo al leftover, casa quieta",
-      len(am_rem) == 4
-      and set(int(c.actor_id) for c in am_rem) == {1, 2, 3, 4}
-      and all(int(c.target_x) == 90 and int(c.target_y) == 12 for c in am_rem))
-cmds_drip_f = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"),
-         units=field_idle[:3] + [_u(9, "harv", 14, 16)]))
-check("remate no drip 3 idle de campo",
+check("sin remate: idle de campo no marcha al leftover (hace falta pack 12 en casa)",
       not any(c.action.value in ("army_attack_move", "attack_move")
-              for c in cmds_drip_f))
-field_walk = [_u(i, "e1", 80 + i, 12, idle=False) for i in range(1, 5)]
-cmds_fw = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"),
-         units=field_walk + [_u(9, "harv", 14, 16)],
-         enemy_bldgs=[leftover]))
-check("remate no re-ordena campo que ya camina",
-      not any(c.action.value in ("army_attack_move", "attack_move")
-              for c in cmds_fw))
-cmds_sw = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"),
-         units=field_idle + home_few + [_u(9, "harv", 14, 16)],
-         tick=100))
-am_sw = [c for c in cmds_sw if c.action.value == "attack_move"]
-sw_cell = remate_sweep_cell(
-    _obs(harv=1, bldgs=("fact", "proc"), units=field_idle, tick=100),
-    field_idle)
-check("remate sweep: waypoint de tierra, no beacon, no casa",
-      sw_cell is not None
-      and sw_cell != (95, 11)
-      and sw_cell[1] <= HUNT_Y_MAX
-      and (abs(sw_cell[0] - 12) + abs(sw_cell[1] - 16)) > 18)
-check("remate sweep: idle de campo al waypoint, casa quieta, no army",
-      not any(c.action.value == "army_attack_move" for c in cmds_sw)
-      and len(am_sw) == 4
-      and set(int(c.actor_id) for c in am_sw) == {1, 2, 3, 4}
-      and all(int(c.target_x) == sw_cell[0] and int(c.target_y) == sw_cell[1]
-              for c in am_sw))
-cmds_raid_field = support_commands(
-    _obs(harv=1, bldgs=("fact", "proc"),
-         units=field_idle + home_few + [_u(9, "harv", 14, 16)],
-         enemies=[_u(200, "e1", 14, 17)]))
-am_rf = [c for c in cmds_raid_field if c.action.value == "attack_move"]
-check("raid gana a remate: peel casa, campo idle no se toca",
-      not any(c.action.value == "army_attack_move" for c in cmds_raid_field)
-      and set(int(c.actor_id) for c in am_rf) == {20, 21})
+              for c in cmds_noreman))
 army_walk_home = [
     _u(i, "e1", 12 + (i % 4), 16 + (i // 4), idle=False) for i in range(1, 13)
 ] + [_u(9, "harv", 14, 16)]

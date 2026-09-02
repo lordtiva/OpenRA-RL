@@ -73,8 +73,9 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 2c-B + peel + 2do harv + remate leftovers. Resume 1141 (Run 33 pico 4/4).
-# SIL solo wins. Sequía wr20 restaura best. No C, no 128, no hard, no assault-full.
+# Capa 2c-B + peel + 2do harv. Resume 1141 (Run 33 pico). Remate off (Run 34).
+# SIL even-pick por win, prefiere <40k. Sequía wr20 restaura best.
+# No C, no 128, no hard, no assault-full, no remate.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",

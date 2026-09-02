@@ -20,7 +20,7 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | **11** | `10-benchmark-alphastar-openai-five.md` | **Benchmark: dónde estás vs AlphaStar/OpenAI Five — qué ya tenés y las 3 brechas (self-play, imitation, annealing)** | **Posicionamiento — mapa de familia** |
 | **12** | `11-revision-quisquillosa.md` | **Contra-benchmark quisquilloso: dónde infla la tabla, 6 brechas no contadas y veredicto recalibrado (chasis vs motor)** | **Termómetro de nivel** |
 | **13** | `12-plan-4-capas-siguiente-nivel.md` | **Plan 4 capas para tu hardware (2070+5600X): Capa 0 win posible + Capa 1 BC/SIL + Capa 2 transformer/scatter + Capa 3 self-play + throughput** | **Roadmap 6-12 meses (orden por ROI) — no se modifica** |
-| **13b** | `13-capa0-status-post-run8.md` | **2c-B + peel + 2do harv + remate leftovers. Resume 1141. Run 33 = 33% wr vs easy.** | **Companion del 12 — 2026-09-02** |
+| **13b** | `13-capa0-status-post-run8.md` | **2c-B + peel + 2do harv. Resume 1141. Remate off (Run 34). SIL even-pick wins <40k.** | **Companion del 12 — 2026-09-02** |
 | **13c** | `14-capa2c-identidad-matchup.md` | **Capa 2c: A+B shipped. C smoke falló, revertido. Nudge sin beacon. No 128/256.** | **Spec — 2026-09-01** |
 | **13d** | `15-facciones-mods-roles.md` | **No reentrenar cada país. Un train RA Aliados; soviet=mismo ckpt; otro mod=otro ckpt** | **Contrato — 2026-08-31** |
 | **14** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Consolida análisis `ai.yaml` + teoría RL** |

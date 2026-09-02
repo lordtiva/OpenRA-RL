@@ -2,6 +2,7 @@
 
 BC: NLL de acciones de un maestro (ScriptedTeacher) bajo π actual.
 SIL: mismo NLL sobre transiciones élite propias (solo win).
+Even-pick por episodio, no la cola del ring; prefiere wins <40k ticks.
 
 No sustituye a PPO: L = L_PPO + λ_bc L_BC + λ_sil L_SIL.
 λ_bc arranca en 1.0 y baja a 0 en --bc-warmup iters (kickstarting).
@@ -9,8 +10,6 @@ El origen del warmup (bc_start_iter) se persiste en el ckpt: un resume no
 vuelve a λ=1.0.
 """
 from __future__ import annotations
-
-from collections import deque
 
 import torch
 
@@ -152,15 +151,25 @@ def _cpu_clone_step(s: dict) -> dict:
     return out
 
 
-class EliteBuffer:
-    """Ring of on-policy steps from winning episodes (SIL)."""
+# 1141 closed in 17–30k. A 50k win dumps ~1k late train-spam into the ring;
+# sample_recent(512) used to clone that tail (Run 33 plateau).
+SIL_PREFER_TICKS = 40000
 
-    def __init__(self, cap_steps: int = 2000):
+
+class EliteBuffer:
+    """Winning episodes for SIL, even-pick per win (not the tail of 1–2 longs)."""
+
+    def __init__(self, cap_steps: int = 2000,
+                 prefer_ticks: int = SIL_PREFER_TICKS):
         self.cap = int(cap_steps)
-        self._steps: deque = deque()
+        self.prefer_ticks = int(prefer_ticks)
+        self._episodes: list[dict] = []
 
     def __len__(self) -> int:
-        return len(self._steps)
+        return self._n_steps()
+
+    def _n_steps(self) -> int:
+        return sum(len(e.get("steps") or ()) for e in self._episodes)
 
     def add_episode(self, samples: list, outcome: dict | None) -> int:
         if not samples:
@@ -172,21 +181,61 @@ class EliteBuffer:
         # the 1081 peak. Wins only — including win_early.
         if not result.startswith("win"):
             return 0
-        n = 0
-        for s in samples:
-            self._steps.append(_cpu_clone_step(s))
-            n += 1
-            while len(self._steps) > self.cap:
-                self._steps.popleft()
-        return n
+        try:
+            ticks = int(oc.get("ticks") or 0)
+        except (TypeError, ValueError):
+            ticks = 0
+        cloned = [_cpu_clone_step(s) for s in samples]
+        self._episodes.append({"steps": cloned, "ticks": ticks})
+        self._trim()
+        return len(cloned)
+
+    def _trim(self) -> None:
+        """Drop oldest long wins first; if one ep exceeds cap, even-pick it."""
+        while self._episodes and self._n_steps() > self.cap:
+            if len(self._episodes) == 1:
+                ep = self._episodes[0]
+                ep["steps"] = _even_pick(ep["steps"], self.cap)
+                break
+            long_i = next(
+                (i for i, e in enumerate(self._episodes)
+                 if int(e.get("ticks") or 0) >= self.prefer_ticks),
+                None,
+            )
+            if long_i is not None:
+                self._episodes.pop(long_i)
+            else:
+                self._episodes.pop(0)
 
     def snapshot(self) -> list:
-        return list(self._steps)
+        out = []
+        for e in self._episodes:
+            out.extend(e.get("steps") or ())
+        return out
 
     def sample_recent(self, max_steps: int = 512) -> list:
-        """Most recent elite steps, capped so SIL does not replay 2k maps/iter."""
-        if max_steps <= 0 or not self._steps:
+        """Even-pick across winning episodes. Prefer ticks < prefer_ticks.
+
+        A 50k win used to fill the last 512 with train-spam. Short wins
+        (1141: 17–30k) get the quota; long wins are fallback if none short.
+        """
+        if max_steps <= 0 or not self._episodes:
             return []
-        if len(self._steps) <= max_steps:
-            return list(self._steps)
-        return list(self._steps)[-int(max_steps):]
+        eps = [e for e in self._episodes if e.get("steps")]
+        if not eps:
+            return []
+        short = [
+            e for e in eps
+            if 0 < int(e.get("ticks") or 0) < self.prefer_ticks
+        ]
+        pool = short if short else eps
+        n = len(pool)
+        if n <= 0:
+            return []
+        base = int(max_steps) // n
+        extra = int(max_steps) % n
+        out = []
+        for i, e in enumerate(pool):
+            q = base + (1 if i < extra else 0)
+            out.extend(_even_pick(e["steps"], q))
+        return out

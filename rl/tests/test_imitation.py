@@ -11,6 +11,7 @@ from openra_env.models import ActionType, CommandModel
 from rl.action_adapter import ActionIndex, TYPE_TO_IDX, Vocab
 from rl.imitation import (
     EliteBuffer,
+    SIL_PREFER_TICKS,
     balance_bc_samples,
     command_to_indices,
     lambda_bc_at,
@@ -120,6 +121,50 @@ check("incomplete con raze no entra", n_inc == 0)
 n_early = buf.add_episode(
     [{"a": 6}], {"result": "win_early", "reward_components": {"raze": 0.0}})
 check("win_early entra", n_early == 1)
+check("SIL_PREFER_TICKS 40k", SIL_PREFER_TICKS == 40000)
+
+
+def _sil_step(tag):
+    return {"tag": tag}
+
+
+buf_s = EliteBuffer(cap_steps=500, prefer_ticks=40000)
+buf_s.add_episode([_sil_step(("L", i)) for i in range(80)],
+                  {"result": "win", "ticks": 50000})
+buf_s.add_episode([_sil_step(("Sa", i)) for i in range(80)],
+                  {"result": "win", "ticks": 25000})
+got_s = buf_s.sample_recent(20)
+tags_s = [s["tag"][0] for s in got_s]
+check("SIL prefiere win corto, no la cola del largo",
+      set(tags_s) == {"Sa"} and len(got_s) == 20)
+
+buf_e = EliteBuffer(cap_steps=500, prefer_ticks=40000)
+buf_e.add_episode([_sil_step(("Sa", i)) for i in range(80)],
+                  {"result": "win", "ticks": 20000})
+buf_e.add_episode([_sil_step(("Sb", i)) for i in range(80)],
+                  {"result": "win", "ticks": 22000})
+got_e = buf_e.sample_recent(20)
+from_a = [s["tag"][1] for s in got_e if s["tag"][0] == "Sa"]
+from_b = [s["tag"][1] for s in got_e if s["tag"][0] == "Sb"]
+check("SIL even-pick por win, no solo el ultimo",
+      len(from_a) == 10 and len(from_b) == 10)
+check("SIL even-pick recorre el win, no la cola",
+      from_a[0] == 0 and from_a[-1] == 79)
+
+buf_l = EliteBuffer(cap_steps=500, prefer_ticks=40000)
+buf_l.add_episode([_sil_step(("L", i)) for i in range(80)],
+                  {"result": "win", "ticks": 50000})
+got_l = buf_l.sample_recent(20)
+check("SIL sin corto cae al win largo",
+      len(got_l) == 20 and all(s["tag"][0] == "L" for s in got_l))
+
+buf_t = EliteBuffer(cap_steps=100, prefer_ticks=40000)
+buf_t.add_episode([_sil_step(("L", i)) for i in range(80)],
+                  {"result": "win", "ticks": 50000})
+buf_t.add_episode([_sil_step(("Sa", i)) for i in range(80)],
+                  {"result": "win", "ticks": 20000})
+check("trim echa el win largo primero",
+      len(buf_t) == 80 and all(s["tag"][0] == "Sa" for s in buf_t.snapshot()))
 
 th = ScriptedTeacher()
 check("teacher proc antes de barracks",
