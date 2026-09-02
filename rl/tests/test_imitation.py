@@ -111,6 +111,15 @@ check("sample_recent respeta max", len(buf.sample_recent(2)) == 2)
 n_r = buf.add_episode([{"a": 9}],
                       {"result": "lose", "reward_components": {"raze": 0.5}})
 check("raze flojo no entra", n_r == 0)
+n_farm = buf.add_episode(
+    [{"a": 8}], {"result": "lose", "reward_components": {"raze": 12.0}})
+check("lose con raze alto no entra (SIL solo wins)", n_farm == 0)
+n_inc = buf.add_episode(
+    [{"a": 7}], {"result": "incomplete", "reward_components": {"raze": 22.0}})
+check("incomplete con raze no entra", n_inc == 0)
+n_early = buf.add_episode(
+    [{"a": 6}], {"result": "win_early", "reward_components": {"raze": 0.0}})
+check("win_early entra", n_early == 1)
 
 th = ScriptedTeacher()
 check("teacher proc antes de barracks",

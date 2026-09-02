@@ -29,11 +29,15 @@ from rl.auto_support import (
     apply_dest_credit, support_commands, war_nudge_cell,
 )
 from rl.best_ckpt import (
+    DROUGHT_PEAK,
+    DROUGHT_STREAK,
+    DROUGHT_WR20,
     batch_is_dead,
     dead_policy_reason,
     is_attack_spam_collapse,
     is_dead_policy,
     is_strictly_better,
+    is_wr20_drought,
     maybe_update_best,
     viability_breakdown,
     viability_score,
@@ -592,6 +596,37 @@ check("batch 80%+ no_op se salta", batch_is_dead([
 check("batch sano no se salta", batch_is_dead([
     {"action_hist": {"train": 40, "attack_move": 50, "no_op": 10}},
 ]) is False)
+
+def _wr20_rows(pairs):
+    return [{"iter": i, "winrate_rolling20": w} for i, w in pairs]
+
+check("sequia: era start wr20=0 sin pico no dispara",
+      is_wr20_drought(_wr20_rows([(1082 + i, 0.0) for i in range(8)])) is False)
+peaked = _wr20_rows(
+    [(1082, 0.40)] + [(1083 + i, 0.25) for i in range(4)]
+    + [(1087 + i, 0.0) for i in range(DROUGHT_STREAK)])
+check("sequia: pico 0.40 luego wr20=0 x5 dispara", is_wr20_drought(peaked) is True)
+almost = _wr20_rows(
+    [(1082, 0.40)] + [(1083 + i, 0.0) for i in range(DROUGHT_STREAK - 1)]
+    + [(1082 + DROUGHT_STREAK, 0.10)])
+check("sequia: 4 ceros y un 0.10 no dispara", is_wr20_drought(almost) is False)
+floor = _wr20_rows(
+    [(1082, 0.40)] + [(1083 + i, DROUGHT_WR20) for i in range(DROUGHT_STREAK)])
+check("sequia: wr20==piso 0.05 x5 dispara", is_wr20_drought(floor) is True)
+low_peak = _wr20_rows(
+    [(1082, DROUGHT_PEAK - 0.05)] + [(1083 + i, 0.0) for i in range(DROUGHT_STREAK)])
+check("sequia: pico 0.15 < 0.20 no dispara", is_wr20_drought(low_peak) is False)
+old_peak = _wr20_rows(
+    [(1070, 0.40)] + [(1147 + i, 0.0) for i in range(DROUGHT_STREAK)])
+check("sequia: pico anterior al restore no cuenta",
+      is_wr20_drought(old_peak, since_iter=1146) is False)
+alive = {
+    "iter": 1148, "winrate_rolling20": 0.0, "entropy": 1.6,
+    "n_buildings": {"own": 1.4, "enemy": 8.0},
+    "action_hist": {"no_op": 40, "train": 20, "harvest": 5, "build": 10},
+}
+check("Run32 wr20=0 con H alta NO es dead_policy", is_dead_policy(alive) is False)
+check("DROUGHT_STREAK es 5", DROUGHT_STREAK == 5)
 
 cmds_mcv = support_commands(_obs(bldgs=(), units=[_u(1, "mcv", 12, 16)],
                                  avail=("proc", "powr")))

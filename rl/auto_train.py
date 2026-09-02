@@ -6,7 +6,9 @@ auto_train.py — 1 comando que lanza rl.train y lo vigila (sin 2 ventanas).
 - Cada 15s chequea metrics.jsonl; si 5 min (300s) sin avanzar, mata el train
   y lo relanza solo desde latest.pt (no vuelve a 100).
 - Si 3 iters seguidas son política muerta (attack-spam, no_op-spam,
-  deploy-noop o H<0.15), copia best.pt -> latest.pt, resetea Adam y relanza.
+  deploy-noop o H<0.15), O wr20 se queda <=0.05 ×5 iters tras un pico
+  >=0.20 (sequía, Run 32: H alta, no_op 40%, watchdog viejo no disparaba),
+  copia best.pt -> latest.pt, resetea Adam y relanza.
 - Si el train termina solo (crash/iters completados), también lo relanza.
 - Log en consola + rl/auto_train.log
 - train.py sigue escribiendo latest.pt (dashboard + live). Además, tras cada
@@ -33,7 +35,9 @@ import subprocess, sys, time, pathlib, signal, os, json, re, urllib.request, shu
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-from rl.best_ckpt import dead_policy_reason, is_dead_policy
+from rl.best_ckpt import (
+    DROUGHT_STREAK, dead_policy_reason, is_dead_policy, is_wr20_drought,
+)
 CKPT_DIR = ROOT / "rl" / "ckpts"
 METRICS = CKPT_DIR / "metrics.jsonl"
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
@@ -69,8 +73,8 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 2c-B + peel. Harvest spread revertido. 2do harv + 2 idle untargeted.
-# Resume 1046 (Run 31 spread fail). No C, no 128, no hard, no celdas de ore.
+# Capa 2c-B + peel + 2do harv. Resume 1081 (Run 32 pico; 1159 se comió latest).
+# SIL solo wins. Sequía wr20 restaura best. No C, no 128, no hard, no remate.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
@@ -457,16 +461,21 @@ def main():
                 last_mtime = mtime
                 last_progress = time.time()
                 gpu_low_streak = 0
-                rows = last_metrics_rows(COLLAPSE_STREAK)
-                reasons = [dead_policy_reason(r) for r in rows]
-                if (len(rows) >= COLLAPSE_STREAK
-                        and all(is_dead_policy(r) for r in rows)
-                        and (int(rows[-1]["iter"]) - last_restore_iter) >= COLLAPSE_COOLDOWN_ITERS):
-                    its = [r["iter"] for r in rows]
-                    log(f"COLAPSO {reasons} — iters {its} — restaurando best.pt -> latest.pt + Adam fresco")
+                rows_tail = last_metrics_rows(max(COLLAPSE_STREAK, DROUGHT_STREAK))
+                rows_era = last_metrics_rows(400)
+                tail = rows_tail[-COLLAPSE_STREAK:] if len(rows_tail) >= COLLAPSE_STREAK else []
+                reasons = [dead_policy_reason(r) for r in tail]
+                last_it = int((rows_era or rows_tail or [{"iter": 0}])[-1]["iter"])
+                cooldown_ok = (last_it - last_restore_iter) >= COLLAPSE_COOLDOWN_ITERS
+                dead = bool(tail) and all(is_dead_policy(r) for r in tail) and cooldown_ok
+                drought = cooldown_ok and is_wr20_drought(rows_era, last_restore_iter)
+                if dead or drought:
+                    its = [r["iter"] for r in (tail if dead else rows_era[-DROUGHT_STREAK:])]
+                    kind = f"COLAPSO {reasons}" if dead else "SEQUIA wr20"
+                    log(f"{kind} — iters {its} — restaurando best.pt -> latest.pt + Adam fresco")
                     kill_train(proc)
                     if restore_best_over_latest():
-                        last_restore_iter = int(rows[-1]["iter"])
+                        last_restore_iter = last_it
                         log(f"restaurado best.pt sobre latest.pt; cooldown {COLLAPSE_COOLDOWN_ITERS} iters")
                     else:
                         log("no hay best.pt — no pude restaurar, sigo")

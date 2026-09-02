@@ -165,9 +165,10 @@ async def amain(args):
 
     print(f"Device: {device} | params: "
           f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M")
-    print("Capa 2c-B: 96 own + 32 ene, role+team (resume 1046; C revertido)")
+    print("Capa 2c-B: 96 own + 32 ene, role+team (resume 1081; C revertido)")
     print("Nudge: raid=attack_move idle casa; push=farthest/prod. Sin beacon/crédito.")
     print("PLACE: colas Building+Defense. Harvest: idle sin celda (hasta 2). TRAIN 2do harv.")
+    print("SIL: solo wins. Sequía wr20 (<=0.05 x5 tras pico 0.20) restaura best.")
     print("Overlap: collect k+1 (infer_net) || update k (thread)")
     print(f"Server: {args.url} | {args.episodes} ep/iter, "
           f"k_skip={args.k_skip}, pool={args.concurrency}"

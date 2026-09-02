@@ -1,7 +1,7 @@
 """Capa 1: behavioral cloning + self-imitation (Documento 12).
 
 BC: NLL de acciones de un maestro (ScriptedTeacher) bajo π actual.
-SIL: mismo NLL sobre transiciones élite propias (win o raze>0).
+SIL: mismo NLL sobre transiciones élite propias (solo win).
 
 No sustituye a PPO: L = L_PPO + λ_bc L_BC + λ_sil L_SIL.
 λ_bc arranca en 1.0 y baja a 0 en --bc-warmup iters (kickstarting).
@@ -153,7 +153,7 @@ def _cpu_clone_step(s: dict) -> dict:
 
 
 class EliteBuffer:
-    """Ring of on-policy steps from winning / razing episodes (SIL)."""
+    """Ring of on-policy steps from winning episodes (SIL)."""
 
     def __init__(self, cap_steps: int = 2000):
         self.cap = int(cap_steps)
@@ -167,12 +167,10 @@ class EliteBuffer:
             return 0
         oc = outcome or {}
         result = str(oc.get("result", "") or "")
-        rc = oc.get("reward_components") or {}
-        raze = float(rc.get("raze", 0) or 0)
-        # raze>0 is almost every a_short game (beginner drops a building).
-        # Only keep real wins or a clear raze so the ring does not ingest
-        # 4x~500 maps every iter (that was the VRAM walk).
-        if not (result.startswith("win") or raze >= 2.0):
+        # Lose+raze is almost every a_short game. Cloning it (Run 32) filled
+        # the ring with "poke buildings and die" and SIL pulled latest off
+        # the 1081 peak. Wins only — including win_early.
+        if not result.startswith("win"):
             return 0
         n = 0
         for s in samples:

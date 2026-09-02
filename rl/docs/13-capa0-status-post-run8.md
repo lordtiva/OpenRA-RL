@@ -64,6 +64,8 @@
 > **Corte 1060 (Run 30 peel → harvest spread):** 14 iters (1047–1060), **6/56 (10.7%)**, wr20 0.15. Peel OK: tape `am` 255 vs `army` 51 (ya no yank de grupo). Wins a x=75–91. `best` **1046**. ownH **903 vs easy 2443**. 2 harvs en el mismo pozo (`[15,17]`/`[10,20]`). Archivo: `rl/ckpts/Run 30 (a_short war-nudge-peel 1047-1060)/`. Resume **1046**. Harvest: parche explorado a ≤26 de la proc con menos camiones; idle/migajas CON celda. No Ch2 global. Peel se queda. No C, no scout, no hard.
 >
 > **Corte 1065 (Run 31 harvest-spread falló → 2do harv, sin celdas):** 19 iters (1047–1065), **4/76 (5.3%)**, wr20 last 0.05, ownH media 778. Celda forzada interrumpe el ciclo nativo. Archivo: `rl/ckpts/Run 31 (a_short harvest-spread 1047-1065)/`. Resume **1046**. Idle **sin celda**. Extra vs Run 30: `MIN_HARVESTERS=2` y hasta **2 idle** untargeted/bloque. Peel se queda. No spread con celda, no C, no scout, no hard.
+>
+> **Corte 1159 (Run 32 2harv-peel → sequía wr20 + SIL solo wins):** 113 iters (1047–1159), **74/452 (16.4%)**. Pico **1081** era 25.7% wr20 0.30 `lwww`; 1047–1091 ~25–40%. Luego PPO sobre `latest` + SIL lose+raze: 1147–1156 wr20=0, ownB 1.4, H 1.6 (watchdog de política muerta no disparó). Archivo: `rl/ckpts/Run 32 (a_short 2harv-peel 1047-1159)/`. Resume **1081**. Sequía: wr20 ≤0.05 ×5 tras pico ≥0.20 → restore best + Adam. SIL solo `win`/`win_early`. Peel+2harv se quedan. No remate, no C, no spread, no hard.
 
 ---
 

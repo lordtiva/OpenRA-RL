@@ -179,6 +179,38 @@ def is_dead_policy(row: dict) -> bool:
     return dead_policy_reason(row) is not None
 
 
+# Run 32: wr20 hit 0.40 then decayed to 0 with entropy 1.6 / no_op 40%.
+# dead_policy never fired (H not <0.15, no_op not >80%). PPO kept eating
+# latest past best 1081. Restore when the rolling window stays dead after
+# a real peak — not at era start, when wr20 is 0 because N is small.
+DROUGHT_WR20 = 0.05
+DROUGHT_STREAK = 5
+DROUGHT_PEAK = 0.20
+
+
+def _row_wr20(row: dict) -> float:
+    return float(row.get("winrate_rolling20") or 0.0)
+
+
+def is_wr20_drought(rows: list, since_iter: int = 0) -> bool:
+    """True when wr20 stayed <= DROUGHT_WR20 for DROUGHT_STREAK iters
+    after this era (iters > since_iter) peaked at >= DROUGHT_PEAK.
+
+    `rows` unique-by-iter, chronological. `since_iter` is the last
+    restore (0 = whole era). Does not require dead_policy.
+    """
+    if not rows:
+        return False
+    era = [r for r in rows if int(r.get("iter") or 0) > int(since_iter)]
+    if len(era) < DROUGHT_STREAK:
+        return False
+    peak = max(_row_wr20(r) for r in era)
+    if peak < DROUGHT_PEAK:
+        return False
+    tail = era[-DROUGHT_STREAK:]
+    return all(_row_wr20(r) <= DROUGHT_WR20 for r in tail)
+
+
 def batch_is_dead(outcomes) -> bool:
     """True when this PPO batch is 80%+ no_op — skip the update, don't drive H to 0."""
     hist = {}
