@@ -66,6 +66,10 @@
 > **Corte 1065 (Run 31 harvest-spread falló → 2do harv, sin celdas):** 19 iters (1047–1065), **4/76 (5.3%)**, wr20 last 0.05, ownH media 778. Celda forzada interrumpe el ciclo nativo. Archivo: `rl/ckpts/Run 31 (a_short harvest-spread 1047-1065)/`. Resume **1046**. Idle **sin celda**. Extra vs Run 30: `MIN_HARVESTERS=2` y hasta **2 idle** untargeted/bloque. Peel se queda. No spread con celda, no C, no scout, no hard.
 >
 > **Corte 1159 (Run 32 2harv-peel → sequía wr20 + SIL solo wins):** 113 iters (1047–1159), **74/452 (16.4%)**. Pico **1081** era 25.7% wr20 0.30 `lwww`; 1047–1091 ~25–40%. Luego PPO sobre `latest` + SIL lose+raze: 1147–1156 wr20=0, ownB 1.4, H 1.6 (watchdog de política muerta no disparó). Archivo: `rl/ckpts/Run 32 (a_short 2harv-peel 1047-1159)/`. Resume **1081**. Sequía: wr20 ≤0.05 ×5 tras pico ≥0.20 → restore best + Adam. SIL solo `win`/`win_early`. Peel+2harv se quedan. No remate, no C, no spread, no hard.
+>
+> **Auditoría 2026-09-02 (backlog, no este smoke):** hallazgos verificados contra fuente. No se apilan al corte sequía+SIL-wins. `eradicate_v4b` era código muerto → **borrado** (no “arreglar `_raze_by_value`”). Corte higiene post-smoke si hace falta: PLACE/cancel `role_of` + guard `concatenate([])`. Siguiente palanca de **juego** sigue siendo remate. Detalle abajo, *Auditoría 2026-09-02*.
+>
+> **Corte 1150 (Run 33 drought-sil-wins → remate leftovers):** 69 iters (1082–1150), **91/276 (33%)**, incomplete 23%, wr20 0.25–0.50. Pico **1141** `wwww` iwr 1.0 wr20 0.50, wins 17–30k, ownH 1711. Sequía+SIL-wins cobró (Run 32 era 16% y se moría). Techo: `train` ~47%, leftover al este → timeout 53k. Archivo: `rl/ckpts/Run 33 (a_short drought-sil-wins 1082-1150)/`. Resume **1141**. **Remate:** idle de campo (≥4, no en casa) → `attack_move` al leftover visible (prod/lejos) o sweep de grupo alrededor del centroide (`y≤32`). Per-unit, no `army_attack_move`. Raid/peel/pack-12 se quedan. No assault-full, no scatter, no crédito, no PLACE/`role_of`, no SIL sampling.
 
 ---
 
@@ -362,6 +366,30 @@ Orden del PR cuando toque (el 12 + media pieza de Qwen):
 
 ---
 
+## Auditoría 2026-09-02 — backlog (no el smoke 1081)
+
+Revisión externa verificada contra fuente. **No se implementa en el corte sequía wr20 + SIL solo wins** (resume **1081**, smoke 1082–1101). Ninguno de estos es la palanca de wr: el derrumbe post-1081 fue PPO sobre `latest` + SIL lose+raze + 4-ep, no crédito de PLACE.
+
+Preset vivo: `eradicate_v4`. **No** hay `eradicate_v4b`: el dict existía, nunca lo usó `auto_train`, y no estaba en `_raze_by_value` / `_v3_econ`. Era código muerto. **Borrado** de `PRESETS` y `_preset_kwargs` (2026-09-02). No “arreglar la mina”; `--shaper-preset eradicate_v4b` ahora `ValueError`.
+
+| # | Hallazgo | ¿Bug? | Qué hacer | Cuándo |
+|---|---|---|---|---|
+| 1.4 | PLACE/cancel: `item_type` concreto (`proc`/`tent`/`e1`) no está en `aidx.items` (roles). `eff_item_slot` queda el muestreado. TRAIN/BUILD no. `imitation.py` ya hace `role_of`. | Sí, activo | Remap `role_of(item_type)` en `index_to_command_effective`, mismo patrón que SIL. Si `prefer`/`also` pega, el crédito ya era correcto por accidente; sucio = fallback `ready[0]` de otro rol + todo cancel. Support PLACE no entra al buffer. | Corte **higiene** post-smoke. **No** junto a remate ni SIL sampling. |
+| 1.3 | `np.concatenate([])` en `process_results` si las 4 traj vienen vacías (`engine_error` antes del primer `append`). | Sí, raro | Guard: si no hay advs, skip escala / no update. `auto_train` ya relanza. | Mismo corte que 1.4. |
+| 1.2 | v4b fuera de raze-por-valor | Muerto | **Borrado.** No reintroducir. | Hecho. |
+| 2.2 | `_place_near_base(+4,+2)` sin `pass_grid`. Si agua/edificio, `proc_ready` sigue y el support reemite. `(0,0)` del mismo helper es peor. En `a_short` Singles suele ser tierra. | Sí, mapa | `nearest_passable` / ocupación. | Si PLACE no baja o mapa con agua. No este smoke. |
+| 1.1 | Teacher pisa `t0 = time.time()` con el índice de tipo. `wall_s` ≈ epoch Unix. ETA no lo usa (`collect_s`/`update_s`). Teacher muerto a iter 1081 (`λ_bc=0`). | Sí | Renombrar a `t_idx` en `rollout.py`. | Piggyback cuando se toque `rollout.py`. |
+| 2.3 | `_item_cat_mask`: `torch.where(have, base & cat, base)` cae al `item_mask` global. ActionIndex apaga train/build sin slots; F1 recalcula π ejecutada. | Higiene | `base & cat` sin fallback global. | No ahora. |
+| 2.1 | Célula 0 / fila all-masked | Mitigado | `apply_passability` early-return all-true; `_categorical` logit 0 en slot 0. Hueco vivo = dest-credit `lp_old≈−1e9`, ya clamp ±8. “No penalizar slot 0” no ataca dest-credit. | No. |
+| 3.1 | `docker compose ps -q` + `strip()` con réplicas | Latente | Un contenedor por servicio (`openra-rl`, `openra-rl-2`). | P3. |
+| 3.2 | Teacher serial en `pool[0]` | Diseño | Solo vive `--bc-warmup 80` desde `--bc-start-iter 603`. Resume 1081 no corre teacher. | P3. |
+
+**No mezclar** con sequía/SIL-wins ni con remate: SIL even-pick / `balance_bc_samples` en el elite, w_timeout/γ, spread, C, QSA, hard, 25 t, assault-full, PLACE/`role_of`.
+
+Orden: smoke 1082–1101 sano → hold 1082–1150 (33% wr, pico 1141) → **remate este corte** (resume 1141). Higiene PPO 1.4+1.3 y SIL even-pick = cortes aparte, no este diff.
+
+---
+
 ## Relación con Run 7 / Run 8
 
 | Run | Síntoma | Lección |
@@ -374,4 +402,4 @@ Ckpts del Run 8: `rl/ckpts/Run 8 (a_short collapse no_op 220-408)/`. Resume vivo
 
 ---
 
-*Guardado: 2026-08-31 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`. Corte 1002: PLACE Defense + harvest Ch2, resume 999.*
+*Guardado: 2026-09-02 — rama `exp/rl-2026-08-28-grok`. Companion de `12-plan-4-capas-siguiente-nivel.md`. Resume 1141. Remate leftovers. `eradicate_v4b` borrado. Auditoría 2026-09-02 en backlog.*
