@@ -60,17 +60,36 @@ TYPES_USE_CELL = {"move", "attack_move", "attack", "place_building",
                   "army_attack_move"}
 TYPES_USE_ITEM = {"train", "build", "place_building", "cancel_production"}
 
+# Tablas [N_ACTION_TYPES] — indexar t_idx en GPU, sin .item() por step
+# (el loop Python + sync CUDA era parte de los ~210s de update).
+_USE_U = torch.tensor([n in TYPES_USE_UNIT for n in ACTION_TYPES])
+_USE_C = torch.tensor([n in TYPES_USE_CELL for n in ACTION_TYPES])
+_USE_I = torch.tensor([n in TYPES_USE_ITEM for n in ACTION_TYPES])
 
-def _heads_used(t_idx: torch.Tensor, device) -> tuple:
-    """Mascaras [B] bool: usa_unidad, usa_celda, usa_item para cada tipo."""
-    names = [ACTION_TYPES[int(t)] for t in t_idx]
-    use_u = torch.tensor([n in TYPES_USE_UNIT for n in names],
-                         dtype=torch.bool, device=device)
-    use_c = torch.tensor([n in TYPES_USE_CELL for n in names],
-                         dtype=torch.bool, device=device)
-    use_i = torch.tensor([n in TYPES_USE_ITEM for n in names],
-                         dtype=torch.bool, device=device)
-    return use_u, use_c, use_i
+# fp16 max ≈ 65504. masked_fill(-1e9) bajo AMP crashea (Half overflow).
+_ILLEGAL_FP16 = -1.0e4
+_ILLEGAL_FP32 = -1.0e9
+
+
+def _mask_illegal(logits: torch.Tensor, illegal) -> torch.Tensor:
+    """Tapa logits ilegales sin overflow en Half."""
+    if illegal.dtype != torch.bool:
+        illegal = illegal.bool()
+    fill = (_ILLEGAL_FP16
+            if logits.dtype in (torch.float16, torch.bfloat16)
+            else _ILLEGAL_FP32)
+    return logits.masked_fill(illegal, fill)
+
+
+def _heads_used(t_idx: torch.Tensor, device=None) -> tuple:
+    """Máscaras [B] bool: usa_unidad, usa_celda, usa_item para cada tipo."""
+    t = t_idx.long().reshape(-1)
+    dev = t.device if device is None else device
+    if t.device != dev:
+        t = t.to(dev, non_blocking=True)
+    return (_USE_U.to(dev, non_blocking=True)[t],
+            _USE_C.to(dev, non_blocking=True)[t],
+            _USE_I.to(dev, non_blocking=True)[t])
 
 
 def build_type_masks(obs) -> torch.Tensor:
@@ -288,9 +307,13 @@ class AlphaLiteNet(nn.Module):
 
     @staticmethod
     def _categorical(logits):
-        """Categorical that does not crash on NaN/all-masked rows (PPO 947)."""
+        """Categorical that does not crash on NaN/all-masked rows (PPO 947).
+
+        fp32 siempre: AMP deja -1e9 → -inf en fp16 y softmax se va a NaN.
+        """
+        logits = logits.float()
         logits = torch.nan_to_num(logits, nan=-1e9, posinf=1e9, neginf=-1e9)
-        dead = (logits <= -1e8).all(dim=-1)
+        dead = (logits <= -1e4).all(dim=-1)
         if dead.any():
             logits = logits.clone()
             logits[dead, 0] = 0.0
@@ -301,7 +324,7 @@ class AlphaLiteNet(nn.Module):
         return self._categorical(logits)
 
     def _logits_type(self, hidden, type_mask):
-        return self.head_type(hidden).masked_fill(~type_mask, -1e9)
+        return _mask_illegal(self.head_type(hidden), ~type_mask)
 
     def _scores_unit(self, hidden, chosen_type, unit_feats, unit_legal,
                      role_ids=None):
@@ -315,7 +338,7 @@ class AlphaLiteNet(nn.Module):
         t = self.type_embedding(chosen_type).unsqueeze(1).expand(-1, U, -1)
         scores = self.unit_scorer(
             torch.cat([u_in, h, t], dim=-1)).squeeze(-1)
-        return scores.masked_fill(~unit_legal, -1e9)
+        return _mask_illegal(scores, ~unit_legal)
 
     def dist_unit(self, hidden, chosen_type, unit_feats, unit_legal,
                   role_ids=None):
@@ -363,7 +386,7 @@ class AlphaLiteNet(nn.Module):
             unit_own_mask=unit_own_mask)
         logits_map = self.cell_head(
             torch.cat([fmap, scatter, emb_map, hd, unit_map], dim=1)).squeeze(1)
-        logits_map = logits_map.masked_fill(~cell_mask.view(b, H, W), -1e9)
+        logits_map = _mask_illegal(logits_map, ~cell_mask.view(b, H, W))
         return logits_map.reshape(b, -1)
 
     def dist_cell(self, fmap, chosen_type, cell_mask, hidden,
@@ -382,7 +405,7 @@ class AlphaLiteNet(nn.Module):
         h = hidden.unsqueeze(1).expand(-1, emb.size(1), -1)
         t = self.type_embedding(chosen_type).unsqueeze(1).expand(-1, emb.size(1), -1)
         scores = self.item_scorer(torch.cat([h, t, emb], dim=-1)).squeeze(-1)
-        return scores.masked_fill(~item_mask, -1e9)
+        return _mask_illegal(scores, ~item_mask)
 
     def dist_item(self, hidden, chosen_type, item_indices, item_mask):
         logits = self._scores_item(hidden, chosen_type, item_indices, item_mask)
@@ -547,61 +570,47 @@ class AlphaLiteNet(nn.Module):
         value = self.value_head(new_hidden).squeeze(-1)
         return lp, entropy, value
 
-    def evaluate_actions_seq(self, seg, device):
-        """PPO recurrente con BPTT truncado sobre UN segmento (lista de steps).
+    def _eval_step(self, batch, h, actions):
+        """Un paso BPTT, B>=1. actions: type/unit/cell/item/had_item [B].
 
-        Propaga el estado oculto del GRU a lo largo del segmento SI
-        n detach: el gradiente fluye h_t → h_{t+1} y la red aprende a guardar
-        memoria temporal (POMDP / niebla de guerra). El h_in del PRIMER step
-        entra como constante (arranque del segmento); los siguientes usan el
-        hidden PROPAGADO por el GRU, no el guardado del rollout.
-
-        Devuelve (log_prob, entropy, value) concatenados: un valor por step.
-
-        (Fijación de memoria temporal — sin BPTT el GRUCell se entrenaba como
-        un MLP no-recurrente y no aprendía qué guardar para el futuro.)
+        Encode puede ir en AMP (fp16). Cabezas siempre fp32: masked_fill(-1e9)
+        no entra a Half (crash 1158).
+        Devuelve (lp, entropy, value, h_new) todos [B].
         """
-        lp_list, ent_list, val_list = [], [], []
-        h = seg[0]["h_in"].to(device)  # [1, HIDDEN] arranque (constante)
-        for s in seg:
-            b = {k: s["batch"][k].to(device)
-                 for k in ("spatial", "scalars", "unit_feats", "unit_valid",
-                           "type_mask", "cell_mask", "item_indices",
-                           "item_mask")}
-            # máscara jerárquica por categoría (opcional: muestras viejas sin
-            # ella caen a la máscara global base)
-            if s["batch"].get("train_slot_mask") is not None:
-                b["train_slot_mask"] = s["batch"]["train_slot_mask"].to(device)
-                b["build_slot_mask"] = s["batch"]["build_slot_mask"].to(device)
-            else:
-                b["train_slot_mask"] = b["item_mask"]
-                b["build_slot_mask"] = b["item_mask"]
-            if s["batch"].get("unit_role_ids") is not None:
-                b["unit_role_ids"] = s["batch"]["unit_role_ids"].to(device)
-            if s["batch"].get("unit_own_mask") is not None:
-                b["unit_own_mask"] = s["batch"]["unit_own_mask"].to(device)
-            feats, valid, role_ids, own = self._unit_ctx(b)
-            fmap, _, h, tokens = self.encode(
-                b["spatial"], b["scalars"], feats, valid, h,
-                unit_role_ids=role_ids, unit_own_mask=own)
-            t_idx = s["action"]["type"].to(device)
-            dist_t = self.dist_type(h, b["type_mask"])
-            dist_u = self.dist_unit(h, t_idx, feats, own, role_ids)
-            u_idx = s["action"]["unit_slot"].to(device)
+        feats, valid, role_ids, own = self._unit_ctx(batch)
+        fmap, _, h_new, tokens = self.encode(
+            batch["spatial"], batch["scalars"], feats, valid, h,
+            unit_role_ids=role_ids, unit_own_mask=own)
+        t_idx = actions["type"].reshape(-1)
+        try:
+            heads_ctx = torch.amp.autocast("cuda", enabled=False)
+        except (TypeError, AttributeError):
+            heads_ctx = torch.cuda.amp.autocast(enabled=False)
+        with heads_ctx:
+            fmap_f = fmap.float()
+            h_f = h_new.float()
+            tok_f = tokens.float()
+            feats_f = feats.float()
+            dist_t = self.dist_type(h_f, batch["type_mask"])
+            dist_u = self.dist_unit(h_f, t_idx, feats_f, own, role_ids)
+            u_idx = actions["unit_slot"].reshape(-1)
             dist_c = self.dist_cell(
-                fmap, t_idx, b["cell_mask"], h,
-                tokens, feats, valid, u_idx,
+                fmap_f, t_idx, batch["cell_mask"], h_f,
+                tok_f, feats_f, valid, u_idx,
                 role_ids=role_ids, unit_own_mask=own)
-            has_items = b["item_mask"].any(dim=-1)
-            safe_item = self._item_cat_mask(b, t_idx).clone()
+            has_items = batch["item_mask"].any(dim=-1)
+            safe_item = self._item_cat_mask(batch, t_idx).clone()
             safe_item[~has_items] = True
-            dist_i = self.dist_item(h, t_idx, b["item_indices"], safe_item)
+            dist_i = self.dist_item(h_f, t_idx, batch["item_indices"], safe_item)
 
-            use_u, use_c, use_i = _heads_used(t_idx, t_idx.device)
+            use_u, use_c, use_i = _heads_used(t_idx)
             zero = torch.zeros_like(dist_t.log_prob(t_idx))
-            c_idx = s["action"]["cell_flat"].to(device)
-            i_idx = s["action"]["item_slot"].to(device)
-            had_item = bool(s["action"]["had_item"])
+            c_idx = actions["cell_flat"].reshape(-1)
+            i_idx = actions["item_slot"].reshape(-1)
+            had_item = actions["had_item"]
+            if not torch.is_tensor(had_item):
+                had_item = torch.as_tensor(had_item, device=t_idx.device)
+            had_item = had_item.reshape(-1).bool()
             lp = (dist_t.log_prob(t_idx)
                   + torch.where(use_u, dist_u.log_prob(u_idx), zero)
                   + torch.where(use_c, dist_c.log_prob(c_idx), zero)
@@ -612,25 +621,120 @@ class AlphaLiteNet(nn.Module):
             ht = dist_t.entropy()
             hu = dist_u.entropy()
             hc = dist_c.entropy() * 0.25
-            hi = torch.where(has_items, dist_i.entropy(), torch.zeros_like(ht)) * 0.5
-
-            # Entropía ENMASCARADA por cabeza activa: no inyectar gradientes de
-            # exploración en cabezas que NO participaron en la acción del paso
-            # (p.ej. no_op/train no deben regularizar cell_head/unit_scorer).
-            zero = torch.zeros_like(ht)
+            hi = torch.where(has_items, dist_i.entropy(),
+                             torch.zeros_like(ht)) * 0.5
+            zero_h = torch.zeros_like(ht)
             use_u_f = use_u.float()
             use_c_f = use_c.float() * 0.25
             use_i_f = (use_i & has_items).float() * 0.5
             entropy = ((ht
-                        + torch.where(use_u, hu, zero)
-                        + torch.where(use_c, hc, zero)
-                        + torch.where(use_i & has_items, hi, zero))
+                        + torch.where(use_u, hu, zero_h)
+                        + torch.where(use_c, hc, zero_h)
+                        + torch.where(use_i & has_items, hi, zero_h))
                        / (1.0 + use_u_f + use_c_f + use_i_f))
-            value = self.value_head(h).squeeze(-1)
-            lp_list.append(lp)
-            ent_list.append(entropy)
-            val_list.append(value)
-        return (torch.cat(lp_list), torch.cat(ent_list), torch.cat(val_list))
+            value = self.value_head(h_f).squeeze(-1)
+        return lp, entropy, value, h_new
+
+    def evaluate_actions_seq(self, seg, device):
+        """BPTT truncado sobre UN segmento. Wrapper de evaluate_actions_seq_batch."""
+        lp, ent, val, valid = self.evaluate_actions_seq_batch([seg], device)
+        m = valid[0]
+        return lp[0][m], ent[0][m], val[0][m]
+
+    def evaluate_actions_seq_batch(self, segs, device):
+        """BPTT sobre B segmentos en paralelo (pad al final).
+
+        El h_in del primer step de cada seg entra como constante; el GRU
+        propaga sin detach. Pasos de padding no entran al loss ni al hidden
+        siguiente (where sobre valid).
+
+        Devuelve lp, entropy, value, valid — todos [B, T].
+        """
+        if not segs:
+            z = torch.zeros(0, 0, device=device)
+            return z, z, z, z.bool()
+        B = len(segs)
+        T = max(len(s) for s in segs)
+        h0 = []
+        for seg in segs:
+            h = seg[0]["h_in"]
+            if not torch.is_tensor(h):
+                raise TypeError("h_in debe ser tensor")
+            h = h.to(device, non_blocking=True)
+            if h.dim() == 1:
+                h = h.unsqueeze(0)
+            elif h.dim() > 2:
+                h = h.reshape(1, -1)
+            h0.append(h)
+        h = torch.cat(h0, dim=0)
+        if h.dim() > 2:
+            h = h.reshape(B, -1)
+
+        # stack, no inplace: un buffer new_zeros no requiere grad y
+        # lp_out[:,t]=lp cortaría el grafo de BPTT.
+        lp_t, ent_t, val_t, valid_t = [], [], [], []
+        for t in range(T):
+            steps = []
+            active = []
+            for seg in segs:
+                if t < len(seg):
+                    steps.append(seg[t])
+                    active.append(True)
+                else:
+                    steps.append(seg[-1])
+                    active.append(False)
+            row_valid = torch.tensor(active, dtype=torch.bool, device=device)
+            batch, actions = _stack_steps(steps, device)
+            lp, ent, val, h_new = self._eval_step(batch, h, actions)
+            h = torch.where(row_valid.unsqueeze(-1), h_new, h)
+            lp_t.append(lp)
+            ent_t.append(ent)
+            val_t.append(val)
+            valid_t.append(row_valid)
+        return (torch.stack(lp_t, dim=1), torch.stack(ent_t, dim=1),
+                torch.stack(val_t, dim=1), torch.stack(valid_t, dim=1))
+
+
+def _cat_field(steps, getter, device):
+    xs = []
+    for s in steps:
+        v = getter(s)
+        if not torch.is_tensor(v):
+            v = torch.as_tensor(v)
+        if v.dim() == 0:
+            v = v.unsqueeze(0)
+        xs.append(v.to(device, non_blocking=True))
+    return torch.cat(xs, dim=0)
+
+
+def _stack_steps(steps, device):
+    """Lista de samples (cada uno B=1) → batch [B] + actions [B]."""
+    def bget(k):
+        return lambda s, kk=k: s["batch"][kk]
+
+    keys = ("spatial", "scalars", "unit_feats", "unit_valid",
+            "type_mask", "cell_mask", "item_indices", "item_mask")
+    batch = {k: _cat_field(steps, bget(k), device) for k in keys}
+    for k in ("train_slot_mask", "build_slot_mask",
+              "unit_role_ids", "unit_own_mask"):
+        if all(s["batch"].get(k) is not None for s in steps):
+            batch[k] = _cat_field(steps, bget(k), device)
+        elif k in ("train_slot_mask", "build_slot_mask"):
+            batch[k] = batch["item_mask"]
+    actions = {}
+    for k in ("type", "unit_slot", "cell_flat", "item_slot"):
+        actions[k] = _cat_field(
+            steps, lambda s, kk=k: s["action"][kk], device)
+
+    had = []
+    for s in steps:
+        v = s["action"]["had_item"]
+        if torch.is_tensor(v):
+            had.append(v.reshape(-1).bool().to(device, non_blocking=True))
+        else:
+            had.append(torch.tensor([bool(v)], dtype=torch.bool, device=device))
+    actions["had_item"] = torch.cat(had, dim=0)
+    return batch, actions
 
 
 def adapt_capa2_state_dict(net: AlphaLiteNet, raw: dict) -> dict:

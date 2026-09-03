@@ -27,6 +27,8 @@
   @keyframes pulse { 0%,100% {opacity: 1;} 50% {opacity: .3;} }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 12px; }
   .cards.secondary { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+  .cards.scoreboard { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
+  @media (max-width: 700px) { .cards.scoreboard { grid-template-columns: 1fr; } }
   .card {
     background: var(--card); border: 1px solid var(--border);
     border-radius: 10px; padding: 14px 16px;
@@ -34,10 +36,16 @@
   .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 6px; }
   .card .value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
   .card.small .value { font-size: 18px; }
+  .card.hero { padding: 16px 18px; }
+  .card.hero .value { font-size: 36px; line-height: 1.1; }
 .card.accent-raze { border-left: 3px solid var(--orange); box-shadow: inset 0 1px rgba(240,136,62,.08); }
 .card.accent-raze .label { color: var(--orange); }
 .card.accent-win  { border-left: 3px solid var(--green); box-shadow: inset 0 1px rgba(63,185,80,.08); }
 .card.accent-win  .label { color: var(--green); }
+.card.accent-lose { border-left: 3px solid var(--red); box-shadow: inset 0 1px rgba(248,81,73,.08); }
+.card.accent-lose .label { color: var(--red); }
+.card.accent-draw { border-left: 3px solid var(--amber); box-shadow: inset 0 1px rgba(210,153,34,.08); }
+.card.accent-draw .label { color: var(--amber); }
 .pill {
   display: inline-block; padding: 1px 8px; border-radius: 20px;
   font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
@@ -83,6 +91,24 @@
 <div id="content" class="empty">Esperando la primera iteración…</div>
 
 <div id="dash" style="display:none">
+  <div class="cards scoreboard">
+    <div class="card hero accent-win">
+      <div class="label">Win %</div>
+      <div class="value" id="c-mix-win" style="color:var(--green)">—</div>
+      <div class="sub" id="c-mix-win-sub">últ. 20 · era</div>
+    </div>
+    <div class="card hero accent-lose">
+      <div class="label">Lose %</div>
+      <div class="value" id="c-mix-lose" style="color:var(--red)">—</div>
+      <div class="sub" id="c-mix-lose-sub">últ. 20 · era</div>
+    </div>
+    <div class="card hero accent-draw">
+      <div class="label">Empate %</div>
+      <div class="value" id="c-mix-draw" style="color:var(--amber)">—</div>
+      <div class="sub" id="c-mix-draw-sub">timeout / incomplete</div>
+    </div>
+  </div>
+
   <div class="cards">
     <div class="card"><div class="label">Winrate global</div><div class="value" id="c-win" style="color:var(--green)">—</div><div class="sub" id="c-win-sub"></div></div>
     <div class="card"><div class="label">Winrate últimas 20</div><div class="value" id="c-roll" style="color:var(--cyan)">—</div><div class="sub">reacciona antes que el global</div></div>
@@ -165,6 +191,39 @@ function lastNum(values) {
   return null;
 }
 
+function bucketOutcome(o) {
+  const s = String(o || '');
+  if (s.startsWith('win')) return 'win';
+  if (s.startsWith('lose')) return 'lose';
+  // timeout del motor = incomplete; draw real es raro. Ambos = empate.
+  if (s.startsWith('incomplete') || s === 'draw') return 'draw';
+  return 'other';
+}
+
+function outcomeMix(list) {
+  const n = list.length;
+  const c = { win: 0, lose: 0, draw: 0, other: 0 };
+  for (const o of list) c[bucketOutcome(o)]++;
+  const pct = (k) => n ? Math.round(c[k] / n * 100) : null;
+  return { n, c, pct: { win: pct('win'), lose: pct('lose'), draw: pct('draw') } };
+}
+
+function setMixPlate(kind, roll, era) {
+  const el = document.getElementById('c-mix-' + kind);
+  const sub = document.getElementById('c-mix-' + kind + '-sub');
+  el.textContent = roll.pct[kind] == null ? '—' : roll.pct[kind] + '%';
+  if (!era.n) {
+    sub.textContent = 'sin episodios';
+    return;
+  }
+  const rollN = roll.n;
+  const rollC = roll.c[kind];
+  const eraC = era.c[kind];
+  const eraPct = era.pct[kind] == null ? 0 : era.pct[kind];
+  const rollLbl = rollN ? `últ. ${rollN}: ${rollC}/${rollN}` : 'últ. —';
+  sub.textContent = `${rollLbl}  ·  era ${eraPct}% (${eraC} de ${era.n})`;
+}
+
 async function load() {
   let rows = [];
   try {
@@ -190,6 +249,16 @@ async function load() {
   document.getElementById('content').style.display = 'none';
   document.getElementById('dash').style.display = '';
   const last = rows[rows.length - 1];
+
+  const eraOut = [];
+  for (const r of rows) {
+    if (Array.isArray(r.outcomes)) eraOut.push(...r.outcomes);
+  }
+  const eraMix = outcomeMix(eraOut);
+  const rollMix = outcomeMix(eraOut.slice(-20));
+  setMixPlate('win', rollMix, eraMix);
+  setMixPlate('lose', rollMix, eraMix);
+  setMixPlate('draw', rollMix, eraMix);
 
   document.getElementById('c-win').textContent = Math.round(last.winrate * 100) + '%';
   document.getElementById('c-win-sub').textContent = `${last.wins} de ${last.total} episodios`;
