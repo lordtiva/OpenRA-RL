@@ -24,6 +24,10 @@ Diseño:
   casa (no army_attack_move: visor 1099 ping-pong x=8↔70). Push: ≥12 idle
   en casa + contacto visible → army_attack_move al más lejano / prod, no
   al tent de la puerta. Sin beacon, sin crédito de dest.
+- Scout de niebla (SUPPORT_FOG_SCOUT): sin contacto visible y con pack en
+  casa, manda 2 exploradores (3 si army≥20) a sectores distintos de niebla
+  / rumbos desde el ancla. Multi-mapa via Ch3/Ch4; nunca beacon. Al
+  revelar, el nudge dispara el pack.
 - Remate leftovers (SUPPORT_REMNANT): APAGADO (Run 34). Sweep remap a
   agua/beacon, AM cada idle/bloque, wr 33%→17%. No reabrir en este corte.
 - Stance AttackAnything al nacer (Capa 0): Defend no caza; el scripted sí.
@@ -50,8 +54,17 @@ SUPPORT_ASSAULT = False
 SUPPORT_WAR_NUDGE = True
 # Leftover sweep+commit. Off: Run 34 wr 33%→17% (agua/beacon + AM spam).
 SUPPORT_REMNANT = False
+# Fog scout: open shroud with 2–3 idle rifles when nudge has no contact.
+# Map-agnostic (spatial Ch3/Ch4 or angle fallback). Never beacon.
+SUPPORT_FOG_SCOUT = True
+FOG_SCOUT_N_BASE = 2          # until we have a bigger home army
+FOG_SCOUT_N_MORE = 3          # once home combat >= FOG_SCOUT_ARMY_FOR_MORE
+FOG_SCOUT_ARMY_FOR_MORE = 20  # "2 hasta tener más army"
+FOG_SCOUT_MIN_SEP = 16        # min chebyshev sep between scout dests
 # Raid peel: per-unit AttackMove, not group army_attack_move (Run 29 yank).
-RAID_HOME_ORDERS = 6
+# Se sube a 24 para que toda la guarnición ociosa en casa defienda ante raids
+# del rival (que ataca con 8-12 unidades), sin cuentagotas de 6.
+RAID_HOME_ORDERS = 24
 # Production buildings beat a forward powr/scout when choosing the push dest.
 _PROD_BUILDINGS = frozenset({
     "fact", "afac", "proc", "weap", "tent", "barr", "kenn",
@@ -251,6 +264,8 @@ TENT_COST = 500
 HARV_COST = 1100
 # Easy InitialHarvesters: 2. We only replaced at 0 → 1 truck vs their 2.
 MIN_HARVESTERS = 2
+# Apertura estándar: 2 refinerías (2 muelles de descarga + 2 cosechadoras).
+MAX_SUPPORT_PROCS = 2
 _ORE_IDLE_ORDERS = 2
 
 
@@ -506,6 +521,155 @@ def _harv_local_ore(u, arr) -> float:
     return float(arr[2, y, x])
 
 
+
+def fog_scout_count(n_home_combat: int) -> int:
+    """2 exploradores hasta tener más army; 3 cuando casa ≥ umbral."""
+    if int(n_home_combat) >= int(FOG_SCOUT_ARMY_FOR_MORE):
+        return int(FOG_SCOUT_N_MORE)
+    return int(FOG_SCOUT_N_BASE)
+
+
+def _fog_scout_angle_dests(obs, n: int, aidx=None):
+    """N rumbos equiespaciados desde el ancla (sin beacon). Fallback sin spatial."""
+    import math
+    origin = _own_anchor(obs) or (12, 16)
+    info = getattr(obs, "map_info", None)
+    w = int(getattr(info, "width", 128) or 128)
+    h = int(getattr(info, "height", 64) or 64)
+    r = max(24, min(w, h) // 2)
+    # Small phase from map size so two maps of same size still share logic
+    # but we never hardcode enemy spawn.
+    phase = 0.37
+    out = []
+    for i in range(max(0, int(n))):
+        ang = phase + (2.0 * math.pi * i) / max(1, int(n))
+        raw = (int(origin[0] + r * math.cos(ang)),
+               int(origin[1] + r * math.sin(ang)))
+        dest = _snap_passable(obs, raw, aidx)
+        if dest is None:
+            dest = (max(0, min(w - 1, raw[0])), max(0, min(h - 1, raw[1])))
+        out.append((int(dest[0]), int(dest[1])))
+    return out
+
+
+def fog_scout_destinations(obs, n: int, aidx=None):
+    """Hasta n celdas distintas en niebla pasable, una por sector angular.
+
+    Usa Ch3 (passable) + Ch4 (fog). Sin spatial → rumbos equiespaciados.
+    Nunca resolve_beacon / BEACON_BY_MAP.
+    """
+    import math
+    import numpy as np
+    n = max(0, int(n))
+    if n <= 0:
+        return []
+    origin = _own_anchor(obs) or (12, 16)
+    ox, oy = int(origin[0]), int(origin[1])
+    arr = _spatial_chw(obs)
+    if arr is None or arr.shape[0] < 5:
+        return _fog_scout_angle_dests(obs, n, aidx)
+    ch3, ch4 = arr[3], arr[4]
+    h, w = int(ch3.shape[0]), int(ch3.shape[1])
+    # Unexplored / heavy shroud, walkable, not on top of the yard.
+    ys, xs = np.where((ch3 > 0.5) & (ch4 < 0.45))
+    if len(xs) == 0:
+        return _fog_scout_angle_dests(obs, n, aidx)
+    # Bin by angle from origin; pick farthest cell in each of n sectors.
+    sectors = [[] for _ in range(n)]
+    for x, y in zip(xs.tolist(), ys.tolist()):
+        dx, dy = int(x) - ox, int(y) - oy
+        if dx * dx + dy * dy < 10 * 10:
+            continue
+        ang = math.atan2(dy, dx)
+        if ang < 0:
+            ang += 2.0 * math.pi
+        si = int((ang / (2.0 * math.pi)) * n) % n
+        sectors[si].append((int(x), int(y), dx * dx + dy * dy))
+    dests = []
+    for bucket in sectors:
+        if not bucket:
+            continue
+        bucket.sort(key=lambda t: t[2], reverse=True)
+        x, y, _ = bucket[0]
+        # Enforce separation from already chosen dests.
+        if any(max(abs(x - dx), abs(y - dy)) < FOG_SCOUT_MIN_SEP
+               for dx, dy in dests):
+            picked = None
+            for x2, y2, _ in bucket[1:]:
+                if all(max(abs(x2 - dx), abs(y2 - dy)) >= FOG_SCOUT_MIN_SEP
+                       for dx, dy in dests):
+                    picked = (x2, y2)
+                    break
+            if picked is None:
+                continue
+            x, y = picked
+        snap = _snap_passable(obs, (x, y), aidx)
+        dests.append((int(snap[0]), int(snap[1])) if snap else (x, y))
+        if len(dests) >= n:
+            break
+    if len(dests) < n:
+        # Fill missing sectors with angle fallback, skipping near-dupes.
+        for raw in _fog_scout_angle_dests(obs, n, aidx):
+            if len(dests) >= n:
+                break
+            if any(max(abs(raw[0] - dx), abs(raw[1] - dy)) < FOG_SCOUT_MIN_SEP
+                   for dx, dy in dests):
+                continue
+            dests.append(raw)
+    return dests[:n]
+
+
+def _scout_preference_key(u):
+    """Prefer fast rifles; never medi/harv (harv already excluded from combat)."""
+    ut = str(getattr(u, "type", "") or "").lower()
+    if "medi" in ut:
+        return (2, int(getattr(u, "actor_id", 0) or 0))
+    if ut in ("e1", "e2", "dog", "e3"):
+        return (0, int(getattr(u, "actor_id", 0) or 0))
+    return (1, int(getattr(u, "actor_id", 0) or 0))
+
+
+def _emit_fog_scouts(obs, combat, idles_home, aidx, out):
+    """Append AttackMove for up to N fog scouts. No-op if contacts/raid."""
+    if not SUPPORT_FOG_SCOUT:
+        return
+    n_want = fog_scout_count(len(idles_home))
+    if n_want <= 0 or not idles_home:
+        return
+    # Units already away from base count as active scouts (sticky).
+    active = []
+    for u in combat:
+        try:
+            if not _near_own_base(obs, _xy(u)):
+                active.append(u)
+        except (TypeError, ValueError):
+            continue
+    slots = max(0, n_want - len(active))
+    if slots <= 0:
+        return
+    dests = fog_scout_destinations(obs, slots, aidx)
+    if not dests:
+        return
+    cand = sorted(
+        [u for u in idles_home
+         if "medi" not in str(getattr(u, "type", "") or "").lower()],
+        key=_scout_preference_key,
+    )
+    for u, dest in zip(cand, dests):
+        try:
+            aid = int(getattr(u, "actor_id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if aid <= 0:
+            continue
+        out.append(CommandModel(
+            action=ActionType.ATTACK_MOVE,
+            actor_id=aid,
+            target_x=int(dest[0]),
+            target_y=int(dest[1]),
+        ))
+
+
 def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
 
     """Lista de CommandModel de soporte para esta observación.
@@ -568,6 +732,8 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
     #     Proc ready in the queue: PLACE near the conyard. Has proc, <2 harvs:
     #     TRAIN harv (easy nace con 2). Has proc, no tent/barr: BUILD/PLACE
     #     the faction barracks (visor 985: sin cuartel, TRAIN sbag, lose 10k).
+    #     Fast 2-proc: Proc 1 -> Barracks -> Proc 2 (hasta MAX_SUPPORT_PROCS=2).
+    #     Financiado con el saldo remanente (~$2.200) de los $5.000 iniciales.
     avail = set(getattr(obs, "available_production", []) or [])
     prod = list(getattr(obs, "production", []) or [])
     proc_queued = any(str(getattr(p, "item", "")).lower() == "proc" for p in prod)
@@ -578,20 +744,8 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
     )
     if not has_fact:
         pass  # wait for the deploy above; BUILD proc needs a conyard
-    elif not has_proc:
-        if proc_ready:
-            ax, ay = _place_near_base(obs)
-            out.append(CommandModel(
-                action=ActionType.PLACE_BUILDING, item_type="proc",
-                target_x=ax, target_y=ay))
-        elif (not proc_queued) and "proc" in avail and cash >= 2000:
-            out.append(CommandModel(action=ActionType.BUILD, item_type="proc"))
     else:
-        has_harv = _has_harvester(obs, eco, units, prod)
-        n_harv = _n_harvesters(units, prod)
-        if n_harv < MIN_HARVESTERS and "harv" in avail and cash >= HARV_COST:
-            out.append(CommandModel(action=ActionType.TRAIN, item_type="harv"))
-        # Auto-tent: primer cuartel, después de proc. tent (allies) o barr.
+        n_procs = sum(1 for b in blds if str(getattr(b, "type", "")).lower() == "proc")
         has_barracks = any(
             str(getattr(b, "type", "")).lower() in _BARRACKS_ITEMS for b in blds)
         barr_ready = next(
@@ -604,15 +758,37 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
         barr_queued = any(
             str(getattr(p, "item", "")).lower() in _BARRACKS_ITEMS for p in prod)
         barr_item = next((n for n in _BARRACKS_ITEMS if n in avail), None)
-        if not has_barracks:
-            if barr_ready:
-                ax, ay = _place_near_base(obs)
-                out.append(CommandModel(
-                    action=ActionType.PLACE_BUILDING, item_type=barr_ready,
-                    target_x=ax, target_y=ay))
-            elif (not barr_queued) and barr_item and cash >= TENT_COST:
+
+        if proc_ready:
+            ax, ay = _place_near_base(obs)
+            out.append(CommandModel(
+                action=ActionType.PLACE_BUILDING, item_type="proc",
+                target_x=ax, target_y=ay))
+        elif barr_ready:
+            ax, ay = _place_near_base(obs)
+            out.append(CommandModel(
+                action=ActionType.PLACE_BUILDING, item_type=barr_ready,
+                target_x=ax, target_y=ay))
+
+        # Cola de vehículos / entrenamiento: reponer cosechadora si hay fábrica de armas
+        n_harv = _n_harvesters(units, prod)
+        if n_procs > 0 and n_harv < MIN_HARVESTERS and "harv" in avail and cash >= HARV_COST:
+            out.append(CommandModel(action=ActionType.TRAIN, item_type="harv"))
+
+        # Cola de edificios: Proc 1 -> Cuartel -> Proc 2 (hasta MAX_SUPPORT_PROCS=2)
+        if n_procs == 0:
+            if (not proc_queued) and "proc" in avail and cash >= 2000:
+                out.append(CommandModel(action=ActionType.BUILD, item_type="proc"))
+        elif not has_barracks:
+            if (not barr_queued) and barr_item and cash >= TENT_COST:
                 out.append(CommandModel(
                     action=ActionType.BUILD, item_type=barr_item))
+        elif (n_procs < MAX_SUPPORT_PROCS
+              and (not proc_queued)
+              and "proc" in avail
+              and cash >= 2000):
+            # Fast 2-proc: 2da refinería = 2da cosechadora gratis + doble muelle
+            out.append(CommandModel(action=ActionType.BUILD, item_type="proc"))
 
     # 1) Auto-repair — umbral hard (35%)
     if cash > 500:
@@ -681,6 +857,10 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
                 out.append(CommandModel(
                     action=ActionType.ARMY_ATTACK_MOVE,
                     target_x=int(dest[0]), target_y=int(dest[1])))
+        elif (has_proc
+              and len(idles_home) >= MIN_ARMY_FOR_ASSAULT):
+            # Niebla vacía: 2–3 scouts abren mapa; al revelar, el nudge empuja.
+            _emit_fog_scouts(obs, combat, idles_home, aidx, out)
 
     # 3b-4) Asalto FULL / hunt / recall / rally-al-dest: off. Ablation only.
     if SUPPORT_ASSAULT:

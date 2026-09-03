@@ -1,625 +1,545 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<meta charset="UTF-8">
-<title>OpenRA PPO — Dashboard</title>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>OpenRA-RL · live</title>
 <style>
   :root {
-    --bg: #0b0e14; --card: #141922; --border: #232b38;
-    --fg: #e6edf3; --muted: #8b98a9;
-    --green: #3fb950; --red: #f85149; --blue: #58a6ff;
-    --amber: #d29922; --purple: #bc8cff; --cyan: #39c5cf;
-    --orange: #f0883e;
+    --bg: #0b0d10;
+    --panel: #12161c;
+    --panel2: #181e27;
+    --border: #243041;
+    --text: #e8eef7;
+    --muted: #8b9bb0;
+    --good: #3dd68c;
+    --bad: #ff6b7a;
+    --warn: #f5c542;
+    --accent: #6ea8fe;
+    --purple: #b794f6;
+    --cyan: #67e8f9;
+    --orange: #fb923c;
   }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    background: var(--bg); color: var(--fg);
-    font-family: 'Segoe UI', system-ui, sans-serif;
-    padding: 24px; max-width: 1100px; margin: 0 auto;
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Segoe UI", system-ui, sans-serif; }
+  header {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+    padding: 18px 22px 10px; border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; background: rgba(11,13,16,.92); backdrop-filter: blur(8px); z-index: 5;
   }
-  header { display: flex; align-items: baseline; gap: 14px; margin-bottom: 20px; }
-  h1 { font-size: 20px; font-weight: 600; }
-  .live { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
-  .live::before {
-    content: ''; width: 8px; height: 8px; border-radius: 50%;
-    background: var(--green); animation: pulse 1.6s infinite;
+  header h1 { margin: 0; font-size: 18px; font-weight: 650; letter-spacing: .02em; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  header .meta b { color: var(--text); font-weight: 600; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600;
+    border: 1px solid var(--border); background: var(--panel2);
   }
-  @keyframes pulse { 0%,100% {opacity: 1;} 50% {opacity: .3;} }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 12px; }
-  .cards.secondary { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
-  .cards.scoreboard { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
-  @media (max-width: 700px) { .cards.scoreboard { grid-template-columns: 1fr; } }
+  .pill.on { border-color: #2a5a3e; background: #12251c; color: var(--good); }
+  .pill.off { color: var(--muted); }
+  main { padding: 16px 22px 40px; display: grid; gap: 14px;
+    grid-template-columns: repeat(12, 1fr); max-width: 1400px; margin: 0 auto; }
   .card {
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px 16px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 14px 16px; min-width: 0;
   }
-  .card .label { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 6px; }
-  .card .value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
-  .card.small .value { font-size: 18px; }
-  .card.hero { padding: 16px 18px; }
-  .card.hero .value { font-size: 36px; line-height: 1.1; }
-.card.accent-raze { border-left: 3px solid var(--orange); box-shadow: inset 0 1px rgba(240,136,62,.08); }
-.card.accent-raze .label { color: var(--orange); }
-.card.accent-win  { border-left: 3px solid var(--green); box-shadow: inset 0 1px rgba(63,185,80,.08); }
-.card.accent-win  .label { color: var(--green); }
-.card.accent-lose { border-left: 3px solid var(--red); box-shadow: inset 0 1px rgba(248,81,73,.08); }
-.card.accent-lose .label { color: var(--red); }
-.card.accent-draw { border-left: 3px solid var(--amber); box-shadow: inset 0 1px rgba(210,153,34,.08); }
-.card.accent-draw .label { color: var(--amber); }
-.pill {
-  display: inline-block; padding: 1px 8px; border-radius: 20px;
-  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
-  background: rgba(240,136,62,.12); color: var(--orange);
-  border: 1px solid rgba(240,136,62,.35); vertical-align: middle;
-  font-weight: 600;
-}
-  .card .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
-  .chart-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
-  .chart-card h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 10px; }
-  canvas { width: 100%; height: 130px; display: block; }
-  .outcomes { display: flex; flex-wrap: wrap; gap: 6px; }
+  .card h2 {
+    margin: 0 0 10px; font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); font-weight: 650;
+  }
+  .span3 { grid-column: span 3; } .span4 { grid-column: span 4; }
+  .span6 { grid-column: span 6; } .span8 { grid-column: span 8; }
+  .span12 { grid-column: span 12; }
+  @media (max-width: 980px) {
+    .span3,.span4,.span6,.span8,.span12 { grid-column: span 12; }
+  }
+  .kpi { display: flex; flex-direction: column; gap: 4px; }
+  .kpi .val { font-size: 28px; font-weight: 700; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+  .kpi .sub { color: var(--muted); font-size: 12px; }
+  .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .accent { color: var(--accent); }
+  canvas { width: 100%; height: 180px; display: block; }
+  canvas.tall { height: 220px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; font-weight: 650; }
+  td.num { text-align: right; font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  .bar {
+    height: 8px; border-radius: 4px; background: #1c2430; overflow: hidden; min-width: 80px;
+  }
+  .bar > i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+  .bar > i.hot { background: var(--bad); }
+  .bar > i.ok { background: var(--good); }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
   .chip {
-    font-size: 11px; padding: 3px 9px; border-radius: 20px; font-weight: 600;
-    border: 1px solid var(--border);
+    background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 8px 10px; min-width: 110px;
   }
-  .chip.win     { color: var(--green); border-color: var(--green); background: rgba(63,185,80,.08); }
-  .chip.lose    { color: var(--red);   border-color: var(--red);   background: rgba(248,81,73,.08); }
-  .chip.draw    { color: var(--amber); border-color: var(--amber); background: rgba(210,153,34,.08); }
-  .chip.other   { color: var(--muted); }
-  .sup-bar {
-    position: relative; display: flex; height: 30px;
-    border-radius: 8px; overflow: hidden; border: 1px solid var(--border); margin-bottom: 4px;
+  .chip .l { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .06em; }
+  .chip .v { font-size: 16px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); padding: 24px 0; text-align: center; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px; font-size: 11px; color: var(--muted); }
+  .legend span::before {
+    content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px;
+    margin-right: 6px; vertical-align: -1px; background: var(--c, #fff);
   }
-  #bar-ours   { background: linear-gradient(180deg, #3fb950, #2ea043); width: 50%; transition: width .9s ease; min-width: 0; }
-  #bar-theirs { background: linear-gradient(180deg, #f85149, #da3633); flex: 1; }
-  #bar-label {
-    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    font-size: 12px; font-weight: 700; color: #fff; text-shadow: 0 1px 3px rgba(0,0,0,.8);
-    font-variant-numeric: tabular-nums; letter-spacing: .02em;
-  }
-  footer { margin-top: 18px; font-size: 12px; color: var(--muted); line-height: 1.7; }
-  footer code { background: var(--card); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; font-size: 11px; }
-  .empty { text-align: center; color: var(--muted); padding: 60px 0; font-size: 14px; }
+  footer { color: var(--muted); font-size: 11px; padding: 0 22px 24px; max-width: 1400px; margin: 0 auto; }
 </style>
 </head>
 <body>
 <header>
-  <h1>OpenRA PPO</h1>
-  <span class="live">monitoreando rl/ckpts/metrics.jsonl</span>
+  <div>
+    <h1>OpenRA-RL</h1>
+    <div class="meta">North star = <b>wr vs ancla</b> · poll 2s · <span id="pathHint">rl/ckpts/</span></div>
+  </div>
+  <div class="row" style="align-items:center">
+    <span class="pill" id="pfspPill">PFSP …</span>
+    <span class="pill" id="livePill">live</span>
+    <span class="meta" id="updated">—</span>
+  </div>
 </header>
 
-<div id="content" class="empty">Esperando la primera iteración…</div>
+<main>
+  <section class="card span3 kpi">
+    <h2>Winrate era (ancla)</h2>
+    <div class="val accent" id="kWr">—</div>
+    <div class="sub" id="kWrSub">wins / total</div>
+  </section>
+  <section class="card span3 kpi">
+    <h2>Rolling 20</h2>
+    <div class="val" id="kR20">—</div>
+    <div class="sub">últimas 20 partidas ancla</div>
+  </section>
+  <section class="card span3 kpi">
+    <h2>Iter actual</h2>
+    <div class="val" id="kIter">—</div>
+    <div class="sub" id="kIterSub">bot · eta</div>
+  </section>
+  <section class="card span3 kpi">
+    <h2>Harvest edge</h2>
+    <div class="val" id="kHarvest">—</div>
+    <div class="sub">own − enemy / 1k ticks</div>
+  </section>
 
-<div id="dash" style="display:none">
-  <div class="cards scoreboard">
-    <div class="card hero accent-win">
-      <div class="label">Win %</div>
-      <div class="value" id="c-mix-win" style="color:var(--green)">—</div>
-      <div class="sub" id="c-mix-win-sub">últ. 20 · era</div>
+  <section class="card span8">
+    <h2>Winrate · rolling20 · iter</h2>
+    <canvas id="cWr" class="tall"></canvas>
+    <div class="legend">
+      <span style="--c:var(--accent)">era wr</span>
+      <span style="--c:var(--good)">rolling20</span>
+      <span style="--c:var(--orange)">iter wr</span>
     </div>
-    <div class="card hero accent-lose">
-      <div class="label">Lose %</div>
-      <div class="value" id="c-mix-lose" style="color:var(--red)">—</div>
-      <div class="sub" id="c-mix-lose-sub">últ. 20 · era</div>
+  </section>
+  <section class="card span4">
+    <h2>Outcomes (últimas 40 eps)</h2>
+    <canvas id="cOut"></canvas>
+    <div class="row" style="margin-top:10px" id="outChips"></div>
+  </section>
+
+  <section class="card span6">
+    <h2>PFSP league</h2>
+    <div id="pfspBox"><div class="empty">Sin pfsp_stats.json todavía — corre con --pfsp</div></div>
+  </section>
+  <section class="card span6">
+    <h2>Economía</h2>
+    <canvas id="cEco"></canvas>
+    <div class="legend">
+      <span style="--c:var(--good)">own harvest/1k</span>
+      <span style="--c:var(--bad)">enemy harvest/1k</span>
+      <span style="--c:var(--cyan)">harvest edge</span>
     </div>
-    <div class="card hero accent-draw">
-      <div class="label">Empate %</div>
-      <div class="value" id="c-mix-draw" style="color:var(--amber)">—</div>
-      <div class="sub" id="c-mix-draw-sub">timeout / incomplete</div>
+  </section>
+
+  <section class="card span6">
+    <h2>Salud del PPO (colapso)</h2>
+    <canvas id="cHealth"></canvas>
+    <div class="legend">
+      <span style="--c:var(--purple)">entropy</span>
+      <span style="--c:var(--warn)">clip_frac</span>
+      <span style="--c:var(--accent)">kl ×10</span>
     </div>
-  </div>
+  </section>
+  <section class="card span6">
+    <h2>Mix de acciones</h2>
+    <canvas id="cAct"></canvas>
+    <div class="legend">
+      <span style="--c:var(--bad)">attack*</span>
+      <span style="--c:var(--good)">eco (build/place/harvest/train)</span>
+      <span style="--c:var(--muted)">no_op + other</span>
+    </div>
+  </section>
 
-  <div class="cards">
-    <div class="card"><div class="label">Winrate global</div><div class="value" id="c-win" style="color:var(--green)">—</div><div class="sub" id="c-win-sub"></div></div>
-    <div class="card"><div class="label">Winrate últimas 20</div><div class="value" id="c-roll" style="color:var(--cyan)">—</div><div class="sub">reacciona antes que el global</div></div>
-    <div class="card"><div class="label">Transcurrido</div><div class="value" id="c-elapsed" style="color:var(--blue)">—</div><div class="sub" id="c-iter-sub"></div></div>
-    <div class="card"><div class="label">Restante (ETA)</div><div class="value" id="c-eta" style="color:var(--amber)">—</div><div class="sub">estimado EMA</div></div>
-    <div class="card"><div class="label">Reward medio/ep</div><div class="value" id="c-reward" style="color:var(--purple)">—</div><div class="sub">señal de optimización</div></div>
-    <div class="card"><div class="label">Ventaja material</div><div class="value" id="c-adv" style="color:var(--green)">—</div><div class="sub" id="c-adv-sub"></div></div>
-  </div>
-
-  <div class="cards secondary">
-    <div class="card small"><div class="label">Entropía</div><div class="value" id="c-ent">—</div></div>
-    <div class="card small"><div class="label">KL aprox</div><div class="value" id="c-kl">—</div></div>
-    <div class="card small"><div class="label">Clip frac</div><div class="value" id="c-clip">—</div></div>
-    <div class="card small"><div class="label">Ticks/s sim</div><div class="value" id="c-tps">—</div></div>
-    <div class="card small"><div class="label">Muestras/iter</div><div class="value" id="c-samp">—</div></div>
-    <div class="card small"><div class="label">Tiempo/iter</div><div class="value" id="c-time">—</div></div>
-    <div class="card small accent-raze"><div class="label">🔥 Raze/ep</div><div class="value" id="c-raze">—</div><div class="sub">edificios enem. destruidos</div></div>
-    <div class="card small accent-win"><div class="label">🏆 Win/ep</div><div class="value" id="c-win-badge">—</div><div class="sub">reward objetivo (+8)</div></div>
-  </div>
-
-  <div class="cards secondary" id="capa1-cards" style="display:none">
-    <div class="card small"><div class="label">λ BC</div><div class="value" id="c-lbc" style="color:var(--purple)">—</div><div class="sub">1 → 0 en warmup</div></div>
-    <div class="card small"><div class="label">BC NLL</div><div class="value" id="c-bcnll">—</div><div class="sub" id="c-bc-sub">clonado del teacher</div></div>
-    <div class="card small"><div class="label">Teacher</div><div class="value" id="c-bcres" style="font-size:16px">—</div><div class="sub" id="c-bcn-sub">partida extra del scripted</div></div>
-    <div class="card small"><div class="label">SIL NLL</div><div class="value" id="c-silnll">—</div><div class="sub">clonado de élites</div></div>
-    <div class="card small"><div class="label">SIL batch</div><div class="value" id="c-siln">—</div><div class="sub">steps en el update</div></div>
-    <div class="card small"><div class="label">Elite buffer</div><div class="value" id="c-elite">—</div><div class="sub">cap 2000 · CPU</div></div>
-  </div>
-
-  <div class="chart-card"><h2>Winrate (global + rodante 20)</h2><canvas id="ch-win"></canvas></div>
-  <div class="chart-card"><h2>Reward medio por episodio</h2><canvas id="ch-reward"></canvas></div>
-  <div class="chart-card"><h2>Componentes del reward — régimen <span class="pill" id="comp-preset">eradicate</span></h2><canvas id="ch-comp"></canvas></div>
-  <div class="chart-card"><h2>Supremacía actual (estilo motor de ajedrez)</h2>
-    <div class="sup-bar"><div id="bar-ours"></div><div id="bar-theirs"></div><span id="bar-label">—</span></div>
-  </div>
-  <div class="chart-card"><h2>Valor económico medio por episodio — nosotros vs enemigo</h2><canvas id="ch-sup"></canvas></div>
-  <div class="chart-card"><h2>Carrera económica — recaudación bruta y riqueza neta ($/kt)</h2><canvas id="ch-eco"></canvas></div>
-  <div class="chart-card" id="card-imitation" style="display:none"><h2>Capa 1 — NLL de imitación (BC teacher + SIL élites)</h2><canvas id="ch-imitation"></canvas></div>
-  <div class="chart-card"><h2>Acciones por iter — qué hace la política (conteos)</h2><canvas id="ch-acc"></canvas></div>
-  <div class="chart-card"><h2>Tasa de resolución — win / lose / incomplete por iter</h2><canvas id="ch-res"></canvas></div>
-  <div class="chart-card"><h2>Edificios de cada bando al cierre — raze (conteos)</h2><canvas id="ch-raze"></canvas></div>
-  <div class="chart-card"><h2>Ticks por episodio (≈51800 = expira al tope del motor)</h2><canvas id="ch-ticks"></canvas></div>
-  <div class="chart-card"><h2>P(win) heurístico — calibrador L3 a la espera de primeras victorias</h2><canvas id="ch-pwin"></canvas></div>
-  <div class="chart-card"><h2>Entropía de la política</h2><canvas id="ch-ent"></canvas></div>
-  <div class="chart-card"><h2>KL aproximada (drift por iteración)</h2><canvas id="ch-kl"></canvas></div>
-  <div class="chart-card"><h2>Últimos resultados</h2><div class="outcomes" id="chips"></div></div>
-
-  <footer>
-    Lanzar más episodios: <code>python -m rl.train --iters 200 --episodes 8 --concurrency 4</code>
-    · GPU: <code>nvidia-smi -l 2</code> · Este panel se actualiza cada 2 s.
-  </footer>
-</div>
+  <section class="card span4">
+    <h2>Reward que importa</h2>
+    <canvas id="cRew"></canvas>
+    <div class="legend">
+      <span style="--c:var(--good)">win</span>
+      <span style="--c:var(--orange)">raze</span>
+      <span style="--c:var(--cyan)">mining</span>
+      <span style="--c:var(--bad)">defense_loss</span>
+    </div>
+  </section>
+  <section class="card span4">
+    <h2>Base al cierre</h2>
+    <canvas id="cBld"></canvas>
+    <div class="legend">
+      <span style="--c:var(--good)">own buildings</span>
+      <span style="--c:var(--bad)">enemy buildings</span>
+    </div>
+  </section>
+  <section class="card span4">
+    <h2>Alertas</h2>
+    <div id="alerts" class="empty">Todo tranquilo</div>
+  </section>
+</main>
+<footer>
+  Fuentes: <code>rl/ckpts/metrics.jsonl</code> · <code>rl/ckpts/pfsp_stats.json</code> · <code>rl/ckpts/best.json</code>.
+  North star ignora rivales PFSP no-ancla. Backup del dash viejo: <code>dashboard.html.bak</code>.
+</footer>
 
 <script>
-// Servir con: python -m http.server 8501 (desde la raíz del repo) -> http://localhost:8501/dashboard.html
-const URL = 'rl/ckpts/metrics.jsonl';
+const METRICS = "rl/ckpts/metrics.jsonl";
+const PFSP = "rl/ckpts/pfsp_stats.json";
+const BEST = "rl/ckpts/best.json";
+const POLL_MS = 2000;
 
-function money(v) {
-  if (v == null) return '—';
-  const a = Math.abs(v);
-  const body = a >= 10000 ? `${(a / 1000).toFixed(0)}k`
-             : a >= 1000  ? `${(a / 1000).toFixed(1)}k`
-             :              `${Math.round(a)}`;
-  return (v < 0 ? '-$' : '$') + body;
+const $ = (id) => document.getElementById(id);
+
+function fmtPct(x) {
+  if (x == null || Number.isNaN(x)) return "—";
+  return (100 * x).toFixed(1) + "%";
+}
+function fmtNum(x, d=1) {
+  if (x == null || Number.isNaN(x)) return "—";
+  return Number(x).toFixed(d);
+}
+function last(arr) { return arr.length ? arr[arr.length - 1] : null; }
+
+function parseMetrics(text) {
+  const rows = [];
+  for (const line of text.split(/\n/)) {
+    const s = line.trim();
+    if (!s) continue;
+    let j;
+    try { j = JSON.parse(s); } catch { continue; }
+    if (typeof j.iter === "number") rows.push(j);
+  }
+  // unique by iter, last write wins
+  const by = new Map();
+  for (const r of rows) by.set(r.iter, r);
+  return [...by.values()].sort((a,b) => a.iter - b.iter);
 }
 
-function fmtDur(s) {
-  if (s == null) return '—';
-  s = Math.round(s);
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  return h > 0 ? `${h}h ${String(m).padStart(2, '0')}m`
-       : m > 0  ? `${m}m ${String(s % 60).padStart(2, '0')}s`
-       :          `${s}s`;
+function attackFrac(hist) {
+  if (!hist) return 0;
+  let n = 0, atk = 0;
+  for (const [k,v] of Object.entries(hist)) {
+    const c = +v || 0; n += c;
+    if (k === "attack" || k === "attack_move" || k === "army_attack_move") atk += c;
+  }
+  return n ? atk / n : 0;
+}
+function ecoFrac(hist) {
+  if (!hist) return 0;
+  let n = 0, eco = 0;
+  const E = new Set(["build","place_building","harvest","train","deploy"]);
+  for (const [k,v] of Object.entries(hist)) {
+    const c = +v || 0; n += c;
+    if (E.has(k)) eco += c;
+  }
+  return n ? eco / n : 0;
+}
+function noopFrac(hist) {
+  if (!hist) return 0;
+  let n = 0, z = 0;
+  for (const [k,v] of Object.entries(hist)) {
+    const c = +v || 0; n += c;
+    if (k === "no_op") z += c;
+  }
+  return n ? z / n : 0;
 }
 
-function lastNum(values) {
-  if (!values) return null;
-  for (let i = values.length - 1; i >= 0; i--)
-    if (values[i] != null) return values[i];
-  return null;
-}
-
-function bucketOutcome(o) {
-  const s = String(o || '');
-  if (s.startsWith('win')) return 'win';
-  if (s.startsWith('lose')) return 'lose';
-  // timeout del motor = incomplete; draw real es raro. Ambos = empate.
-  if (s.startsWith('incomplete') || s === 'draw') return 'draw';
-  return 'other';
-}
-
-function outcomeMix(list) {
-  const n = list.length;
-  const c = { win: 0, lose: 0, draw: 0, other: 0 };
-  for (const o of list) c[bucketOutcome(o)]++;
-  const pct = (k) => n ? Math.round(c[k] / n * 100) : null;
-  return { n, c, pct: { win: pct('win'), lose: pct('lose'), draw: pct('draw') } };
-}
-
-function setMixPlate(kind, roll, era) {
-  const el = document.getElementById('c-mix-' + kind);
-  const sub = document.getElementById('c-mix-' + kind + '-sub');
-  el.textContent = roll.pct[kind] == null ? '—' : roll.pct[kind] + '%';
-  if (!era.n) {
-    sub.textContent = 'sin episodios';
-    return;
-  }
-  const rollN = roll.n;
-  const rollC = roll.c[kind];
-  const eraC = era.c[kind];
-  const eraPct = era.pct[kind] == null ? 0 : era.pct[kind];
-  const rollLbl = rollN ? `últ. ${rollN}: ${rollC}/${rollN}` : 'últ. —';
-  sub.textContent = `${rollLbl}  ·  era ${eraPct}% (${eraC} de ${era.n})`;
-}
-
-async function load() {
-  let rows = [];
-  try {
-    const r = await fetch(URL + '?t=' + Date.now(), {cache: 'no-store'});
-    if (!r.ok) throw new Error(r.status);
-    const text = await r.text();
-    for (const line of text.trim().split('\n')) {
-      // Solo líneas de métrica reales (ignora marcadores {"note":...})
-      if (line.trim()) {
-        try {
-          const j = JSON.parse(line);
-          if (j && typeof j.iter === 'number') rows.push(j);
-        } catch {}
-      }
-    }
-  } catch (e) {
-    document.getElementById('content').textContent =
-      'Sin datos aún (¿ya arrancó el entrenamiento?). Reintentando…';
-    return;
-  }
-  if (!rows.length) return;
-
-  document.getElementById('content').style.display = 'none';
-  document.getElementById('dash').style.display = '';
-  const last = rows[rows.length - 1];
-
-  const eraOut = [];
-  for (const r of rows) {
-    if (Array.isArray(r.outcomes)) eraOut.push(...r.outcomes);
-  }
-  const eraMix = outcomeMix(eraOut);
-  const rollMix = outcomeMix(eraOut.slice(-20));
-  setMixPlate('win', rollMix, eraMix);
-  setMixPlate('lose', rollMix, eraMix);
-  setMixPlate('draw', rollMix, eraMix);
-
-  document.getElementById('c-win').textContent = Math.round(last.winrate * 100) + '%';
-  document.getElementById('c-win-sub').textContent = `${last.wins} de ${last.total} episodios`;
-  document.getElementById('c-roll').textContent =
-    Math.round((last.winrate_rolling20 ?? last.winrate) * 100) + '%';
-  document.getElementById('c-elapsed').textContent = fmtDur(last.elapsed_s);
-  document.getElementById('c-iter-sub').textContent = `iteración ${last.iter} · +${last.samples} muestras`;
-  document.getElementById('c-eta').textContent = fmtDur((last.eta_min ?? 0) * 60);
-  document.getElementById('c-reward').textContent =
-    (last.mean_episode_reward ?? 0).toFixed(2);
-  document.getElementById('c-ent').textContent = (last.entropy ?? 0).toFixed(3);
-  document.getElementById('c-kl').textContent = (last.kl ?? 0).toFixed(4);
-  document.getElementById('c-clip').textContent = (last.clip_frac ?? 0).toFixed(3);
-  document.getElementById('c-tps').textContent = last.sim_ticks_per_s ?? '—';
-  document.getElementById('c-samp').textContent = last.samples;
-  document.getElementById('c-time').textContent =
-    fmtDur((last.collect_s ?? 0) + (last.update_s ?? 0));
-
-  // Métricas nuevas del régimen eradicate: raze (edificios enem destruidos)
-  // y win (reward objetivo). Infiere el régimen por los componentes presentes.
-  const rc0 = (rows.find(r => r.reward_components) ?? {}).reward_components ?? {};
-  const preset = ('raze' in rc0 || 'timeout' in rc0) ? 'eradicate' : 'legacy';
-  const pill = document.getElementById('comp-preset');
-  if (pill) pill.textContent = preset;
-  const rcLast = last.reward_components ?? {};
-  document.getElementById('c-raze').textContent = (rcLast.raze ?? 0).toFixed(2);
-  document.getElementById('c-win-badge').textContent =
-    rcLast.win != null && rcLast.win !== 0 ? '+' + rcLast.win.toFixed(2) : '0.00';
-  document.getElementById('c-win-badge').style.color =
-    rcLast.win > 0 ? 'var(--green)' : 'var(--muted)';
-
-  const hasCapa1 = rows.some(r =>
-    r.lambda_bc != null || r.bc_nll != null || r.sil_nll != null || r.elite_n != null);
-  document.getElementById('capa1-cards').style.display = hasCapa1 ? '' : 'none';
-  document.getElementById('card-imitation').style.display = hasCapa1 ? '' : 'none';
-  if (hasCapa1) {
-    const lbc = last.lambda_bc;
-    document.getElementById('c-lbc').textContent =
-      lbc == null ? '—' : Number(lbc).toFixed(2);
-    document.getElementById('c-lbc').style.color =
-      (lbc ?? 0) > 0.05 ? 'var(--purple)' : 'var(--muted)';
-    document.getElementById('c-bcnll').textContent =
-      last.bc_nll == null ? '—' : Number(last.bc_nll).toFixed(2);
-    const bcRes = last.bc_result;
-    const bcEl = document.getElementById('c-bcres');
-    bcEl.textContent = bcRes || '—';
-    bcEl.style.color = bcRes === 'win' ? 'var(--green)'
-      : bcRes === 'lose' ? 'var(--red)'
-      : bcRes === 'fail' ? 'var(--red)'
-      : 'var(--muted)';
-    document.getElementById('c-bcn-sub').textContent =
-      last.bc_n != null ? `${last.bc_n} steps del teacher` : 'partida extra del scripted';
-    document.getElementById('c-silnll').textContent =
-      last.sil_nll == null ? '—' : Number(last.sil_nll).toFixed(2);
-    document.getElementById('c-siln').textContent =
-      last.sil_n == null ? '—' : last.sil_n;
-    document.getElementById('c-elite').textContent =
-      last.elite_n == null ? '—' : last.elite_n;
-    const imitSeries = [
-      { name: 'bc_nll', color: '#bc8cff',
-        values: rows.map(r => r.bc_nll ?? null) },
-      { name: 'sil_nll', color: '#39c5cf',
-        values: rows.map(r => r.sil_nll ?? null) },
-    ].filter(s => s.values.some(v => v != null));
-    if (imitSeries.length) drawMulti('ch-imitation', imitSeries);
-  }
-
-  drawTwo('ch-win',
-          rows.map(r => r.winrate * 100), '#3fb950', 'global',
-          rows.map(r => (r.winrate_rolling20 ?? r.winrate) * 100), '#39c5cf', 'últ. 20');
-  drawChart('ch-reward', rows.map(r => r.mean_episode_reward ?? 0), '', '#bc8cff');
-  drawChart('ch-ent', rows.map(r => r.entropy), '', '#d29922');
-  drawChart('ch-kl', rows.map(r => r.kl ?? 0), '', '#f85149');
-
-  // Componentes del reward: la lista se DERIVA de las claves que el shaper
-  // efectivamente emite en reward_components (no hardcodeada), para no perder
-  // componentes nuevos (assets, buildings, new_types, cancel_penalty, garrison,
-  // early_refinery, first_ore...). Se conservan colores fijos para los más
-  // comunes; el resto usa una paleta cíclica. Se ocultan las series planas en
-  // 0 (p. ej. win hasta la primera victoria; hold_zero si nunca queda sin
-  // núcleo) — mantiene el panel legible en runs tempranos.
-  const COMP_COLORS = { combat: '#f85149', raze: '#f0883e',
-    defense_loss: '#ff7b72', spread: '#39c5cf', hold_zero: '#8b98a9',
-    produce: '#3fb950', mining: '#a5d6ff', win: '#2ea043',
-    margin: '#bc8cff', timeout: '#d29922', assets: '#f0e68c',
-    buildings: '#ffd33d', new_types: '#7ee787', cancel_penalty: '#ff6b6b',
-    garrison: '#56d4dd', early_refinery: '#e3a7ff', first_ore: '#ffa657' };
-  const PALETTE = ['#f85149','#f0883e','#ff7b72','#39c5cf','#8b98a9','#3fb950',
-    '#a5d6ff','#2ea043','#bc8cff','#d29922','#f0e68c','#ffd33d','#7ee787',
-    '#ff6b6b','#56d4dd','#e3a7ff','#ffa657','#79c0ff','#d2a8ff','#ff7b72'];
-  // Orden estable: primero los conocidos, luego los extra del datos.
-  const seenKeys = [];
-  for (const r of rows) {
-    const rc = r.reward_components;
-    if (!rc) continue;
-    for (const k of Object.keys(rc)) if (!seenKeys.includes(k)) seenKeys.push(k);
-  }
-  for (const k of Object.keys(COMP_COLORS)) {
-    if (!seenKeys.includes(k)) seenKeys.unshift(k);
-  }
-  const COMP_DEFS = seenKeys.map((k, i) =>
-    [k, COMP_COLORS[k] ?? PALETTE[i % PALETTE.length]]);
-  const compSeries = COMP_DEFS
-    .map(([k, col]) => ({ name: k, color: col,
-        values: rows.map(r => (r.reward_components ?? {})[k] ?? null) }))
-    .filter(s => s.values.some(v => v != null && v !== 0));
-  if (compSeries.length) {
-    // Rellenar huecos de filas viejas con el último valor válido de la serie
-    for (const s of compSeries) {
-      let lastV = 0;
-      s.values = s.values.map(v => { lastV = v != null ? v : lastV; return lastV; });
-    }
-    drawMulti('ch-comp', compSeries);
-  } else {
-    const cv = document.getElementById('ch-comp');
-    cv.width = cv.clientWidth; cv.height = cv.clientHeight;
-    const ctx = cv.getContext('2d');
-    ctx.font = '12px system-ui';
-    ctx.fillStyle = '#8b98a9';
-    ctx.fillText('Sin datos de componentes todavía — aparecen al reiniciar el trainer con este parche', 12, 26);
-  }
-
-  // Supremacía (evaluador estilo ajedrez L1). Series desde la primera iter con dato.
-  const supFirst = rows.findIndex(r => r.supremacy);
-  if (last.supremacy) {
-    const sv = last.supremacy;
-    const advEl = document.getElementById('c-adv');
-    advEl.textContent = money(sv.diff);
-    advEl.style.color = sv.diff >= 0 ? 'var(--green)' : 'var(--red)';
-    document.getElementById('c-adv-sub').textContent = `P(win)≈${Math.round(sv.p_win_est * 100)}%`;
-    document.getElementById('bar-ours').style.width = (sv.p_win_est * 100).toFixed(1) + '%';
-    document.getElementById('bar-label').textContent =
-      `nosotros ${money(sv.own)}  ·  enemigo ${money(sv.enemy)}`;
-  }
-  if (supFirst >= 0) {
-    // Series COMPLETAS (longitud = rows) con nulls en filas sin dato: así
-    // compartimos el eje X temporal — una serie que aparezca tarde se dibuja
-    // truncada a la izquierda pero alineada con las que cubren todo.
-    drawMulti('ch-sup', [
-      { name: 'nuestros', color: '#3fb950', values: rows.map(r => r.supremacy ? r.supremacy.own : null) },
-      { name: 'enemigo',  color: '#f85149', values: rows.map(r => r.supremacy ? r.supremacy.enemy : null) },
-    ]);
-    drawChart('ch-pwin', rows.map(r => r.supremacy ? r.supremacy.p_win_est : null), '', '#39c5cf');
-  }
-
-  // Acciones efectivas por iter: claves derivadas del jsonl (como reward
-  // components) para no perder army_attack_move / place_building / harvest.
-  const AC_COLORS = {
-    army_attack_move: '#f0883e', attack_move: '#ffa657', attack: '#f85149',
-    train: '#3fb950', no_op: '#8b98a9', build: '#58a6ff',
-    place_building: '#79c0ff', harvest: '#d29922', deploy: '#bc8cff',
-    move: '#39c5cf', cancel_production: '#6e7681',
-  };
-  const acKeys = [];
-  for (const k of Object.keys(AC_COLORS)) acKeys.push(k);
-  for (const r of rows) {
-    const h = r.action_hist;
-    if (!h) continue;
-    for (const k of Object.keys(h)) if (!acKeys.includes(k)) acKeys.push(k);
-  }
-  const accSeries = acKeys
-    .map((k, i) => ({ name: k, color: AC_COLORS[k] ?? PALETTE[i % PALETTE.length],
-        values: rows.map(r => (r.action_hist ?? {})[k] ?? null) }))
-    .filter(s => s.values.some(v => v != null && v !== 0));
-  if (accSeries.length) {
-    drawMulti('ch-acc', accSeries);
-  } else {
-    const cv = document.getElementById('ch-acc');
-    cv.width = cv.clientWidth; cv.height = cv.clientHeight;
-    const ctx = cv.getContext('2d');
-    ctx.font = '12px system-ui'; ctx.fillStyle = '#8b98a9';
-    ctx.fillText('Sin datos de acciones — reiniciar el trainer con este parche', 12, 26);
-  }
-
-  // Tasa de resolución: conteo win/lose/incomplete por iter (la suma = nº de episodios).
-  drawMulti('ch-res', [['win', '#3fb950'], ['lose', '#f85149'], ['incomplete', '#8b98a9']]
-    .map(([k, col]) => ({ name: k, color: col,
-        values: rows.map(r => (r.outcomes ?? []).filter(o => o === k).length) })));
-
-  // Edificios de cada bando al cierre (el rival baja cuando raseamos su base).
-  drawTwo('ch-raze',
-          rows.map(r => (r.n_buildings ?? {}).own ?? null), '#3fb950', 'nosotros',
-          rows.map(r => (r.n_buildings ?? {}).enemy ?? null), '#f85149', 'enemigo');
-
-  // Ticks por episodio (media) — ≈51800 es señal de expirar al tope del motor.
-  drawChart('ch-ticks', rows.map(r => r.ticks && r.ticks.length
-      ? r.ticks.reduce((a, b) => a + b, 0) / r.ticks.length : null), '', '#39c5cf');
-
-  // Carrera económica: RECAUDACIÓN bruta del motor ($/kt) como principal
-  // (siempre positiva, inmune a muertes) + riqueza neta como secundaria.
-  const ecoFirst = rows.findIndex(r => r.economy_race);
-  if (ecoFirst >= 0) {
-    // Series completas (longitud = rows) con nulls: alineadas en el eje X.
-    drawMulti('ch-eco', [
-      { name: 'cosecha nosotros', color: '#3fb950',
-        values: rows.map(r => r.economy_race ? r.economy_race.own_harvest_per_1k : null) },
-      { name: 'cosecha rival', color: '#f85149',
-        values: rows.map(r => r.economy_race ? r.economy_race.enemy_harvest_per_1k : null) },
-    ]);
-  }
-
-  const chips = document.getElementById('chips');
-  chips.innerHTML = '';
-  const allOut = [];
-  for (const r of rows.slice(-3)) allOut.push(...r.outcomes);
-  for (const o of allOut.slice(-18)) {
-    const s = document.createElement('span');
-    const key = o === 'win' ? 'win' : o === 'lose' ? 'lose' :
-                o === 'draw' ? 'draw' : 'other';
-    s.className = 'chip ' + key;
-    s.textContent = o === 'incomplete' ? 'inc' : o || '?';
-    chips.appendChild(s);
-  }
-}
-
-function drawChart(id, values, unit, color) {
-  drawTwo(id, values, color, null, null, null, null, unit);
-}
-
-// N series en un mismo eje (para la descomposición del reward)
-function drawMulti(id, series) {
-  const cv = document.getElementById(id);
+function fitCanvas(c) {
   const dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth, h = cv.clientHeight;
-  cv.width = w * dpr; cv.height = h * dpr;
-  const ctx = cv.getContext('2d');
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, w, h);
-  if (!series.length) return;
+  const w = c.clientWidth, h = c.clientHeight;
+  if (c.width !== Math.floor(w*dpr) || c.height !== Math.floor(h*dpr)) {
+    c.width = Math.floor(w*dpr); c.height = Math.floor(h*dpr);
+  }
+  const ctx = c.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
 
-  // Margen derecho reservado a la leyenda (antes 44px -> truncaba nombres
-  // como "new_types"; ahora 96px deja legibles "buildings 3.04").
-  const pad = 10;
-  const allVals = series.flatMap(s => s.values.filter(v => v != null));
-  if (allVals.length < 2) return;
-  const mn = Math.min(...allVals), mx = Math.max(...allVals);
-  const span = (mx - mn) || 1;
-  const n = series[0].values.length;
-  // Leyenda lateral con ancho DINÁMICO: mide el label más largo con
-  // measureText para NO truncar ningún "nombre + valor" (ej. 'cosecha
-  // nosotros 424.12'). RHS se reserva a la derecha para esa leyenda.
-  const rowH = 15, top = 8;
-  ctx.font = '600 11px system-ui';
-  const legend = series.map(s => ({ s, lv: lastNum(s.values) }))
-    .sort((a, b) => (b.lv ?? -Infinity) - (a.lv ?? -Infinity));
-  const labels = legend.map(({ s, lv }) =>
-    `${s.name} ${(lv != null ? lv : 0).toFixed(2)}`);
-  const RHS = Math.ceil(Math.max(...labels.map(t => ctx.measureText(t).width), 96)) + 30;
-  const X = i => pad + (w - 2 * pad - RHS) * i / (n - 1);
-  const Y = v => h - pad - (h - 2 * pad) * (v - mn) / span;
+function drawLines(canvas, series, {ymin=null, ymax=null, fill=false} = {}) {
+  const { ctx, w, h } = fitCanvas(canvas);
+  ctx.clearRect(0,0,w,h);
+  const pad = { t: 8, r: 8, b: 18, l: 36 };
+  const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+  let all = [];
+  for (const s of series) all = all.concat(s.ys.filter(v => v != null && !Number.isNaN(v)));
+  if (!all.length) return;
+  let lo = ymin != null ? ymin : Math.min(...all);
+  let hi = ymax != null ? ymax : Math.max(...all);
+  if (lo === hi) { lo -= 1; hi += 1; }
+  const n = Math.max(...series.map(s => s.ys.length), 1);
+
+  ctx.strokeStyle = "#243041"; ctx.lineWidth = 1;
+  for (let i = 0; i < 4; i++) {
+    const y = pad.t + (ih * i) / 3;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l+iw, y); ctx.stroke();
+    const val = hi - ((hi-lo)*i)/3;
+    ctx.fillStyle = "#8b9bb0"; ctx.font = "10px Segoe UI";
+    ctx.textAlign = "right"; ctx.fillText(val.toFixed(2), pad.l - 4, y + 3);
+  }
 
   for (const s of series) {
-    // Trazo que SALTA huecos: una serie nueva (nulls al inicio) no se dibuja
-    // desde x=0 sino desde su primer dato real, alineada en el eje X temporal
-    // con las demás (que cubren todo rows). Mismo criterio para huecos internos.
-    ctx.beginPath();
+    ctx.strokeStyle = s.color; ctx.lineWidth = 2; ctx.beginPath();
     let started = false;
-    s.values.forEach((v, i) => {
-      if (v == null) { started = false; return; }
-      const px = X(i), py = Y(v);
-      if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
-    });
-    ctx.strokeStyle = s.color; ctx.lineWidth = 2; ctx.stroke();
-
-    // punto del último valor real (respeta huecos)
-    let li = -1, lv = null;
-    for (let i = s.values.length - 1; i >= 0; i--) if (s.values[i] != null) { lv = s.values[i]; li = i; break; }
-    if (li >= 0) { ctx.beginPath(); ctx.arc(X(li), Y(lv), 3.5, 0, 7); ctx.fillStyle = s.color; ctx.fill(); }
-  }
-
-  // Leyenda en COLUMNA derecha, mayor → menor por el último valor de cada serie.
-    legend.forEach(({ s }, i) => {
-    const ty = top + i * rowH;
-    const lx2 = w - RHS + 4;
-    ctx.fillStyle = s.color;
-    ctx.fillRect(lx2, ty + 1, 10, 3);
-    ctx.fillText(labels[i], lx2 + 14, ty + 4);
-  });
-
-  ctx.font = '10px system-ui';
-  ctx.fillStyle = '#8b98a9';
-  ctx.fillText(mx.toFixed(1), 4, 12);
-  ctx.fillText(mn.toFixed(1), 4, h - 2);
-}
-
-function drawTwo(id, valsA, colA, nameA, valsB, colB, nameB, unit = '') {
-  const cv = document.getElementById(id);
-  const dpr = window.devicePixelRatio || 1;
-  const w = cv.clientWidth, h = cv.clientHeight;
-  cv.width = w * dpr; cv.height = h * dpr;
-  const ctx = cv.getContext('2d');
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, w, h);
-
-  const series = [[valsA, colA, 0], [valsB, colB, 1]].filter(s => s[0] && s[0].length > 1);
-  if (!series.length) return;
-
-  // Misma columna derecha que drawMulti (96px): todos los paneles alinean
-  // su valor final en la misma posición horizontal, con el mismo ancho.
-  const RHS = 96;
-  const pad = 10;
-  const allVals = series.flatMap(s => s[0]);
-  const mn = Math.min(...allVals), mx = Math.max(...allVals);
-  const span = (mx - mn) || 1;
-  const X = (i, n) => pad + (w - 2*pad - RHS) * i / (n - 1);
-  const Y = v => h - pad - (h - 2*pad) * (v - mn) / span;
-
-  for (let si = 0; si < series.length; si++) {
-    const [values, color, idx] = series[si];
-    const n = values.length;
-    const firstIdx = values.findIndex(v => v != null);
-    const lastIdx = (() => { for (let i = n - 1; i >= 0; i--) if (values[i] != null) return i; return -1; })();
-
-    // Área bajo la curva, TRUNCADA a los datos reales: una serie nueva (nulls
-    // al inicio) no baja el relleno a x=0, arranca en su primer dato (alineado
-    // en el eje X temporal con las demás).
-    if (firstIdx >= 0) {
-      const grad = ctx.createLinearGradient(0, 0, 0, h);
-      grad.addColorStop(0, color + '30'); grad.addColorStop(1, color + '00');
-      ctx.beginPath();
-      ctx.moveTo(X(firstIdx, n), h - pad);
-      for (let i = firstIdx; i <= lastIdx; i++) if (values[i] != null) ctx.lineTo(X(i, n), Y(values[i]));
-      ctx.lineTo(X(lastIdx, n), h - pad);
-      ctx.closePath(); ctx.fillStyle = grad; ctx.fill();
+    for (let i = 0; i < s.ys.length; i++) {
+      const v = s.ys[i];
+      if (v == null || Number.isNaN(v)) { started = false; continue; }
+      const x = pad.l + (n === 1 ? iw/2 : (i / (n-1)) * iw);
+      const y = pad.t + (1 - (v - lo) / (hi - lo)) * ih;
+      if (!started) { ctx.moveTo(x,y); started = true; } else ctx.lineTo(x,y);
     }
-
-    // línea (salta huecos: empieza en el primer dato real, alineado en X)
-    ctx.beginPath();
-    let started = false;
-    values.forEach((v, i) => {
-      if (v == null) { started = false; return; }
-      const px = X(i, n), py = Y(v);
-      if (!started) { ctx.moveTo(px, py); started = true; } else { ctx.lineTo(px, py); }
-    });
-    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
-
-    // último punto real
-    if (lastIdx >= 0) { ctx.beginPath(); ctx.arc(X(lastIdx, n), Y(values[lastIdx]), 3.5, 0, 7); ctx.fillStyle = color; ctx.fill(); }
+    ctx.stroke();
+    if (fill && s.ys.length) {
+      ctx.globalAlpha = 0.12; ctx.fillStyle = s.color;
+      // simple area under last contiguous run skipped for clarity
+      ctx.globalAlpha = 1;
+    }
   }
-
-  // Columna derecha, mayor → menor por el último valor de cada serie.
-  const rowH = 15, top = 8;
-  const legend = series.map(([values, color]) => ({ values, color, lv: lastNum(values) }))
-    .sort((a, b) => (b.lv ?? -Infinity) - (a.lv ?? -Infinity));
-  legend.forEach(({ color, lv }, i) => {
-    const ty = top + i * rowH;
-    const lx2 = w - RHS + 4;
-    ctx.fillStyle = color;
-    ctx.fillRect(w - RHS + 4, ty + 1, 10, 3);
-    ctx.font = '600 11px system-ui';
-    ctx.fillText((lv != null ? lv : 0).toFixed(2) + unit, lx2 + 14, ty + 4);
-  });
-
-  // escala (no drawMulti la pinta así, pero los charts de 1-2 series la usan)
-  ctx.font = '10px system-ui'; ctx.fillStyle = '#8b98a9';
-  ctx.fillText(mx.toFixed(1), 4, 12);
-  ctx.fillText(mn.toFixed(1), 4, h - 2);
 }
 
-load();
-setInterval(load, 2000);
+function drawStackedBars(canvas, cats) {
+  // cats: [{label, win, lose, incomplete}]
+  const { ctx, w, h } = fitCanvas(canvas);
+  ctx.clearRect(0,0,w,h);
+  const pad = { t: 8, r: 8, b: 22, l: 8 };
+  const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+  const n = cats.length || 1;
+  const bw = Math.max(4, iw / n - 2);
+  for (let i = 0; i < cats.length; i++) {
+    const c = cats[i];
+    const tot = (c.win||0)+(c.lose||0)+(c.inc||0) || 1;
+    let y = pad.t + ih;
+    const x = pad.l + i * (iw / n) + 1;
+    const parts = [
+      { v: c.win||0, color: "#3dd68c" },
+      { v: c.lose||0, color: "#ff6b7a" },
+      { v: c.inc||0, color: "#8b9bb0" },
+    ];
+    for (const p of parts) {
+      const hh = (p.v / tot) * ih;
+      y -= hh;
+      ctx.fillStyle = p.color;
+      ctx.fillRect(x, y, bw, Math.max(0, hh));
+    }
+  }
+}
+
+async function fetchText(url) {
+  const r = await fetch(url + "?t=" + Date.now(), { cache: "no-store" });
+  if (!r.ok) throw new Error(r.status + " " + url);
+  return r.text();
+}
+async function fetchJson(url) {
+  const t = await fetchText(url);
+  return JSON.parse(t);
+}
+
+function renderPfsp(stats) {
+  const box = $("pfspBox");
+  const pill = $("pfspPill");
+  if (!stats || !stats.bots) {
+    pill.className = "pill off"; pill.textContent = "PFSP off";
+    box.innerHTML = '<div class="empty">Sin pfsp_stats.json — corre con --pfsp</div>';
+    return;
+  }
+  pill.className = "pill on";
+  pill.textContent = "PFSP · ancla " + (stats.anchor || "?");
+  const bots = stats.summary || stats.bots;
+  const rows = Object.entries(bots).map(([name, row]) => {
+    const games = row.games || 0;
+    const wins = row.wins || 0;
+    const wr = row.wr != null ? row.wr : (games ? wins/games : 0);
+    const pri = row.priority != null ? row.priority : Math.max(0.05, 1 - wr);
+    return { name, games, wins, wr, pri };
+  }).sort((a,b) => b.pri - a.pri);
+
+  let html = `<table><thead><tr>
+    <th>Bot</th><th class="num">WR</th><th class="num">W/G</th><th>Prioridad</th></tr></thead><tbody>`;
+  for (const r of rows) {
+    const hot = r.name !== stats.anchor && r.pri > 0.55;
+    html += `<tr>
+      <td>${r.name}${r.name===stats.anchor?' <span class="pill on" style="font-size:10px">ancla</span>':''}</td>
+      <td class="num ${r.wr>=0.4?'good':(r.wr<0.2?'bad':'')}">${fmtPct(r.wr)}</td>
+      <td class="num">${r.wins}/${r.games}</td>
+      <td><div class="bar" title="${fmtNum(r.pri,2)}"><i class="${hot?'hot':'ok'}" style="width:${Math.min(100,r.pri*100)}%"></i></div></td>
+    </tr>`;
+  }
+  html += "</tbody></table>";
+  box.innerHTML = html;
+}
+
+function buildAlerts(rows, pfsp) {
+  const a = [];
+  const r = last(rows);
+  if (!r) { $("alerts").innerHTML = '<div class="empty">Sin métricas todavía</div>'; return; }
+  const atk = attackFrac(r.action_hist);
+  const ent = r.entropy;
+  const r20 = r.winrate_rolling20;
+  const edge = r.economy_race && r.economy_race.harvest_edge;
+  const ownB = r.n_buildings && r.n_buildings.own;
+
+  if (atk > 0.9 && (ownB == null || ownB < 0.5))
+    a.push(["bad", "Attack-spam collapse: >90% attack y casi sin base"]);
+  if (ent != null && ent < 1.0)
+    a.push(["warn", "Entropy baja (" + fmtNum(ent,2) + ") — riesgo de colapso"]);
+  if (r20 === 0)
+    a.push(["bad", "Rolling20 = 0"]);
+  if (edge != null && edge < -500)
+    a.push(["warn", "Harvest edge muy negativo (" + fmtNum(edge,0) + ")"]);
+  if (r.clip_frac != null && r.clip_frac > 0.35)
+    a.push(["warn", "clip_frac alto (" + fmtNum(r.clip_frac,2) + ")"]);
+  if (pfsp && pfsp.summary) {
+    const weak = Object.entries(pfsp.summary)
+      .filter(([n,s]) => n !== pfsp.anchor && (s.games||0) >= 4 && (s.wr||0) < 0.2)
+      .map(([n]) => n);
+    if (weak.length)
+      a.push(["accent", "PFSP flojo vs: " + weak.join(", ")]);
+  }
+  if (!a.length) {
+    $("alerts").innerHTML = '<div class="empty" style="color:var(--good)">Sin alertas</div>';
+    return;
+  }
+  $("alerts").innerHTML = a.map(([cls,msg]) =>
+    `<div style="padding:8px 0;border-bottom:1px solid var(--border)" class="${cls}">${msg}</div>`
+  ).join("");
+}
+
+function render(rows, pfsp, best) {
+  const r = last(rows);
+  $("updated").textContent = new Date().toLocaleTimeString();
+  $("livePill").textContent = rows.length ? (rows.length + " iters") : "sin data";
+
+  if (!r) {
+    $("kWr").textContent = "—";
+    return;
+  }
+
+  $("kWr").textContent = fmtPct(r.winrate);
+  $("kWr").className = "val " + (r.winrate >= 0.35 ? "good" : (r.winrate < 0.15 ? "bad" : "accent"));
+  $("kWrSub").textContent = `${r.wins||0} / ${r.total||0}` + (r.bot_type ? ` · ancla ${r.bot_type}` : "");
+
+  $("kR20").textContent = fmtPct(r.winrate_rolling20);
+  $("kR20").className = "val " + ((r.winrate_rolling20||0) >= 0.35 ? "good" : ((r.winrate_rolling20||0) === 0 ? "bad" : ""));
+
+  $("kIter").textContent = r.iter;
+  const eta = r.eta_min != null ? `eta ${fmtNum(r.eta_min,0)}m` : "";
+  $("kIterSub").textContent = [r.bot_type, eta, best && best.iter != null ? `best@${best.iter}` : ""]
+    .filter(Boolean).join(" · ");
+
+  const edge = r.economy_race && r.economy_race.harvest_edge;
+  $("kHarvest").textContent = edge == null ? "—" : fmtNum(edge, 0);
+  $("kHarvest").className = "val " + (edge == null ? "" : (edge >= 0 ? "good" : "bad"));
+
+  // charts
+  const wr = rows.map(x => x.winrate);
+  const r20 = rows.map(x => x.winrate_rolling20);
+  const iwr = rows.map(x => x.iter_winrate);
+  drawLines($("cWr"), [
+    { ys: wr, color: "#6ea8fe" },
+    { ys: r20, color: "#3dd68c" },
+    { ys: iwr, color: "#fb923c" },
+  ], { ymin: 0, ymax: 1 });
+
+  // outcomes last ~40 episodes flattened from last 10 iters
+  const recent = rows.slice(-10);
+  const flat = [];
+  for (const row of recent) {
+    const outs = row.outcomes || [];
+    for (const o of outs) flat.push(String(o));
+  }
+  const last40 = flat.slice(-40);
+  // group in bins of 4 for bars
+  const cats = [];
+  for (let i = 0; i < last40.length; i += 4) {
+    const chunk = last40.slice(i, i+4);
+    cats.push({
+      win: chunk.filter(x => x.startsWith("win")).length,
+      lose: chunk.filter(x => x.startsWith("lose")).length,
+      inc: chunk.filter(x => x.startsWith("incomplete") || x === "engine_error").length,
+    });
+  }
+  drawStackedBars($("cOut"), cats);
+  const tw = last40.filter(x => x.startsWith("win")).length;
+  const tl = last40.filter(x => x.startsWith("lose")).length;
+  const ti = last40.length - tw - tl;
+  $("outChips").innerHTML = `
+    <div class="chip"><div class="l">win</div><div class="v good">${tw}</div></div>
+    <div class="chip"><div class="l">lose</div><div class="v bad">${tl}</div></div>
+    <div class="chip"><div class="l">other</div><div class="v">${ti}</div></div>`;
+
+  renderPfsp(pfsp);
+
+  drawLines($("cEco"), [
+    { ys: rows.map(x => x.economy_race && x.economy_race.own_harvest_per_1k), color: "#3dd68c" },
+    { ys: rows.map(x => x.economy_race && x.economy_race.enemy_harvest_per_1k), color: "#ff6b7a" },
+    { ys: rows.map(x => x.economy_race && x.economy_race.harvest_edge), color: "#67e8f9" },
+  ]);
+
+  drawLines($("cHealth"), [
+    { ys: rows.map(x => x.entropy), color: "#b794f6" },
+    { ys: rows.map(x => x.clip_frac), color: "#f5c542" },
+    { ys: rows.map(x => x.kl == null ? null : x.kl * 10), color: "#6ea8fe" },
+  ]);
+
+  drawLines($("cAct"), [
+    { ys: rows.map(x => attackFrac(x.action_hist)), color: "#ff6b7a" },
+    { ys: rows.map(x => ecoFrac(x.action_hist)), color: "#3dd68c" },
+    { ys: rows.map(x => noopFrac(x.action_hist)), color: "#8b9bb0" },
+  ], { ymin: 0, ymax: 1 });
+
+  const rc = (row, k) => (row.reward_components && row.reward_components[k]) || 0;
+  drawLines($("cRew"), [
+    { ys: rows.map(x => rc(x,"win")), color: "#3dd68c" },
+    { ys: rows.map(x => rc(x,"raze")), color: "#fb923c" },
+    { ys: rows.map(x => rc(x,"mining")), color: "#67e8f9" },
+    { ys: rows.map(x => rc(x,"defense_loss")), color: "#ff6b7a" },
+  ]);
+
+  drawLines($("cBld"), [
+    { ys: rows.map(x => x.n_buildings && x.n_buildings.own), color: "#3dd68c" },
+    { ys: rows.map(x => x.n_buildings && x.n_buildings.enemy), color: "#ff6b7a" },
+  ]);
+
+  buildAlerts(rows, pfsp);
+}
+
+let failStreak = 0;
+async function tick() {
+  try {
+    const [mt, pfsp, best] = await Promise.all([
+      fetchText(METRICS).then(parseMetrics),
+      fetchJson(PFSP).catch(() => null),
+      fetchJson(BEST).catch(() => null),
+    ]);
+    failStreak = 0;
+    $("livePill").className = "pill on";
+    render(mt, pfsp, best);
+  } catch (e) {
+    failStreak++;
+    $("livePill").className = "pill off";
+    $("livePill").textContent = "offline";
+    if (failStreak === 1) console.warn(e);
+  }
+}
+
+tick();
+setInterval(tick, POLL_MS);
+window.addEventListener("resize", () => tick());
 </script>
 </body>
 </html>

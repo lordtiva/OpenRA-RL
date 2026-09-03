@@ -36,6 +36,7 @@ from rl.rollout import (add_advantages, center_advantage_by_episode,
                         collect_one_episode, flatten_samples)
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
 from rl.best_ckpt import batch_is_dead, maybe_update_best
+from rl.pfsp import BotPFSP, parse_pool
 from rl.imitation import EliteBuffer, balance_bc_samples, lambda_bc_at
 from rl.scripted_teacher import ScriptedTeacher
 
@@ -228,6 +229,23 @@ async def amain(args):
         reset_kwargs["bot_type"] = args.bot_type
         print(f"Rival: bot_type={args.bot_type}")
 
+    pfsp = None
+    if getattr(args, "pfsp", False):
+        anchor = args.bot_type or "easy"
+        pfsp = BotPFSP(
+            args.ckpt_dir,
+            anchor=anchor,
+            pool=parse_pool(getattr(args, "pfsp_pool", None)),
+            anchor_prob=float(getattr(args, "pfsp_anchor_prob", 0.5) or 0.5),
+            prev20_every=int(getattr(args, "pfsp_prev20_every", 20) or 20),
+        )
+        print(
+            f"PFSP bots ON: {int(pfsp.anchor_prob*100)}% vs {pfsp.anchor}, "
+            f"else pool={pfsp.pool} (priority=who beats you). "
+            f"North-star wr / best.pt solo cuentan vs {pfsp.anchor}.",
+            flush=True,
+        )
+
     def launch_collection(prev_task):
         """Lanza una tanda de episodios repartidos entre los workers."""
         per_worker = [args.episodes // pool_size] * pool_size
@@ -240,6 +258,11 @@ async def amain(args):
             async def worker(idx, n):
                 for _ in range(n):
                     traj, outcome = None, None
+                    ep_kwargs = dict(reset_kwargs)
+                    ep_bot = ep_kwargs.get("bot_type") or args.bot_type or "easy"
+                    if pfsp is not None:
+                        ep_bot = pfsp.sample()
+                        ep_kwargs["bot_type"] = ep_bot
                     # Reset con reintentos: el daemon .NET agotado falla en
                     # reset ("bridge failed to start") aunque los healthchecks
                     # HTTP pasen. Reintenta y aborta limpio si es persistente.
@@ -254,7 +277,7 @@ async def amain(args):
                                 temperature=args.temperature,
                                 max_steps=args.max_steps,
                                 macro_ticks=args.macro_ticks,
-                                reset_kwargs=reset_kwargs,
+                                reset_kwargs=ep_kwargs,
                                 shaper_preset=args.shaper_preset,
                                 auto_support=args.auto_support)
                             break
@@ -296,10 +319,12 @@ async def amain(args):
                     # collect_one_episode ya intentó destroy. Forzar un reset
                     # de saneamiento best-effort antes del próximo episodio
                     # del mismo worker para no arrastrar el envenenamiento.
+                    if outcome is not None:
+                        outcome["bot_type"] = ep_bot
                     if outcome.get("result") == "engine_error":
                         try:
                             await asyncio.wait_for(
-                                pool[idx].reset(**reset_kwargs), timeout=30)
+                                pool[idx].reset(**ep_kwargs), timeout=30)
                         except Exception:
                             # Si el saneamiento cuelga, recrear WS como arriba
                             try:
@@ -459,7 +484,11 @@ async def amain(args):
             0.9 * ema_update + 0.1 * dt_update
         eta_s = (ema_collect + ema_update * 0.3) * (args.iters - it)
 
+        if pfsp is not None:
+            pfsp.record_many(outcomes)
         for o in outcomes:
+            if pfsp is not None and o.get("bot_type") != pfsp.anchor:
+                continue
             total += 1
             wins += 1 if str(o["result"]).startswith("win") else 0
 
@@ -481,6 +510,8 @@ async def amain(args):
         if it % 10 == 0:
             save_checkpoint(os.path.join(args.ckpt_dir, f"iter{it:04d}.pt"),
                             net, trainer.opt, it, extra=ckpt_blob)
+        if pfsp is not None and pfsp.maybe_rotate_prev20(it, ckpt_path):
+            print(f"  [pfsp] prev20.pt <- latest @ iter {it}", flush=True)
 
         if args.metrics:
             os.makedirs(os.path.dirname(args.metrics) or ".", exist_ok=True)
@@ -492,9 +523,14 @@ async def amain(args):
             sim_tps = ticks_total / collect_s if collect_s > 0 else 0.0
             # winrate rodante: últimas 20 partidas (reacciona más rápido
             # que el global acumulado)
-            recent_results.extend(o["result"] for o in outcomes)
-            rolling = sum(1 for r in recent_results[-20:] if str(r).startswith("win")) \
-                / min(len(recent_results), 20)
+            if pfsp is not None:
+                recent_results.extend(
+                    o["result"] for o in outcomes
+                    if o.get("bot_type") == pfsp.anchor)
+            else:
+                recent_results.extend(o["result"] for o in outcomes)
+            rolling = (sum(1 for r in recent_results[-20:] if str(r).startswith("win"))
+                       / min(len(recent_results), 20)) if recent_results else 0.0
             # Modo macro: ticks avanzados vía advance() + interrupciones
             adv_total = sum(o.get("advanced_ticks", 0) for o in outcomes)
             int_count = {}
@@ -556,9 +592,18 @@ async def amain(args):
             if nbs:
                 nb_mean = {side: round(sum(b[side] for b in nbs) / len(nbs), 1)
                            for side in ("own", "enemy")}
+            if pfsp is not None:
+                anchor_outs = [o for o in outcomes if o.get("bot_type") == pfsp.anchor]
+            else:
+                anchor_outs = list(outcomes)
             metrics_row = {
                     "iter": it,
-                    "bot_type": args.bot_type,
+                    "bot_type": (pfsp.anchor if pfsp is not None else args.bot_type),
+                    **({"pfsp": True,
+                        "pfsp_pool": list(pfsp.pool),
+                        "pfsp_stats": pfsp.summary(),
+                        "opponent_bots": [o.get("bot_type") for o in outcomes]}
+                       if pfsp is not None else {}),
                     "elapsed_s": round(elapsed_s, 1),
                     "eta_min": round(max(eta_s, 0) / 60, 1),
                     "collect_s": round(collect_s, 1),
@@ -583,9 +628,10 @@ async def amain(args):
                     "winrate": round(wins / total, 3) if total else 0.0,
                     "winrate_rolling20": round(rolling, 3),
                     "iter_winrate": round(
-                        (sum(1 for o in outcomes
+                        (sum(1 for o in (anchor_outs or outcomes)
                              if str(o.get("result", "")).startswith("win"))
-                         / len(outcomes)) if outcomes else 0.0, 3),
+                         / len(anchor_outs or outcomes))
+                        if (anchor_outs or outcomes) else 0.0, 3),
                     "mean_episode_reward": round(mean_ep_reward, 4),
                     "reward_components": comp_means,
                     "sim_ticks_per_s": round(sim_tps),
@@ -684,9 +730,18 @@ def main():
     ap.add_argument("--bot-type", default=None,
                     choices=("beginner", "easy", "medium", "hard", "brutal",
                              "dummy"),
-                    help="Personalidad del bot rival. 'dummy' = bot ESTATICO "
-                         "(sin IA: no cosecha/construye/repara; base pre-"
-                         "colocada no se regenera). Vacio = beginner.")
+                    help="Personalidad del bot rival. Con --pfsp es el ANCLA "
+                         "(north star + fraction of games).")
+    ap.add_argument("--pfsp", action="store_true",
+                    help="PFSP pobre de bots: fraction vs --bot-type (ancla), "
+                         "resto vs pool priorizado al que mas te gana. "
+                         "No es RL-vs-RL.")
+    ap.add_argument("--pfsp-pool", default="beginner,easy,medium",
+                    help="Bots del pool PFSP, separados por coma.")
+    ap.add_argument("--pfsp-anchor-prob", type=float, default=0.5,
+                    help="Probabilidad de jugar vs el ancla (--bot-type).")
+    ap.add_argument("--pfsp-prev20-every", type=int, default=20,
+                    help="Cada N iters copia latest.pt -> prev20.pt.")
     ap.add_argument("--roles-vocab", action="store_true",
                     help="Traductor universal: sembrar la cabeza de items con "
                          "ROLES funcionales estables (rl.roles) en vez de "

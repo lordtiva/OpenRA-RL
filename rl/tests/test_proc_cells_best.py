@@ -26,10 +26,13 @@ from rl.action_adapter import (
 )
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.auto_support import (
+    FOG_SCOUT_ARMY_FOR_MORE, FOG_SCOUT_N_BASE, FOG_SCOUT_N_MORE,
     MIN_ARMY_FOR_ASSAULT, MIN_HARVESTERS,
     RAID_HOME_ORDERS, STAGING_STEPS,
-    STANCE_ATTACK_ANYTHING, SUPPORT_ASSAULT, SUPPORT_REMNANT, SUPPORT_WAR_NUDGE,
-    apply_dest_credit, support_commands, war_nudge_cell,
+    STANCE_ATTACK_ANYTHING, SUPPORT_ASSAULT, SUPPORT_FOG_SCOUT,
+    SUPPORT_REMNANT, SUPPORT_WAR_NUDGE,
+    apply_dest_credit, fog_scout_count, fog_scout_destinations,
+    support_commands, war_nudge_cell,
 )
 from rl.best_ckpt import (
     DROUGHT_PEAK,
@@ -418,14 +421,30 @@ check("mask: pack en el campo tapo army_attack_move",
       is False)
 check("SUPPORT_ASSAULT off (no pack/hunt/rally/crédito)", SUPPORT_ASSAULT is False)
 check("SUPPORT_WAR_NUDGE on (raid + contacto visible)", SUPPORT_WAR_NUDGE is True)
-check("SUPPORT_REMNANT off (Run 34 wr 33→17)", SUPPORT_REMNANT is False)
-check("raid peel cap", RAID_HOME_ORDERS == 6)
+check("SUPPORT_REMNANT off (Run 34 wr 33->17)", SUPPORT_REMNANT is False)
+check("raid peel cap", RAID_HOME_ORDERS == 24)
 cmds_has_tent = support_commands(
     _obs(harv=1, cash=5000, bldgs=("fact", "proc", "tent"),
          avail=("e1", "tent", "proc"), units=army4))
 check("auto-tent no spamea si ya hay tent",
       not any(c.action.value == "build" and c.item_type in ("tent", "barr")
               for c in cmds_has_tent))
+check("con 1 proc y cuartel, BUILD el segundo proc (fast 2-proc)",
+      any(c.action.value == "build" and c.item_type == "proc" for c in cmds_has_tent))
+
+cmds_2proc_done = support_commands(
+    _obs(harv=2, cash=5000, bldgs=("fact", "proc", "proc", "tent"),
+         avail=("e1", "tent", "proc"), units=army4))
+check("con 2 procs no BUILD un tercer proc (techo MAX_SUPPORT_PROCS)",
+      not any(c.action.value == "build" and c.item_type == "proc" for c in cmds_2proc_done))
+
+prod_proc2 = [NS(queue_type="Building", item="proc", progress=1.0, paused=False)]
+cmds_pproc2 = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc", "tent"), avail=("proc",), prod=prod_proc2,
+         units=army4))
+check("segundo proc PLACE cuando esta listo",
+      any(c.action.value == "place_building" and c.item_type == "proc" for c in cmds_pproc2))
+
 cmds_drip4 = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army4, enemies=[_u(99, "e1", 90, 12)]))
 check("4 rifles NO asaltan contacto lejano (pack 12)",
@@ -439,9 +458,15 @@ check("12 idle en casa + enemigo visible: army_attack_move a ese contacto",
       and int(aam_as[0].target_y) == 12)
 cmds_beacon = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army12))
-check("sin contacto visible: no manda al beacon (95,11)",
-      not any(c.action.value in ("army_attack_move", "attack_move")
-              for c in cmds_beacon))
+am_fog = [c for c in cmds_beacon if c.action.value == "attack_move"]
+check("sin contacto: no army_attack_move al beacon",
+      not any(c.action.value == "army_attack_move" for c in cmds_beacon))
+check("sin contacto + pack: fog scout emite attack_move (no army)",
+      SUPPORT_FOG_SCOUT and len(am_fog) == FOG_SCOUT_N_BASE)
+check("fog scout no apunta al beacon (95,11)",
+      all(not (int(c.target_x) == 95 and int(c.target_y) == 11) for c in am_fog))
+check("fog scout destinos distintos",
+      len({(int(c.target_x), int(c.target_y)) for c in am_fog}) == len(am_fog))
 cmds_raid = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army12,
          enemies=[_u(99, "e1", 14, 17)]))
@@ -449,8 +474,8 @@ aam_raid = [c for c in cmds_raid if c.action.value == "army_attack_move"]
 am_raid = [c for c in cmds_raid if c.action.value == "attack_move"]
 check("raid en casa: NO army_attack_move (no yank de grupo)",
       len(aam_raid) == 0)
-check("raid en casa: attack_move idle local al raid",
-      len(am_raid) == RAID_HOME_ORDERS
+check("raid en casa: attack_move idle local al raid (toda la tropa de casa defiende)",
+      len(am_raid) == 12
       and all(int(c.target_x) == 14 and int(c.target_y) == 17 for c in am_raid)
       and all(int(c.actor_id) in range(1, 13) for c in am_raid))
 cmds_raid4 = support_commands(
@@ -886,7 +911,7 @@ lc0 = net_c2._logits_cell(fmap, t_am, c_mask, h, tokens, feats, valid,
                           torch.tensor([0]))
 lc1 = net_c2._logits_cell(fmap, t_am, c_mask, h, tokens, feats, valid,
                           torch.tensor([1]))
-check("dist_cell condiciona al slot (rifle ≠ MCV)",
+check("dist_cell condiciona al slot (rifle != MCV)",
       not torch.allclose(lc0, lc1))
 
 torch.nn.init.ones_(net_c2.scatter_proj.weight)
@@ -1044,7 +1069,7 @@ if ckpt_a.exists():
     old_mlp = blob_a["net"]["unit_mlp.0.weight"]
     check("2c-B mlp copia feats 10",
           torch.allclose(adapted_a["unit_mlp.0.weight"][:, :10], old_mlp))
-    check("2c-B mlp extra ≈0",
+    check("2c-B mlp extra approx 0",
           float(adapted_a["unit_mlp.0.weight"][:, 10:].abs().sum()) == 0.0)
     old_sc = blob_a["net"]["scatter_proj.weight"]
     check("2c-B scatter copia 10",
@@ -1083,6 +1108,46 @@ if ckpt_a.exists():
             hits.append(int(o["unit_slot"].item()))
     check("dist_unit no samplea slot enemigo",
           all(h != MAX_UNITS for h in hits) and all(h < MAX_UNITS for h in hits))
+
+
+print("=== fog scout ===")
+check("fog scout flag on", SUPPORT_FOG_SCOUT is True)
+check("2 scouts con pack 12", fog_scout_count(12) == FOG_SCOUT_N_BASE == 2)
+check("3 scouts con army grande", fog_scout_count(FOG_SCOUT_ARMY_FOR_MORE) == FOG_SCOUT_N_MORE == 3)
+army20 = [_u(i, "e1", 12 + (i % 5), 16 + (i // 5)) for i in range(1, 21)] + [
+    _u(99, "harv", 14, 16)]
+cmds_fog20 = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army20, w=64, h=64))
+am20 = [c for c in cmds_fog20 if c.action.value == "attack_move"]
+check("army 20 sin contacto: 3 scouts", len(am20) == 3)
+check("3 scouts destinos distintos",
+      len({(int(c.target_x), int(c.target_y)) for c in am20}) == 3)
+# Spatial: half map fog, half explored — dests should land in fog half when possible.
+h, w, ch = 32, 32, 9
+arr = np.zeros((h, w, ch), dtype=np.float32)
+arr[:, :, 3] = 1.0  # passable
+arr[:, :16, 4] = 1.0  # left explored
+arr[:, 16:, 4] = 0.0  # right fog
+spatial_b64 = _b64.b64encode(arr.tobytes()).decode("ascii")
+obs_sp = _obs(harv=1, bldgs=("fact", "proc"), units=army12, w=w, h=h,
+              spatial_map=spatial_b64)
+dests_sp = fog_scout_destinations(obs_sp, 2)
+check("spatial fog dests: 2 celdas", len(dests_sp) == 2)
+check("spatial fog dests en mitad derecha (niebla)",
+      all(x >= 14 for x, y in dests_sp))
+# Sticky: already 2 away from base → no new scouts from home idles.
+field2 = [_u(i, "e1", 50, 10, idle=False) for i in range(1, 3)]
+home10 = [_u(i, "e1", 12 + (i % 4), 16) for i in range(3, 15)]
+cmds_sticky = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=field2 + home10 + [_u(99, "harv", 14, 16)]))
+am_st = [c for c in cmds_sticky if c.action.value == "attack_move"]
+check("2 scouts ya en campo: no manda más (sticky)", len(am_st) == 0)
+# Contact visible → nudge, not scout (army_attack_move, no extra fog fan-out beyond peel).
+cmds_vis = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=army12, enemies=[_u(99, "e1", 90, 12)]))
+check("con contacto: army_attack_move (nudge), no solo scouts",
+      any(c.action.value == "army_attack_move" for c in cmds_vis))
+
 
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS"))
 sys.exit(0 if ok else 1)
