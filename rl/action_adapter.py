@@ -406,6 +406,24 @@ def index_to_command(obs, chosen_type: int, unit_slot: int, cell_flat: int,
     return action
 
 
+def _item_slot_of(item_type: str, aidx) -> int:
+    """Concreto (proc/gun) o rol -> slot en aidx.items (roles).
+
+    PLACE/cancel mutan item_type al InternalName; TRAIN/BUILD ya traen rol.
+    Mismo orden que SIL en imitation.py: rol primero, concreto si ya está.
+    """
+    if not item_type or not getattr(aidx, "items", None):
+        return 0
+    items = aidx.items
+    if item_type in items:
+        return int(items.index(item_type))
+    from rl.roles import role_of
+    role = role_of(item_type)
+    if role in items:
+        return int(items.index(role))
+    return 0
+
+
 def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
                                cell_flat: int, item_slot: int,
                                aidx: ActionIndex):
@@ -515,9 +533,9 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         cx, cy = remap_move_cell(obs, aidx, cx, cy, actor_id)
     eff_cell_flat = int(cy) * aidx.w + int(cx)
     if t_name in ("train", "build", "place_building", "cancel_production"):
-        # item_type pudo ser corregido arriba -> localizar su slot real
-        if item_type in aidx.items:
-            eff_item_slot = aidx.items.index(item_type)
+        # PLACE/cancel dejan item_type concreto (proc/gun/tent); aidx.items
+        # son roles. Sin role_of el slot queda el muestreado (auditoría 1.4).
+        eff_item_slot = _item_slot_of(item_type, aidx)
     if t_name == "harvest":
         h_id = _any_harvester(obs)
         if h_id and h_id in aidx.unit_ids:

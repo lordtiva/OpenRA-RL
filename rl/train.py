@@ -70,28 +70,36 @@ def process_results(results, gamma, lam, verbose=True,
     outcomes = [o for _, o in results]
     for traj in episodes:
         add_advantages(traj, gamma=gamma, lam=lam)
+
+    def _concat_advs():
+        chunks = [
+            np.array([s["adv"] for s in traj], dtype=np.float32)
+            for traj in episodes if traj
+        ]
+        return np.concatenate(chunks) if chunks else None
+
     if adv_mode == "episode":
         center_advantage_by_episode(episodes)
         # F8: el escalado que antes hacía el trainer vive acá (centrado por
         # episodio + división por la std del BATCH COMPLETO ≈ escala histórica
         # exacta; ~1200 muestras, no grupos chicos).
-        all_advs = np.concatenate(
-            [np.array([s["adv"] for s in traj], dtype=np.float32)
-             for traj in episodes if traj])
-        sd = float(all_advs.std())
-        if sd > 1e-8:
-            for traj in episodes:
-                for s in traj:
-                    s["adv"] = s["adv"] / sd
+        # 4 traj vacías (engine_error antes del primer step) → skip, no
+        # np.concatenate([]) (auditoría 1.3).
+        all_advs = _concat_advs()
+        if all_advs is not None:
+            sd = float(all_advs.std())
+            if sd > 1e-8:
+                for traj in episodes:
+                    for s in traj:
+                        s["adv"] = s["adv"] / sd
     elif adv_mode == "global":
-        all_advs = np.concatenate(
-            [np.array([s["adv"] for s in traj], dtype=np.float32)
-             for traj in episodes if traj])
-        mu, sd = float(all_advs.mean()), float(all_advs.std())
-        if sd > 1e-8:
-            for traj in episodes:
-                for s in traj:
-                    s["adv"] = (s["adv"] - mu) / sd
+        all_advs = _concat_advs()
+        if all_advs is not None:
+            mu, sd = float(all_advs.mean()), float(all_advs.std())
+            if sd > 1e-8:
+                for traj in episodes:
+                    for s in traj:
+                        s["adv"] = (s["adv"] - mu) / sd
 
     # Marcar cada muestra con su episodio (_ep) para que el entrenamiento por
     # segmentos (BPTT) no cruce entre partidas distintas.
@@ -169,7 +177,9 @@ async def amain(args):
     print("Nudge: raid=attack_move idle casa; push=farthest/prod. Sin beacon/crédito.")
     print("Pack-12: army_attack_move de la red solo con >=12 combate en casa.")
     print("PLACE: colas Building+Defense. Harvest: idle sin celda (hasta 2). TRAIN 2do harv.")
+    print("Higiene: PLACE/cancel crédito via role_of (no palanca wr).")
     print("SIL: solo wins, even-pick por win, prefiere <40k ticks. Sequía wr20 restaura best.")
+    print("Update: BPTT batcheado + AMP fp16 + prefetch GPU una vez (no AdamW/Lion).")
     print("Overlap: collect k+1 (infer_net) || update k (thread)")
     print(f"Server: {args.url} | {args.episodes} ep/iter, "
           f"k_skip={args.k_skip}, pool={args.concurrency}"

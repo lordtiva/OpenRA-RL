@@ -73,13 +73,13 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Capa 2c-B + peel + 2do harv. Resume 1141. Remate off. SIL even-pick <40k.
-# Pack-12: la política no army_attack_move sin ≥12 combate en casa (drip).
-# Sequía wr20 restaura best. No C, no 128, no hard, no assault-full, no remate.
+# Higiene PLACE/cancel role_of + concat vacío. Resume 1141. No palanca wr.
+# Pack-12+SIL even-pick+AMP se quedan. Isla SUPPORT_ASSAULT no se borra.
+# Smoke 20 iters (--iters 1161). H/KL finitos; wr no es el bar.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
-    "--iters", "1400",
+    "--iters", "1161",
     "--concurrency", "4",
     "--max-steps", "1000",
     "--macro-ticks", "50",

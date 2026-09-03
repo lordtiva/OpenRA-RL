@@ -264,6 +264,43 @@ act_tent_p, _ = index_to_command_effective(
 check("PLACE sampled barracks sigue poniendo tent",
       act_tent_p.commands[0].item_type == "tent")
 
+# PLACE/cancel crédito: concreto -> rol en aidx.items (auditoría 1.4).
+from rl.roles import role_of as _role_of
+wrong_slot = (len(aidx_def.train_items)
+              + aidx_def.build_items.index("barracks"))
+act_cred, (_et_p, _eu_p, ei_p, _ec_p) = index_to_command_effective(
+    obs_def, TYPE_TO_IDX["place_building"], 0, 16 * 128 + 12,
+    wrong_slot, aidx_def)
+gun_role_slot = (len(aidx_def.train_items)
+                 + aidx_def.build_items.index("defense_gun"))
+check("PLACE emite gun aunque sampleó barracks",
+      act_cred.commands[0].item_type == "gun")
+check("PLACE eff_item_slot es defense_gun, no barracks",
+      ei_p == gun_role_slot)
+
+obs_cancel = _obs(
+    harv=1, bldgs=("fact", "proc"),
+    avail=("e1", "tent", "proc"),
+    units=[_u(1, "e1", 12, 16)],
+    prod=[NS(queue_type="Building", item="tent", progress=0.4, paused=False)],
+)
+aidx_c = ActionIndex(obs_cancel, Vocab())
+other = (aidx_c.items.index("infantry_basic")
+         if "infantry_basic" in aidx_c.items else 0)
+act_c, (_et_c, _eu_c, ei_c, _ec_c) = index_to_command_effective(
+    obs_cancel, TYPE_TO_IDX["cancel_production"], 0, 0, other, aidx_c)
+check("cancel emite tent concreto",
+      act_c.commands[0].action.value == "cancel_production"
+      and act_c.commands[0].item_type == "tent")
+check("cancel eff_item_slot es rol barracks",
+      aidx_c.items[ei_c] == _role_of("tent"))
+
+from rl.train import process_results
+_empty, _outs = process_results(
+    [([], "lose")] * 4, 0.995, 0.95, verbose=False)
+check("process_results traj vacías no peta",
+      _empty == [] and _outs == ["lose"] * 4)
+
 # Harvest: idle nunca apunta al argmax del mapa (Ch2=0 en la proc).
 # Migajas junto a casa sí retargetean al parche rico CERCANO, no al lejano.
 import base64 as _b64

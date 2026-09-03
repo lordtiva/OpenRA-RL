@@ -3,6 +3,8 @@
 > **Fecha:** 2026-08-30 (visor + parche de destino) · **No reemplaza** `12-plan-4-capas-siguiente-nivel.md`. Ese plan se deja tal cual: es realista para 2070+5600X+32GB y el orden (entorno → BC/SIL → red → self-play) sigue siendo el correcto.
 > **Qué es esto:** desglose de qué de la Capa 0 ya está, qué no, y qué hacer si el run actual (resume iter 219, `eradicate_v4`, a_short vs beginner) sigue plano a iters 400–450.
 >
+> **Estado actual (2026-09-02, post Run 36):** `best.pt` = **1141** (Run 33 `wwww`, wr20 0.50 vs easy). `latest.pt` restaurado a 1141. Archivo `Run 36 (a_short pack12-policy 1142-1334)`: 193 iters, wr ~23%, lose ~58%, 0 tandas 4/4. AMP cobró (`update_s` 210→~80 s). Pack-12 no levantó el piso. Sequía @1289 restauró 1141; ~15 iters bien, después drift. Régimen: 2c-B + peel + 2 harv + pack-12 política + SIL even-pick <40k + AMP/BPTT-batch. Remate off. Asalto FULL off (**código se queda**; no borrar en este corte). **Este corte = higiene**, no palanca wr: PLACE/cancel `role_of` en `eff_item_slot` + guard `concatenate([])`. Resume 1141, smoke `--iters 1161`. No QSA/hard/128/remate/Lion. Siguiente palanca (otro resume): raid-en-espera / yo-yo de refuerzo / leftover — una sola.
+>
 > **Corte 442 (hecho):** meseta confirmada, incomplete 24%→60%, `army_attack_move` → 0%. Asalto sostenido implementado en `auto_support.py` (proc+harv + ≥4 combate → `army_attack_move` cada bloque). Resume `latest.pt` (la política que ya construye); no volver a 229.
 >
 > **Corte 560:** el asalto **sí movió el wr** (6% → ~18% en ventana 444–560; wr20 0.06 → 0.15–0.23, pico 0.50 en 466). Wins más rápidos (36k → 24k). Incomplete sigue ~52–61% (enB ~9–15: no es el perro en niebla). H sana. **Seguir**; no `win_early` todavía. `best.pt` sigue 229 (iwr 1.0 congela el puntero).
@@ -74,6 +76,10 @@
 > **Corte 1171 (Run 34 remate falló → SIL even-pick wins cortos):** 30 iters (1142–1171), **21/120 (17.5%)**, lose 64%, incomplete 18%. Arranque 1142–1146 45% y 1143 `wwww`; luego lose 75%, ownB 0, KL 0.46. Sequía restauró 1143@1155; post-restore siguió ~10–25% (remate sigue en el env). Visor: `n_support_am` 300–1815/win; dests agua (`y=35–44`) y beacon `(95,11)` vía `remap_move_cell`. Incomplete → lose, no win. Archivo: `rl/ckpts/Run 34 (a_short remate-sweep 1142-1171)/`. **Revert remate.** Resume **1141** (Run 33, no 1143). **SIL:** even-pick por episodio de win, no la cola del ring; prefiere `ticks<40k`. Mismo λ_sil=0.5, solo wins. No remate-v2, no assault-full, no 3er harv, no PLACE/`role_of`.
 >
 > **Corte 1173 (Run 35 SIL even-pick no levantó piso → pack-12 en la política):** 32 iters (1142–1173), wr ~22%, lose **65%** en el smoke (bar era ≤45%). 1142 `wwww` (el 1141); 1152–1156 0/20 ownB=0. wr20 1.0→0. Hold post-smoke incomplete 32%, `army` 3.6%→1.6%. SIL even-pick se queda (20/27 wins <40k); no era el wipe. Causa: la red manda `army_attack_move` con 4–8 e1, easy los come, contraataca. El support ya espera 12; el adapter no. Archivo: `rl/ckpts/Run 35 (a_short sil-even-short 1142-1173)/`. Resume **1141**. **Pack-12 política:** máscara + adapter `army_attack_move`→`no_op` si <12 combate **en casa**. `attack_move` per-unit sigue (peel). SIL even-pick se queda. No remate, no peel-campo todavía, no C.
+>
+> **Throughput update (mismo régimen pack-12, resume 1141):** el update era el techo (~210 s/iter, collect ya overlap). No es Adam: `evaluate_actions_seq` corría B=1, `.to(cuda)` por step, `_heads_used` con `.item()`. Este corte: (1) BPTT batcheado (B= segs_per_batch ≈4) (2) prefetch GPU una vez por update; SIL copia, el elite sigue en CPU (3) AMP fp16 en el encode; cabezas fp32. `masked_fill` usa −1e4 en Half (−1e9 overflow, crash 1158). OOM → retry B=1. Bar: `update_s` baja claro; H/KL finitos. Si NaN/OOM persistente, restore 1141. No Lion/AdamW/2º orden.
+>
+> **Corte 1334 (Run 36 pack-12+AMP cortado → higiene PLACE `role_of`):** 193 iters (1142–1334), wr **~23%**, lose **~58%**, empate 18%, **0 tandas 4/4**. Pico wr20 0.60 @1149 (eco 1141); sequía 1285–1289 20/20 lose ownB=0; restore 1141; post-cooldown 1305+ otra vez ~16%. AMP sí (`update_s` ~80 s). Pack-12 no. Archivo: `rl/ckpts/Run 36 (a_short pack12-policy 1142-1334)/`. Resume **1141**. **Higiene (este corte):** `eff_item_slot` de PLACE/cancel vía `role_of` (auditoría 1.4); `process_results` skip si 0 samples (1.3). Isla `SUPPORT_ASSAULT` **no se borra**. Smoke `--iters 1161`. Bar: H/KL finitos, crédito PLACE = rol plantado. wr no es el bar. No palanca, no remate, no QSA.
 
 ---
 
@@ -378,8 +384,8 @@ Preset vivo: `eradicate_v4`. **No** hay `eradicate_v4b`: el dict existía, nunca
 
 | # | Hallazgo | ¿Bug? | Qué hacer | Cuándo |
 |---|---|---|---|---|
-| 1.4 | PLACE/cancel: `item_type` concreto (`proc`/`tent`/`e1`) no está en `aidx.items` (roles). `eff_item_slot` queda el muestreado. TRAIN/BUILD no. `imitation.py` ya hace `role_of`. | Sí, activo | Remap `role_of(item_type)` en `index_to_command_effective`, mismo patrón que SIL. Si `prefer`/`also` pega, el crédito ya era correcto por accidente; sucio = fallback `ready[0]` de otro rol + todo cancel. Support PLACE no entra al buffer. | Corte **higiene** post-smoke. **No** junto a remate ni SIL sampling. |
-| 1.3 | `np.concatenate([])` en `process_results` si las 4 traj vienen vacías (`engine_error` antes del primer `append`). | Sí, raro | Guard: si no hay advs, skip escala / no update. `auto_train` ya relanza. | Mismo corte que 1.4. |
+| 1.4 | PLACE/cancel: `item_type` concreto (`proc`/`tent`/`e1`) no está en `aidx.items` (roles). `eff_item_slot` queda el muestreado. TRAIN/BUILD no. `imitation.py` ya hace `role_of`. | Sí | Remap `role_of` en `_item_slot_of` / `index_to_command_effective`. | **Hecho** corte higiene post Run 36. |
+| 1.3 | `np.concatenate([])` en `process_results` si las 4 traj vienen vacías (`engine_error` antes del primer `append`). | Sí, raro | Guard: si no hay advs, skip escala / no update. | **Hecho** mismo corte que 1.4. |
 | 1.2 | v4b fuera de raze-por-valor | Muerto | **Borrado.** No reintroducir. | Hecho. |
 | 2.2 | `_place_near_base(+4,+2)` sin `pass_grid`. Si agua/edificio, `proc_ready` sigue y el support reemite. `(0,0)` del mismo helper es peor. En `a_short` Singles suele ser tierra. | Sí, mapa | `nearest_passable` / ocupación. | Si PLACE no baja o mapa con agua. No este smoke. |
 | 1.1 | Teacher pisa `t0 = time.time()` con el índice de tipo. `wall_s` ≈ epoch Unix. ETA no lo usa (`collect_s`/`update_s`). Teacher muerto a iter 1081 (`λ_bc=0`). | Sí | Renombrar a `t_idx` en `rollout.py`. | Piggyback cuando se toque `rollout.py`. |
@@ -388,9 +394,9 @@ Preset vivo: `eradicate_v4`. **No** hay `eradicate_v4b`: el dict existía, nunca
 | 3.1 | `docker compose ps -q` + `strip()` con réplicas | Latente | Un contenedor por servicio (`openra-rl`, `openra-rl-2`). | P3. |
 | 3.2 | Teacher serial en `pool[0]` | Diseño | Solo vive `--bc-warmup 80` desde `--bc-start-iter 603`. Resume 1081 no corre teacher. | P3. |
 
-**No mezclar** con sequía/SIL-wins ni con remate: w_timeout/γ, spread, C, QSA, hard, 25 t, assault-full, PLACE/`role_of`, remate-v2.
+**No mezclar** con sequía/SIL-wins ni con remate: w_timeout/γ, spread, C, QSA, hard, 25 t, assault-full, remate-v2.
 
-Orden: smoke 1082–1101 sano → hold 1082–1150 (33% wr, pico 1141) → remate Run 34 **falló** → SIL even-pick Run 35 **no levantó piso** (lose 65%, drip) → **pack-12 en la política** este corte (resume 1141). Peel de campo y PLACE/`role_of` = cortes aparte.
+Orden: smoke 1082–1101 sano → hold 1082–1150 (33% wr, pico 1141) → remate Run 34 **falló** → SIL even-pick Run 35 **no levantó piso** (lose 65%, drip) → pack-12 política + **update AMP/BPTT-batch/prefetch** (resume 1141) → Run 36 cortado @1334 → **higiene PLACE `role_of` + concat** (resume 1141, `--iters 1161`). Peel de campo = otro corte. Isla asalto FULL se queda.
 
 ---
 
