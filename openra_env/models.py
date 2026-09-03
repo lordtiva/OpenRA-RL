@@ -5,7 +5,7 @@ the OpenEnv client-server boundary.
 """
 
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any,  Dict, List, Optional
 
 from pydantic import Field
 
@@ -65,6 +65,10 @@ class OpenRAAction(Action):
 
     commands: List[CommandModel] = Field(
         default_factory=list, description="List of commands to execute this step"
+    )
+    peer_commands: List[CommandModel] = Field(
+        default_factory=list,
+        description="RL-vs-RL: commands for Multi0 (other rl-agent) in the same FastAdvance",
     )
 
 
@@ -197,6 +201,10 @@ class OpenRAObservation(Observation):
     reward_vector: Optional[Dict[str, float]] = Field(
         default=None,
         description="8-dimensional reward: combat, economy, infrastructure, intelligence, composition, tempo, disruption, outcome",
+    )
+    peer: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="RL-vs-RL: Multi0 fog observation dict (same shape as observation payload)",
     )
 
     # Inherited from Observation:

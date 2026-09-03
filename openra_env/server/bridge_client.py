@@ -100,6 +100,8 @@ class BridgeClient:
         self, ticks: int, commands=None,
         check_events_every: int = 0,
         enabled_interrupts: list[str] | None = None,
+        peer_commands=None,
+        peer_slot: str = "Multi0",
     ) -> rl_bridge_pb2.GameObservation:
         """Advance N ticks via unary RPC.
 
@@ -108,9 +110,11 @@ class BridgeClient:
 
         Args:
             ticks: Number of game ticks to advance.
-            commands: Optional list of proto Command objects.
+            commands: Optional list of proto Command objects (primary / Multi1).
             check_events_every: Check interrupt signals every N ticks (0=disabled).
             enabled_interrupts: Signal names to check (e.g. ["enemy_spotted"]).
+            peer_commands: Optional proto Commands for the other rl-agent (RL-vs-RL).
+            peer_slot: Player slot for peer_commands (default Multi0).
         """
         if not self._connected:
             self.connect()
@@ -125,6 +129,9 @@ class BridgeClient:
             request.check_events_every = check_events_every
         if enabled_interrupts:
             request.enabled_interrupts.extend(enabled_interrupts)
+        if peer_commands:
+            request.peer_commands.extend(peer_commands)
+            request.peer_slot = peer_slot or "Multi0"
 
         # Timeout adaptativo: batallas grandes usan FastAdvance de 50 ticks
         # en ráfagas; 120s fijo mataba partidas de 51k ticks. 90s mínimo
@@ -133,6 +140,16 @@ class BridgeClient:
         # trata DEADLINE como engine_error y sigue.
         timeout = max(90.0, ticks * 1.0 + 30.0)
         return self._stub.FastAdvance(request, timeout=timeout)
+
+    def get_observation(self, player_slot: str = "") -> rl_bridge_pb2.GameObservation:
+        """Snapshot observation for a player slot (RL-vs-RL peer after FastAdvance)."""
+        if not self._connected or self._stub is None:
+            raise RuntimeError("Not connected. Call connect() first.")
+        request = rl_bridge_pb2.ObservationRequest(
+            session_id=self.session_id,
+            player_slot=player_slot or "",
+        )
+        return self._stub.GetObservation(request, timeout=self.timeout_s)
 
     def get_state(self) -> rl_bridge_pb2.GameState:
         """Query current game state via unary RPC."""

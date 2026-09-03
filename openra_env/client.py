@@ -92,6 +92,10 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
         """Parse server response into StepResult."""
         obs_data = data.get("observation", data)
 
+        meta = dict(obs_data.get("metadata") or {})
+        # peer may also sit at top-level of observation payload
+        if "peer" in obs_data and "peer" not in meta:
+            meta["peer"] = obs_data["peer"]
         observation = OpenRAObservation(
             tick=obs_data.get("tick", 0),
             economy=EconomyInfo(**obs_data.get("economy", {})),
@@ -108,6 +112,8 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
             result=obs_data.get("result", ""),
             spatial_map=obs_data.get("spatial_map", ""),
             spatial_channels=obs_data.get("spatial_channels", 0),
+            peer=obs_data.get("peer") or meta.get("peer"),
+            metadata=meta,
         )
 
         return StepResult(

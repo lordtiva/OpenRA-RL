@@ -19,6 +19,7 @@ import numpy as np
 import torch
 
 from openra_env.client import OpenRAEnv
+from rl.peer_obs import peer_obs_from_metadata
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_command_effective
 from rl.imitation import command_to_indices, pick_bc_command
@@ -74,7 +75,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                               reset_kwargs: dict | None = None,
                               shaper_preset: str = "eradicate",
                               auto_support: bool = False,
-                              teacher=None):
+                              teacher=None,
+                              opponent_net=None):
     """Juega UNA partida completa; devuelve (trayectoria, resumen).
 
     max_steps limita los env.step (cada uno avanza 2 ticks del juego):
@@ -94,6 +96,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     obs = result.observation
 
     hidden = torch.zeros(1, HIDDEN_DIM, device=device)
+    opponent_hidden = torch.zeros(1, HIDDEN_DIM, device=device) if opponent_net is not None else None
+    peer_obs = peer_obs_from_metadata(obs) if opponent_net is not None else None
     traj = []
     episode_reward = 0.0
     t0 = time.time()
@@ -280,6 +284,23 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 "h_in": h_in.cpu(),
             }
 
+        # RL-vs-RL: frozen opponent acts from Multi0 fog view (not in traj).
+        if (opponent_net is not None and can_decide and pending_cmd is not None
+                and peer_obs is not None):
+            try:
+                p_batch, p_aidx = _batch_of(peer_obs, vocab, device)
+                with torch.no_grad():
+                    p_out = opponent_net.act(p_batch, opponent_hidden, temperature=temperature)
+                    opponent_hidden = p_out["hidden"].detach()
+                p_action, _ = index_to_command_effective(
+                    peer_obs, int(p_out["type"]), int(p_out["unit_slot"]),
+                    int(p_out["cell_flat"]), int(p_out["item_slot"]), p_aidx,
+                )
+                pending_cmd.peer_commands = list(p_action.commands or [])
+            except Exception as ex:
+                print(f"  [rvr] opponent act failed: {str(ex)[:100]}")
+                pending_cmd.peer_commands = []
+
         result = None
         try:
             result = await env.step(pending_cmd)
@@ -310,6 +331,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 continue  # sin obs nueva: reintentar decisión sobre la última
         consec_errors = 0
         obs = result.observation
+        if opponent_net is not None:
+            peer_obs = peer_obs_from_metadata(obs) or peer_obs
         # Reward CONFORMADO del lado del agente: se ACUMULA en la muestra
         # vigente porque los deltas de combate/economía pueden ocurrir en
         # cualquier frame del skip window, no solo en el de decisión.

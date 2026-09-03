@@ -172,6 +172,21 @@ async def amain(args):
     infer_net.load_state_dict(net.state_dict())
     infer_net.eval()
 
+    def load_opponent_net(ckpt_path):
+        """Frozen AlphaLite for Multi0 (RL-vs-RL). None if load fails."""
+        if not ckpt_path:
+            return None
+        try:
+            opp = AlphaLiteNet().to(device)
+            load_checkpoint(str(ckpt_path), opp, opt=None, vocab=None)
+            opp.eval()
+            for p in opp.parameters():
+                p.requires_grad_(False)
+            return opp
+        except Exception as e:
+            print(f"  [rvr] no pude cargar oponente {ckpt_path}: {e}", flush=True)
+            return None
+
     print(f"Device: {device} | params: "
           f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M")
     print("Capa 2c-B: 96 own + 32 ene, role+team (resume 1141; remate off)")
@@ -245,6 +260,11 @@ async def amain(args):
             f"North-star wr / best.pt solo cuentan vs {pfsp.anchor}.",
             flush=True,
         )
+        if getattr(args, "pfsp_rl", False):
+            if "rl" not in pfsp.pool:
+                pfsp.pool.append("rl")
+                pfsp.stats.setdefault("rl", {"wins": 0, "games": 0})
+            print("PFSP-RL ON: pool puede samplear bot_type=rl (frozen Multi0).", flush=True)
 
     def launch_collection(prev_task):
         """Lanza una tanda de episodios repartidos entre los workers."""
@@ -263,6 +283,16 @@ async def amain(args):
                     if pfsp is not None:
                         ep_bot = pfsp.sample()
                         ep_kwargs["bot_type"] = ep_bot
+                    opp_net = None
+                    if ep_bot == "rl":
+                        ckpt = pfsp.pick_rl_ckpt() if pfsp is not None else None
+                        opp_net = load_opponent_net(ckpt)
+                        if opp_net is None:
+                            # Fallback: no dual weights → easy scripted
+                            ep_bot = (pfsp.anchor if pfsp is not None else "easy")
+                            ep_kwargs["bot_type"] = ep_bot
+                        else:
+                            ep_kwargs["bot_type"] = "rl"
                     # Reset con reintentos: el daemon .NET agotado falla en
                     # reset ("bridge failed to start") aunque los healthchecks
                     # HTTP pasen. Reintenta y aborta limpio si es persistente.
@@ -279,7 +309,8 @@ async def amain(args):
                                 macro_ticks=args.macro_ticks,
                                 reset_kwargs=ep_kwargs,
                                 shaper_preset=args.shaper_preset,
-                                auto_support=args.auto_support)
+                                auto_support=args.auto_support,
+                                opponent_net=opp_net)
                             break
                         except Exception as e:
                             msg = str(e)
@@ -740,6 +771,8 @@ def main():
                     help="Bots del pool PFSP, separados por coma.")
     ap.add_argument("--pfsp-anchor-prob", type=float, default=0.5,
                     help="Probabilidad de jugar vs el ancla (--bot-type).")
+    ap.add_argument("--pfsp-rl", action="store_true",
+                    help="Incluye oponente RL (bot_type=rl) en PFSP; requiere daemon dual.")
     ap.add_argument("--pfsp-prev20-every", type=int, default=20,
                     help="Cada N iters copia latest.pt -> prev20.pt.")
     ap.add_argument("--roles-vocab", action="store_true",

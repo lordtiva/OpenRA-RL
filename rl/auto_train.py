@@ -73,15 +73,14 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Run 41: PFSP bots (50% easy ancla, 50% pool beginner/easy/medium).
-# Fog scout + fast-2proc + RAID_HOME=24. Macro 50 / max 1000 / gamma 0.995.
-# Resume best 1141. Overnight (~259 iters): --iters 1400.
-# Bar: wr vs easy (north star) no colapsa; pfsp_stats.json se llena; prev20.pt rota.
-# NOTA: esto NO es RL-vs-RL de checkpoints (bridge dual pendiente).
+# Run 42: era RL-vs-RL (dual bridge). Seed = best-1141 pesos, metrics desde iter 1.
+# 50% easy ancla (north star / best.pt), 50% PFSP pool beginner/easy/medium/rl.
+# rl = frozen Multi0 desde latest|prev20|best. Macro 50 / max 1000 / gamma 0.995.
+# Overnight: --iters 400 (arranca en 1). Requiere imagen Docker con peer_commands.
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
-    "--iters", "1400",
+    "--iters", "400",
     "--concurrency", "4",
     "--max-steps", "1000",
     "--macro-ticks", "50",
@@ -90,14 +89,14 @@ TRAIN_ARGS = [
     "--scenario", "a_short",
     "--bot-type", "easy",
     "--pfsp",
-    "--pfsp-pool", "beginner,easy,medium",
+    "--pfsp-rl",
+    "--pfsp-pool", "beginner,easy,medium,rl",
     "--pfsp-anchor-prob", "0.5",
     "--shaper-preset", "eradicate_v4",
     "--auto-support",
-    "--bc",
+    # BC off: pesos ya maduros (best-1141). Con bc-start-iter=1 el teacher
+    # volvería a lambda=1 por ~80 iters y pisa lo aprendido. SIL sí queda.
     "--sil",
-    "--bc-warmup", "80",
-    "--bc-start-iter", "603",
     "--lambda-sil", "0.5",
     "--gamma", "0.995",
     "--ckpt-dir", "rl/ckpts",

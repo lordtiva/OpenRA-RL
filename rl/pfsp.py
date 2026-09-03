@@ -1,8 +1,8 @@
 """Poor-man's PFSP over OpenRA *scripted bots* (not policy-vs-policy).
 
-True checkpoint self-play needs RL-vs-RL in the bridge (Multi0 still ai.yaml).
-Until that lands, this module mixes bot difficulties with the same sampling
-idea: 50% vs an anchor bot, 50% vs a pool prioritized to who beats you.
+With `rl` in the pool + dual-bridge daemon: sample can return `rl` and
+`pick_rl_ckpt()` chooses latest/prev20/best for a frozen Multi0 opponent.
+Otherwise mixes scripted bots: 50% anchor, 50% pool by who beats you.
 
 Persists win/lose counts in rl/ckpts/pfsp_stats.json so auto_train relaunches
 keep the league memory. Also rotates a frozen snapshot `prev20.pt` every
@@ -16,7 +16,7 @@ import random
 import shutil
 from pathlib import Path
 
-VALID_BOTS = ("beginner", "easy", "medium", "hard", "brutal", "dummy")
+VALID_BOTS = ("beginner", "easy", "medium", "hard", "brutal", "dummy", "rl")
 
 # Prioritize opponents with low winrate. eps keeps everyone in the mix.
 _EPS = 0.05
@@ -138,6 +138,14 @@ class BotPFSP:
                 "priority": round(self.priority(b), 3),
             }
         return out
+
+    def pick_rl_ckpt(self) -> Path | None:
+        """Uniform over existing latest/prev20/best for frozen Multi0."""
+        names = ("latest.pt", "prev20.pt", "best.pt")
+        cands = [self.ckpt_dir / n for n in names if (self.ckpt_dir / n).exists()]
+        if not cands:
+            return None
+        return self.rng.choice(cands)
 
     def maybe_rotate_prev20(self, iteration: int, latest_path: str | Path) -> bool:
         """Every prev20_every iters, copy latest.pt -> prev20.pt (frozen ring)."""

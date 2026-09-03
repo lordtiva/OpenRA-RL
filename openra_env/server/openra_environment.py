@@ -2974,8 +2974,25 @@ class OpenRAEnvironment(MCPEnvironment):
         proto_action = commands_to_proto(cmd_dicts)
         proto_commands = list(proto_action.commands)
 
-        proto_obs = self._bridge.fast_advance_unary(1, proto_commands)
+        peer_cmds = None
+        peer_slot = "Multi0"
+        peer_list = getattr(action, "peer_commands", None) or []
+        if peer_list:
+            peer_dicts = [cmd.model_dump() for cmd in peer_list]
+            peer_cmds = list(commands_to_proto(peer_dicts).commands)
+
+        proto_obs = self._bridge.fast_advance_unary(
+            1, proto_commands, peer_commands=peer_cmds, peer_slot=peer_slot,
+        )
         obs_dict = observation_to_dict(proto_obs)
+
+        # Peer fog-view for RL-vs-RL (train drives frozen opponent on host).
+        if getattr(self, "_rl_vs_rl", False):
+            try:
+                peer_proto = self._bridge.get_observation(player_slot="Multi0")
+                obs_dict["peer"] = observation_to_dict(peer_proto)
+            except Exception as ex:
+                logger.debug("peer GetObservation failed: %s", ex)
 
         self._state.game_tick = obs_dict["tick"]
         return obs_dict
@@ -3039,6 +3056,7 @@ class OpenRAEnvironment(MCPEnvironment):
         self._reward_fn.reset()
         self._accumulated_reward_vector.clear()
         self._last_obs = None
+        self._rl_vs_rl = False
         self._unit_groups.clear()
         self._pending_placements.clear()
         self._move_targets.clear()
@@ -3090,7 +3108,13 @@ class OpenRAEnvironment(MCPEnvironment):
             # Using invalid types leaves the slot empty → no enemy actors.
             if not actual_bot_type:
                 actual_bot_type = "dummy"
-            bots = f"Multi1:rl-agent,{self._config.ai_slot}:{actual_bot_type}"
+            # RL-vs-RL: both slots are ExternalBotBridge (needs dual-bridge daemon).
+            self._rl_vs_rl = str(actual_bot_type).lower() in ("rl", "rl-agent", "self")
+            if self._rl_vs_rl:
+                bots = "Multi1:rl-agent,Multi0:rl-agent"
+                logger.info("RL-vs-RL session: Multi0+Multi1 = rl-agent")
+            else:
+                bots = f"Multi1:rl-agent,{self._config.ai_slot}:{actual_bot_type}"
             session_id = self._bridge.create_session(
                 map_name=self._config.map_name,
                 bots=bots,
@@ -3193,6 +3217,10 @@ class OpenRAEnvironment(MCPEnvironment):
         self, obs_dict: dict, reward: float, reward_vec: dict | None = None,
     ) -> OpenRAObservation:
         """Convert a raw observation dict to an OpenRAObservation model."""
+        meta = {}
+        peer = obs_dict.get("peer")
+        if peer is not None:
+            meta["peer"] = peer
         return OpenRAObservation(
             tick=obs_dict["tick"],
             economy=EconomyInfo(**obs_dict["economy"]),
@@ -3210,6 +3238,8 @@ class OpenRAEnvironment(MCPEnvironment):
             spatial_map=obs_dict.get("spatial_map", ""),
             spatial_channels=obs_dict.get("spatial_channels", 0),
             reward_vector=reward_vec,
+            peer=peer if isinstance(peer, dict) else None,
+            metadata=meta,
         )
 
     def close(self) -> None:
