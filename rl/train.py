@@ -134,7 +134,10 @@ async def amain(args):
 
     net = AlphaLiteNet()
     vocab = Vocab()
-    trainer = PPOTrainer(net, lr=args.lr, device=device)
+    trainer = PPOTrainer(
+        net, lr=args.lr, device=device,
+        clip_eps=args.clip_eps, max_grad_norm=args.max_grad_norm,
+    )
 
     start_iter = 0
     ckpt_extra: dict = {}
@@ -748,6 +751,10 @@ def main():
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--batch-size", type=int, default=64)
     ap.add_argument("--lr", type=float, default=3e-4)
+    ap.add_argument("--clip-eps", type=float, default=0.2,
+                    help="PPO ratio clip epsilon (Informe-3 Run45: 0.15)")
+    ap.add_argument("--max-grad-norm", type=float, default=0.5,
+                    help="grad clip norm (Informe-3 Run45: 1.0)")
     ap.add_argument("--gamma", type=float, default=0.995)
     ap.add_argument("--lam", type=float, default=0.95)
     ap.add_argument("--device", default="auto")

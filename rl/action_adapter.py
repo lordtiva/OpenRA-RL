@@ -223,8 +223,96 @@ def nearest_passable(x: int, y: int, pass_grid, h: int, w: int, max_r: int = 16)
     return x, y
 
 
+def _passable_width(x: int, y: int, grid, h: int, w: int, rad: int = 2) -> int:
+    """How many passable cells in a (2*rad+1)^2 window — proxy for corridor width."""
+    if grid is None:
+        return 0
+    n = 0
+    for dy in range(-rad, rad + 1):
+        for dx in range(-rad, rad + 1):
+            nx, ny = x + dx, y + dy
+            if 0 <= ny < h and 0 <= nx < w and bool(grid[ny, nx]):
+                n += 1
+    return n
+
+
+def _wider_flank_passable(tx: int, ty: int, grid, h: int, w: int):
+    """Prefer north/south land corridors over the closest water-edge cell.
+
+    Singles-style maps have a central lake; nearest_passable to a water cell
+    often lands on a 1-2-wide choke. Stage via the wider flank at similar x.
+    """
+    if grid is None:
+        return None
+    tx = int(max(0, min(w - 1, tx)))
+    # Relative flanks (Informe-3 ~y=8 / y=30 on ~40-tall maps).
+    flank_ys = (max(1, h // 8), min(h - 2, (3 * h) // 4))
+    best = None
+    best_score = -1
+    for fy in flank_ys:
+        px, py = nearest_passable(tx, fy, grid, h, w)
+        score = _passable_width(px, py, grid, h, w)
+        # Prefer the flank that is actually passable and wide.
+        if score > best_score:
+            best_score = score
+            best = (px, py)
+    return best
+
+
+
+def _army_centroid(obs):
+    combat = []
+    for u in getattr(obs, "units", None) or []:
+        ut = str(getattr(u, "type", "") or "").lower()
+        if "harv" in ut or "mcv" in ut:
+            continue
+        if not bool(getattr(u, "can_attack", True)):
+            continue
+        try:
+            combat.append((int(u.cell_x), int(u.cell_y)))
+        except (TypeError, ValueError):
+            continue
+    if not combat:
+        return None
+    sx = sum(c[0] for c in combat) / len(combat)
+    sy = sum(c[1] for c in combat) / len(combat)
+    return sx, sy
+
+
+def _midline_blocked(x0: float, y0: float, x1: float, y1: float, grid, h: int, w: int) -> bool:
+    """True if the straight segment crosses mostly impassable cells (lake)."""
+    if grid is None:
+        return False
+    steps = 12
+    blocked = 0
+    for i in range(1, steps):
+        t = i / steps
+        x = int(round(x0 + (x1 - x0) * t))
+        y = int(round(y0 + (y1 - y0) * t))
+        if not (0 <= x < w and 0 <= y < h) or not bool(grid[y, x]):
+            blocked += 1
+    return blocked >= steps // 2
+
+
+def stage_army_attack_cell(obs, aidx, cx: int, cy: int):
+    """If army→target crosses a lake, stage via the wider N/S flank first."""
+    grid = getattr(aidx, "pass_grid", None)
+    h, w = aidx.h, aidx.w
+    cen = _army_centroid(obs)
+    if cen is None or grid is None:
+        return cx, cy
+    if not _midline_blocked(cen[0], cen[1], cx, cy, grid, h, w):
+        return cx, cy
+    flank = _wider_flank_passable(int((cen[0] + cx) / 2), int((cen[1] + cy) / 2), grid, h, w)
+    if flank is None:
+        return cx, cy
+    # Only stage if flank is meaningfully different from final target.
+    if (flank[0] - cx) ** 2 + (flank[1] - cy) ** 2 < 36:
+        return cx, cy
+    return int(flank[0]), int(flank[1])
+
 def remap_move_cell(obs, aidx, cx: int, cy: int, actor_id: int = 0):
-    """If (cx,cy) is water/OOB/unpathable, retarget: visible enemy, else beacon, else near unit.
+    """If (cx,cy) is water/OOB/unpathable, retarget: wider flank, enemy, beacon, else near unit.
 
     Does NOT use a hardcoded y<40 water line — passability comes from obs/spatial.
     If there is no passability grid, only OOB is illegal.
@@ -241,6 +329,11 @@ def remap_move_cell(obs, aidx, cx: int, cy: int, actor_id: int = 0):
 
     if legal(cx, cy):
         return cx, cy
+
+    # Informe-3 lake choke: snap to the wider N/S land corridor first.
+    flank = _wider_flank_passable(cx, cy, grid, h, w)
+    if flank is not None and legal(flank[0], flank[1]):
+        return int(flank[0]), int(flank[1])
 
     enemies = list(getattr(obs, "visible_enemies", None) or []) + list(
         getattr(obs, "visible_enemy_buildings", None) or [])
@@ -322,6 +415,16 @@ class ActionIndex:
         # harvest solo si hay cosechadoras
         if obs.economy.harvester_count <= 0:
             m[TYPE_TO_IDX["harvest"]] = False
+        else:
+            # Informe-3: camiones cosechan solos. Si ninguno esta idle, mask
+            # harvest para no quemar 40-60% del ancho de banda en spam.
+            idle_harv = any(
+                "harv" in str(getattr(u, "type", "") or "").lower()
+                and bool(getattr(u, "is_idle", False))
+                for u in (getattr(obs, "units", None) or [])
+            )
+            if not idle_harv:
+                m[TYPE_TO_IDX["harvest"]] = False
         # train/build requieren ítems de su categoría
         self.train_items, self.build_items, self.rol_a_concreto = \
             _split_production(obs)
@@ -540,6 +643,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     # TRAIN/BUILD/PLACE ignore this (place keeps the sampled cell).
     if t_name in MOVE_CELL_TYPES:
         cx, cy = remap_move_cell(obs, aidx, cx, cy, actor_id)
+        if t_name == "army_attack_move":
+            cx, cy = stage_army_attack_cell(obs, aidx, cx, cy)
     eff_cell_flat = int(cy) * aidx.w + int(cx)
     if t_name in ("train", "build", "place_building", "cancel_production"):
         # PLACE/cancel dejan item_type concreto (proc/gun/tent); aidx.items

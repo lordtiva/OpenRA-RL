@@ -85,7 +85,7 @@ def _preset_kwargs(preset: str) -> dict:
                     )
     if preset == "eradicate_v4":
         # Run3 — Coloso con remate: v3 + gradiente ofensivo calibrado + full-stack infra
-        # w_raze 1.0->2.0 (2x, no 3x para no tapar minería), w_timeout 0->1.0
+        # w_raze 1.0->2.0 (2x, no 3x para no tapar minería), w_timeout 0->1.0->6.0 (Run45: incomplete must lose to a failed push).
         # (rankea win > incomplete > lose sin reintroducir pesimismo).
         # SCALAR 21 (military_ratio + tech_tier) y auto_support van por fuera
         # del preset pero se entrenan juntos en este run (congelado acá).
@@ -101,7 +101,10 @@ def _preset_kwargs(preset: str) -> dict:
                         w_garrison=0.005, w_naked_base=0.005,
                         w_mining_rate=0.04, mining_rate_scale=1000.0, w_harvester_idle=0.01,
                         w_margin=1.0, margin_scale=3000.0, margin_on_truncate=False,
-                        w_win=8.0, w_lose=2.5, w_timeout=1.0,
+                        w_win=8.0, w_lose=2.5, w_timeout=6.0,
+                        # Run 45 / Informe-3: timeout 1->6 so turtle+incomplete
+                        # (garrison stack) loses to a failed push. Garrison bonus
+                        # only pays in the first 15k ticks (see _mining_block).
                         # Run 8: naked 8k-tick death was -2.57, a failed fight
                         # ~-6. Extra -4 makes "deploy then sit" worse than playing.
                         w_no_econ_lose=4.0,
@@ -490,7 +493,10 @@ class ShapedReward:
             guards = sum(1 for u in obs.units
                          if getattr(u, "can_attack", True) and "harv" not in getattr(u, "type", "").lower()
                          and min(abs(u.cell_x - bx) + abs(u.cell_y - by) for bx, by in b_coords) <= 10)
-            if guards >= 1 and self.w_garrison:
+            tick = int(getattr(obs, "tick", 0) or 0)
+            # Informe-3: garrison bonus only in opening (<=15k). After that,
+            # sitting home must not out-earn a failed attack via timeout.
+            if guards >= 1 and self.w_garrison and tick <= 15000:
                 r_defense_posture += self.w_garrison
             elif guards == 0 and self.w_naked_base:
                 r_defense_posture -= self.w_naked_base
