@@ -114,10 +114,10 @@ MOVE_CELL_TYPES = {"move", "attack_move", "attack", "army_attack_move"}
 # Combat movement: masked until a refinery stands. Otherwise PPO
 # reward-hacks army_attack_move / attack_move (the 201-309 collapse).
 COMBAT_MOVE_TYPES = ("army_attack_move", "attack_move", "attack")
-# Group push: policy army_attack_move is legal only with a pack AT HOME.
-# Support already waits for 12 idle in the yard (Run 16 drip-4). The
-# network could still click army_attack_move with 4 e1 → wipe → counter.
-# attack_move per-unit stays on (raid peel). Same radius as auto_support.
+# Group push: legal once TOTAL combat >= PACK_ARMY (home OR field).
+# Run 43: home-only gate froze 200+ units mid-map (incomplete @53k) because
+# n_home dropped below 12 after the march. Still blocks drip-4 at home.
+# attack_move per-unit stays on (raid peel).
 PACK_ARMY = 12
 PACK_HOME_RADIUS = 18
 _NON_COMBAT_TAGS = ("harv", "mcv")
@@ -150,6 +150,15 @@ def economy_ready_for_combat(obs) -> bool:
 def _is_combat_unit(u) -> bool:
     ut = str(getattr(u, "type", "") or "").lower()
     return not any(tag in ut for tag in _NON_COMBAT_TAGS)
+
+
+def n_combat_total(obs) -> int:
+    """Combat units anywhere on the map (excludes harv/mcv)."""
+    n = 0
+    for u in getattr(obs, "units", None) or []:
+        if _is_combat_unit(u):
+            n += 1
+    return int(n)
 
 
 def n_combat_near_own_base(obs, radius: int = PACK_HOME_RADIUS) -> int:
@@ -392,8 +401,8 @@ class ActionIndex:
             if not bool(self.train_slot_mask.any()):
                 m[TYPE_TO_IDX["train"]] = False
                 self.type_mask = torch.from_numpy(m)
-        # Pack-12: group push only with a real army in the yard (Run 16 drip).
-        if n_combat_near_own_base(obs) < PACK_ARMY:
+        # Pack-12: group push with a real army anywhere (Run 44 field remate).
+        if n_combat_total(obs) < PACK_ARMY:
             m[TYPE_TO_IDX["army_attack_move"]] = False
         self.type_mask = torch.from_numpy(m)
 
@@ -506,7 +515,7 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
 
     if t_name in COMBAT_MOVE_TYPES and not owns_proc(obs):
         t_name = "no_op"
-    if t_name == "army_attack_move" and n_combat_near_own_base(obs) < PACK_ARMY:
+    if t_name == "army_attack_move" and n_combat_total(obs) < PACK_ARMY:
         t_name = "no_op"
 
     # Recolectora no combate: move/attack_move/attack sobre harv es harvest.

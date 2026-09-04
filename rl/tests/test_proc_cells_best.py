@@ -21,6 +21,7 @@ from rl.action_adapter import (
     economy_ready_for_combat,
     index_to_command_effective,
     n_combat_near_own_base,
+    n_combat_total,
     owns_proc,
     remap_move_cell,
 )
@@ -414,11 +415,18 @@ check("adapter: army_attack_move con pack 12 se emite",
 field12 = [_u(i, "e1", 80 + (i % 4), 12 + (i // 4)) for i in range(1, 13)] + [
     _u(99, "harv", 14, 16)]
 obs_field = _obs(harv=1, bldgs=("fact", "proc"), units=field12)
-check("12 en el campo, 0 en casa: no son pack",
+check("12 en el campo, 0 en casa: home count 0",
       n_combat_near_own_base(obs_field) == 0)
-check("mask: pack en el campo tapo army_attack_move",
+check("12 en el campo: total cuenta pack",
+      n_combat_total(obs_field) == 12)
+check("mask: pack en el campo PERMITE army_attack_move (Run 44)",
       bool(ActionIndex(obs_field, Vocab()).type_mask[TYPE_TO_IDX["army_attack_move"]])
-      is False)
+      is True)
+act_field, _ = index_to_command_effective(
+    obs_field, TYPE_TO_IDX["army_attack_move"], 0, 16 * 128 + 90, 0,
+    ActionIndex(obs_field, Vocab()))
+check("adapter: army_attack_move con pack en campo se emite",
+      act_field.commands[0].action.value == "army_attack_move")
 check("SUPPORT_ASSAULT off (no pack/hunt/rally/crédito)", SUPPORT_ASSAULT is False)
 check("SUPPORT_WAR_NUDGE on (raid + contacto visible)", SUPPORT_WAR_NUDGE is True)
 check("SUPPORT_REMNANT off (Run 34 wr 33->17)", SUPPORT_REMNANT is False)

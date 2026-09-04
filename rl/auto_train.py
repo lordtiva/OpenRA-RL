@@ -73,10 +73,10 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Run 43: seed = Run42 best@79, metrics desde iter 1. War nudge OFF (PPO owns war).
-# 50% easy ancla, 50% PFSP medium+rl. Auto-support APM (repair/power/harv/stance) sigue.
-# rl = frozen Multi0 desde latest|prev20|best. Macro 50 / max 1000 / gamma 0.995.
-# Overnight: --iters 400 (arranca en 1).
+# Run 44: seed = Run43 best@80. War nudge OFF. PACK_ARMY = total>=12 (field OK).
+# LR 1.0e-4 (era 1.5e-4; clip spikes). 50% easy ancla, 50% PFSP medium+rl.
+# Auto-support APM sigue; sin mask naval (lago Singles es legal).
+# Macro 50 / max 1000 / gamma 0.995. Overnight: --iters 400 (arranca en 1).
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
@@ -84,7 +84,7 @@ TRAIN_ARGS = [
     "--concurrency", "4",
     "--max-steps", "1000",
     "--macro-ticks", "50",
-    "--lr", "1.5e-4",
+    "--lr", "1.0e-4",
     "--batch-size", "128",
     "--scenario", "a_short",
     "--bot-type", "easy",
