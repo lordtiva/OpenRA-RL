@@ -478,6 +478,11 @@ check("raid en casa: attack_move idle local al raid (toda la tropa de casa defie
       len(am_raid) == 12
       and all(int(c.target_x) == 14 and int(c.target_y) == 17 for c in am_raid)
       and all(int(c.actor_id) in range(1, 13) for c in am_raid))
+obs_nudge = _obs(harv=1, bldgs=("fact", "proc"), units=army12,
+                 enemies=[_u(99, "e1", 90, 12)])
+cmds_off = support_commands(obs_nudge, war_nudge=False)
+check("war_nudge=False: ni push ni fog scout",
+      not any(c.action.value in ("army_attack_move", "attack_move") for c in cmds_off))
 cmds_raid4 = support_commands(
     _obs(harv=1, bldgs=("fact", "proc"), units=army4,
          enemies=[_u(99, "e1", 14, 17)]))

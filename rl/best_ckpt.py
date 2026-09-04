@@ -179,6 +179,31 @@ def is_dead_policy(row: dict) -> bool:
     return dead_policy_reason(row) is not None
 
 
+def policy_still_alive(row: dict) -> bool:
+    """Soft alive: still exploring / has a base, even if wr20 is poor.
+
+    Used to block wr20-drought restores that would wipe a living PPO run
+    (Run 42: H~1.2 and low no_op while wr20 dipped — SEQUIA restored
+    best-iter-1 three times and erased medium wins).
+    """
+    if is_dead_policy(row):
+        return False
+    n_b = row.get("n_buildings") or {}
+    own_b = float(n_b.get("own", 0) or 0)
+    h = row.get("entropy")
+    h = float(h) if h is not None else 0.0
+    noop = action_frac(row, ("no_op",))
+    # Alive enough to keep learning: entropy not crashed, not idle-spam.
+    # own_b can be 0 on a single bad batch; don't require base every row.
+    if h >= 0.5 and noop <= 0.55:
+        return True
+    if own_b >= 2.0 and h >= 0.35 and noop <= 0.65:
+        return True
+    return False
+
+
+
+
 # Run 32: wr20 hit 0.40 then decayed to 0 with entropy 1.6 / no_op 40%.
 # dead_policy never fired (H not <0.15, no_op not >80%). PPO kept eating
 # latest past best 1081. Restore when the rolling window stays dead after
@@ -209,6 +234,24 @@ def is_wr20_drought(rows: list, since_iter: int = 0) -> bool:
         return False
     tail = era[-DROUGHT_STREAK:]
     return all(_row_wr20(r) <= DROUGHT_WR20 for r in tail)
+
+
+
+def drought_should_restore(rows: list, since_iter: int = 0) -> bool:
+    """wr20 drought AND the streak looks lifeless (not a living PPO dip).
+
+    If any iter in the drought streak is still `policy_still_alive`, do not
+    restore — keep learning through the valley.
+    """
+    if not is_wr20_drought(rows, since_iter):
+        return False
+    era = [r for r in rows if int(r.get("iter") or 0) > int(since_iter)]
+    if len(era) < DROUGHT_STREAK:
+        return False
+    streak = era[-DROUGHT_STREAK:]
+    if any(policy_still_alive(r) for r in streak):
+        return False
+    return True
 
 
 def batch_is_dead(outcomes) -> bool:

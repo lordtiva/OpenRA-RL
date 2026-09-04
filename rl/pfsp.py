@@ -2,7 +2,7 @@
 
 With `rl` in the pool + dual-bridge daemon: sample can return `rl` and
 `pick_rl_ckpt()` chooses latest/prev20/best for a frozen Multi0 opponent.
-Otherwise mixes scripted bots: 50% anchor, 50% pool by who beats you.
+Otherwise mixes scripted bots: 50% anchor, 50% PFSP over *other* pool bots (the anchor is never double-counted).
 
 Persists win/lose counts in rl/ckpts/pfsp_stats.json so auto_train relaunches
 keep the league memory. Also rotates a frozen snapshot `prev20.pt` every
@@ -44,16 +44,20 @@ class BotPFSP:
             b = str(b).strip().lower()
             if b in VALID_BOTS and b not in self.pool:
                 self.pool.append(b)
-        if self.anchor in VALID_BOTS and self.anchor not in self.pool:
-            self.pool.insert(0, self.anchor)
-        if not self.pool:
-            self.pool = [self.anchor]
+        # Anchor stays out of the PFSP half so it is not double-counted.
+        # Empty pool => sample() always returns the anchor.
         self.anchor_prob = float(anchor_prob)
         self.stats_path = self.ckpt_dir / stats_name
         self.prev20_every = int(prev20_every)
         self.rng = rng or random.Random()
         self.stats = {b: {"wins": 0, "games": 0} for b in self.pool}
+        self.stats.setdefault(self.anchor, {"wins": 0, "games": 0})
         self._load()
+
+    @property
+    def challengers(self) -> list[str]:
+        """Pool opponents used in the non-anchor half (never the north star)."""
+        return [b for b in self.pool if b != self.anchor]
 
     def _load(self) -> None:
         if not self.stats_path.exists():
@@ -70,8 +74,7 @@ class BotPFSP:
                 self.stats[b] = {"wins": 0, "games": 0}
             self.stats[b]["wins"] = int(row.get("wins", 0) or 0)
             self.stats[b]["games"] = int(row.get("games", 0) or 0)
-            if b not in self.pool:
-                self.pool.append(b)
+            # Historical bots stay in stats/dashboard; they do not re-enter the pool.
 
     def save(self) -> None:
         self.ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -97,25 +100,27 @@ class BotPFSP:
         return max(_EPS, 1.0 - self.winrate(bot))
 
     def sample(self) -> str:
-        """50% anchor, else PFSP over the pool (may include the anchor)."""
+        """anchor_prob vs north star; else PFSP over challengers (never the anchor)."""
         if self.rng.random() < self.anchor_prob:
             return self.anchor
-        weights = [self.priority(b) for b in self.pool]
+        cands = self.challengers
+        if not cands:
+            return self.anchor
+        weights = [self.priority(b) for b in cands]
         total = sum(weights) or 1.0
         r = self.rng.random() * total
         acc = 0.0
-        for b, w in zip(self.pool, weights):
+        for b, w in zip(cands, weights):
             acc += w
             if r <= acc:
                 return b
-        return self.pool[-1]
+        return cands[-1]
 
     def record(self, bot: str, result: str) -> None:
         bot = str(bot or self.anchor)
         if bot not in self.stats:
             self.stats[bot] = {"wins": 0, "games": 0}
-            if bot in VALID_BOTS and bot not in self.pool:
-                self.pool.append(bot)
+            # Do not grow the configured pool from stray records.
         self.stats[bot]["games"] += 1
         if str(result).startswith("win"):
             self.stats[bot]["wins"] += 1
@@ -127,8 +132,13 @@ class BotPFSP:
         self.save()
 
     def summary(self) -> dict:
+        keys = []
+        for b in [self.anchor, *self.pool]:
+            if b not in keys:
+                keys.append(b)
         out = {}
-        for b, row in self.stats.items():
+        for b in keys:
+            row = self.stats.get(b) or {"wins": 0, "games": 0}
             g = int(row["games"])
             w = int(row["wins"])
             out[b] = {

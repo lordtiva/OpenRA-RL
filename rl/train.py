@@ -256,7 +256,7 @@ async def amain(args):
         )
         print(
             f"PFSP bots ON: {int(pfsp.anchor_prob*100)}% vs {pfsp.anchor}, "
-            f"else pool={pfsp.pool} (priority=who beats you). "
+            f"else challengers={pfsp.challengers} (priority=who beats you). "
             f"North-star wr / best.pt solo cuentan vs {pfsp.anchor}.",
             flush=True,
         )
@@ -265,6 +265,12 @@ async def amain(args):
                 pfsp.pool.append("rl")
                 pfsp.stats.setdefault("rl", {"wins": 0, "games": 0})
             print("PFSP-RL ON: pool puede samplear bot_type=rl (frozen Multi0).", flush=True)
+
+    if args.auto_support:
+        if args.no_war_nudge:
+            print("AUTO-SUPPORT ON, WAR NUDGE OFF: PPO owns targeting.", flush=True)
+        else:
+            print("AUTO-SUPPORT ON, war nudge ON (raid/push/fog-scout).", flush=True)
 
     def launch_collection(prev_task):
         """Lanza una tanda de episodios repartidos entre los workers."""
@@ -310,6 +316,7 @@ async def amain(args):
                                 reset_kwargs=ep_kwargs,
                                 shaper_preset=args.shaper_preset,
                                 auto_support=args.auto_support,
+                                war_nudge=not args.no_war_nudge,
                                 opponent_net=opp_net)
                             break
                         except Exception as e:
@@ -444,6 +451,7 @@ async def amain(args):
                     reset_kwargs=reset_kwargs,
                     shaper_preset=args.shaper_preset,
                     auto_support=args.auto_support,
+                    war_nudge=not args.no_war_nudge,
                     teacher=ScriptedTeacher())
                 bc_samples, _ = process_results(
                     [(t_traj, t_out)], args.gamma, args.lam,
@@ -794,6 +802,9 @@ def main():
     ap.add_argument("--auto-support", action="store_true",
                     help="Pilar B: autonomía de soporte (repair hp<35%% + power_down) — "
                          "0 decisiones, gratis para PPO. Activo en Run3/v4.")
+    ap.add_argument("--no-war-nudge", action="store_true",
+                    help="Con --auto-support: apaga raid/push/fog-scout. PPO manda la guerra. "
+                         "Repair/power/harv/stance/deploy/sell siguen.")
     ap.add_argument("--reset-opt", action="store_true",
                     help="Al --resume, no cargar Adam del ckpt (momentos de una "
                          "política colapsada clavan la cabeza de tipo). Lo pasa "

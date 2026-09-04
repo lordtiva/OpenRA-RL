@@ -1,4 +1,4 @@
-# 16 — RL-vs-RL (dual bridge) + Run 42
+﻿# 16 — RL-vs-RL (dual bridge) + Run 42
 
 > **Fecha:** 2026-09-03 · **Branch:** `exp/rl-2026-08-28-grok` · **Seed:** `best.pt` iter 1141 (easy, wr~33.8%, r20 0.5)
 
@@ -41,7 +41,7 @@ Archivo previo: `rl/ckpts/Run 41 (a_short pfsp-bots 1142-1152)/`.
 |------|--------|
 | Seed pesos | `latest.pt` ← best-1141 con `iteration=0` → train arranca en **iter 1** |
 | `--iters` | 400 |
-| PFSP | `--pfsp --pfsp-rl --pfsp-pool beginner,easy,medium,rl --pfsp-anchor-prob 0.5` |
+| PFSP | `--pfsp --pfsp-rl --pfsp-pool medium,rl --pfsp-anchor-prob 0.5` (easy es ancla 50%, no entra al PFSP; beginner afuera) |
 | Ancla / north star | `easy` |
 | Macro | 50 ticks / max_steps 1000 / γ 0.995 |
 | Support | fog scout + fast-2proc + RAID_HOME (flags previos) |
@@ -77,3 +77,11 @@ Smoke: reset con `bot_type=rl` + `fase2_a_short.oramap` (map_data); step con `pe
 ## Relación con el plan
 
 Cierra el bloqueo de **Capa 3** en `12-plan-4-capas-siguiente-nivel.md` (“sesiones RL vs RL en el bridge”). PFSP de bots (Run 41) queda como ancla; el pool `rl` es self-play chico de checkpoints.
+
+## Watchdog sequía (post-mortem Run 42)
+
+`auto_train` disparó **SEQUIA wr20** a iters 15, 27 y 87 y restauró `best.pt` (congelado en iter 1, iwr=1.0) sobre `latest.pt`. En esas ventanas la política **seguía viva** (H≈1.2–1.7, no_op bajo): el restore de 87 borró aprendizaje post wins vs medium (57/58/68).
+
+Fix: `drought_should_restore` = sequía wr20 **y** racha sin `policy_still_alive`. Colapso `dead_policy` (attack-spam / no_op-spam / entropy-crash) sigue restaurando solo.
+
+También: `sync_env_into_containers` ahora copia `models.py` + pb2 (evita `VALIDATION_ERROR` tras `force-recreate` con imagen sin campo `peer`).

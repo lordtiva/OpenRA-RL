@@ -159,7 +159,7 @@ def decide(net, vocab, device, hidden, obs, args, last_push_cell):
             c0 = action.commands[0]
             if getattr(c0, "target_x", None) is not None:
                 last_push_cell = (int(c0.target_x), int(c0.target_y))
-        for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx):
+        for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx, war_nudge=not getattr(args, "no_war_nudge", False)):
             action.commands.append(cmd)
     return action, hidden, last_push_cell, atype_str
 
@@ -216,6 +216,7 @@ def main():
     p.add_argument("--greedy", action="store_true",
                    help="temperature=0 (deterministic). Default is sample, like train.")
     p.add_argument("--no-auto-support", action="store_true")
+    p.add_argument("--no-war-nudge", action="store_true")
     p.add_argument("--wait-timeout", type=float, default=0.0,
                    help="Seconds to wait for the match (0 = forever).")
     args = p.parse_args()

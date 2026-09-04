@@ -75,6 +75,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                               reset_kwargs: dict | None = None,
                               shaper_preset: str = "eradicate",
                               auto_support: bool = False,
+                              war_nudge: bool = True,
                               teacher=None,
                               opponent_net=None):
     """Juega UNA partida completa; devuelve (trayectoria, resumen).
@@ -261,7 +262,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     last_push_cell = (int(c0.target_x), int(c0.target_y))
             # Pilar B: autonomía de soporte (0 decisiones, gratis para PPO)
             if auto_support:
-                for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx):
+                for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx, war_nudge=war_nudge):
                     action.commands.append(cmd)
             pending_cmd = action
             # F1: al buffer van los ÍNDICES EFECTIVOS (los de la acción que

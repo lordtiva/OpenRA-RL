@@ -670,13 +670,15 @@ def _emit_fog_scouts(obs, combat, idles_home, aidx, out):
         ))
 
 
-def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
+def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None, war_nudge=None):
 
     """Lista de CommandModel de soporte para esta observación.
 
     Llamar con la obs que ve la red ANTES de ejecutar el step. Devuelve [] si
     no hay nada que hacer. No toca el estado del shaper ni el buffer de PPO.
+    war_nudge=None usa SUPPORT_WAR_NUDGE; False apaga raid/push/fog-scout.
     """
+    use_nudge = SUPPORT_WAR_NUDGE if war_nudge is None else bool(war_nudge)
     out = []
     eco = getattr(obs, "economy", None)
     blds = getattr(obs, "buildings", []) or []
@@ -827,7 +829,7 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None):
     #    Raid: AttackMove idle-at-home only (group army_attack_move yanks
     #    the field army back to the door — visor 1099 ping-pong).
     #    Push: ≥12 idle at home, army_attack_move to farthest/prod contact.
-    if SUPPORT_WAR_NUDGE and not SUPPORT_ASSAULT and combat:
+    if use_nudge and not SUPPORT_ASSAULT and combat:
         raw_dest, is_raid = war_nudge_cell(obs)
         idles_home = [
             u for u in combat

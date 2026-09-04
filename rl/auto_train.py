@@ -36,7 +36,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from rl.best_ckpt import (
-    DROUGHT_STREAK, dead_policy_reason, is_dead_policy, is_wr20_drought,
+    DROUGHT_STREAK, dead_policy_reason, is_dead_policy, drought_should_restore,
 )
 CKPT_DIR = ROOT / "rl" / "ckpts"
 METRICS = CKPT_DIR / "metrics.jsonl"
@@ -73,10 +73,10 @@ DAEMONS = (
      ("docker-compose.yaml", "docker-compose.scale.yaml"), "openra-rl-2"),
 )
 
-# Run 42: era RL-vs-RL (dual bridge). Seed = best-1141 pesos, metrics desde iter 1.
-# 50% easy ancla (north star / best.pt), 50% PFSP pool beginner/easy/medium/rl.
+# Run 43: seed = Run42 best@79, metrics desde iter 1. War nudge OFF (PPO owns war).
+# 50% easy ancla, 50% PFSP medium+rl. Auto-support APM (repair/power/harv/stance) sigue.
 # rl = frozen Multi0 desde latest|prev20|best. Macro 50 / max 1000 / gamma 0.995.
-# Overnight: --iters 400 (arranca en 1). Requiere imagen Docker con peer_commands.
+# Overnight: --iters 400 (arranca en 1).
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
@@ -90,11 +90,12 @@ TRAIN_ARGS = [
     "--bot-type", "easy",
     "--pfsp",
     "--pfsp-rl",
-    "--pfsp-pool", "beginner,easy,medium,rl",
+    "--pfsp-pool", "medium,rl",
     "--pfsp-anchor-prob", "0.5",
     "--shaper-preset", "eradicate_v4",
     "--auto-support",
-    # BC off: pesos ya maduros (best-1141). Con bc-start-iter=1 el teacher
+    "--no-war-nudge",
+    # BC off: pesos ya maduros (best-1141 / best@79). Con bc-start-iter=1 el teacher
     # volvería a lambda=1 por ~80 iters y pisa lo aprendido. SIL sí queda.
     "--sil",
     "--lambda-sil", "0.5",
@@ -299,6 +300,13 @@ def sync_env_into_containers(targets) -> None:
          "/app/openra_env/server/openra_environment.py"),
         (ROOT / "openra_env" / "server" / "bridge_client.py",
          "/app/openra_env/server/bridge_client.py"),
+        # peer field + FastAdvance peer_commands (image may lag host)
+        (ROOT / "openra_env" / "models.py",
+         "/app/openra_env/models.py"),
+        (ROOT / "openra_env" / "generated" / "rl_bridge_pb2.py",
+         "/app/openra_env/generated/rl_bridge_pb2.py"),
+        (ROOT / "openra_env" / "generated" / "rl_bridge_pb2_grpc.py",
+         "/app/openra_env/generated/rl_bridge_pb2_grpc.py"),
     ]
     for url, files, service in targets:
         try:
@@ -473,7 +481,8 @@ def main():
                 last_it = int((rows_era or rows_tail or [{"iter": 0}])[-1]["iter"])
                 cooldown_ok = (last_it - last_restore_iter) >= COLLAPSE_COOLDOWN_ITERS
                 dead = bool(tail) and all(is_dead_policy(r) for r in tail) and cooldown_ok
-                drought = cooldown_ok and is_wr20_drought(rows_era, last_restore_iter)
+                drought = cooldown_ok and drought_should_restore(
+                    rows_era, last_restore_iter)
                 if dead or drought:
                     its = [r["iter"] for r in (tail if dead else rows_era[-DROUGHT_STREAK:])]
                     kind = f"COLAPSO {reasons}" if dead else "SEQUIA wr20"

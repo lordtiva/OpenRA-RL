@@ -414,7 +414,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
             sup_xy = None
             sup_kind = None
             if args.auto_support:
-                for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx):
+                for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx, war_nudge=not args.no_war_nudge):
                     action.commands.append(cmd)
                     name = getattr(getattr(cmd, "action", None), "value", None) or str(
                         getattr(cmd, "action", ""))
@@ -669,6 +669,8 @@ def main():
     ap.add_argument("--shaper-preset", default="eradicate_v4", choices=list(PRESETS))
     ap.add_argument("--auto-support", action=argparse.BooleanOptionalAction, default=True,
                     help="harvest/repair/power automático (Pilar B); default on como el train")
+    ap.add_argument("--no-war-nudge", action="store_true",
+                    help="igual que el train Run 43: apaga raid/push/fog-scout; PPO manda la guerra")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")
     ap.add_argument("--log-file", default="rl/ckpts/live_games.jsonl",
