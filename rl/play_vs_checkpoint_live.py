@@ -16,6 +16,8 @@ Uso (PowerShell, UN comando):
 
 Al terminar cada partida (win/lose/incomplete) append a
 rl/ckpts/live_games.jsonl y el tape completo a rl/ckpts/live_tape.jsonl.
+El visor puede grabar WebM (mapa+HUD) a rl/ckpts/live_recordings/{episode_id}.webm
+con el mismo episode_id que va en el jsonl.
 Ctrl+C / DEADLINE no escriben: un chequeo corto no deja basura del run
 siguiente. No pisa el train.
 """
@@ -160,6 +162,7 @@ def _tape_row(obs, *, ep, ckpt, dec, pol, cell, item, sup, supk, iss=None):
     dest = sup or cell
     return {
         "ep": ep,
+        "episode_id": ep,
         "ckpt": int(ckpt),
         "dec": int(dec),
         "tick": int(getattr(obs, "tick", 0) or 0),
@@ -219,7 +222,7 @@ def _append_live_rows(path: Path, rows: list) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str, status, done, result):
+def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str, status, done, result, episode_id=""):
     """Convierte observación a dict liviano para el visor."""
     H = obs.map_info.height or 64
     W = obs.map_info.width or 64
@@ -274,8 +277,13 @@ def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str,
         "units": [{"x": u.cell_x, "y": u.cell_y,
                     "type": str(getattr(u, "type", "") or ""),
                     "can_attack": bool(getattr(u, "can_attack", False))} for u in (obs.units or [])],
-        "ene_buildings": [{"x": b.cell_x, "y": b.cell_y} for b in (obs.visible_enemy_buildings or [])],
-        "ene_units": [{"x": u.cell_x, "y": u.cell_y} for u in (obs.visible_enemies or [])],
+        "ene_buildings": [{"x": b.cell_x, "y": b.cell_y,
+                              "type": str(getattr(b, "type", "") or "")}
+                             for b in (obs.visible_enemy_buildings or [])],
+        "ene_units": [{"x": u.cell_x, "y": u.cell_y,
+                        "type": str(getattr(u, "type", "") or ""),
+                        "can_attack": bool(getattr(u, "can_attack", False))}
+                       for u in (obs.visible_enemies or [])],
         "resources": resources,
         "fog": fog,
         "beacon": beacon,
@@ -290,11 +298,13 @@ def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str,
         "result": result,
         "status": status,
         "done": bool(done),
+        "episode_id": episode_id or "",
     }
 
 
 async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
-                           broadcaster: LiveBroadcaster, ckpt_iter: int = 0):
+                           broadcaster: LiveBroadcaster, ckpt_iter: int = 0,
+                           ep_index: int = 1):
     reset_kwargs = {}
     if args.scenario:
         mapa = Path(f"rl/scenarios/fase2_{args.scenario.lower()}.oramap")
@@ -329,7 +339,10 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
     last_action_str = "—"
     macro_final = None
     last_push_cell = None
-    ep_id = f"{int(ckpt_iter)}-{int(time.time())}"
+    ep_id = (
+        f"live_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        f"_ep{int(ep_index)}_ck{int(ckpt_iter)}"
+    )
     aborted = False
     trace = {
         "policy_push_cells": [],
@@ -341,7 +354,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
     }
 
     # estado inicial
-    broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, "jugando…", done, ""))
+    broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, "jugando…", done, "", episode_id=ep_id))
 
     use_macro = args.macro_ticks > 0
     for step in range(args.max_steps):
@@ -507,7 +520,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                     "n_ene": (len(obs.visible_enemies or [])
                               + len(obs.visible_enemy_buildings or [])),
                 })
-            broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, f"dec {decs} tick {obs.tick}", done, getattr(obs, "result", "") or macro_final or ""))
+            broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, f"dec {decs} tick {obs.tick}", done, getattr(obs, "result", "") or macro_final or "", episode_id=ep_id))
 
         if done:
             break
@@ -517,7 +530,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
     r_final = shaper.finalize(truncated=not done, result=str(getattr(obs, "result", "") or macro_final or ""))
     episode_reward += r_final
     final_result = getattr(obs, "result", None) or macro_final or ("incomplete" if not done else "")
-    broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, f"final: {final_result}", True, final_result))
+    broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, f"final: {final_result}", True, final_result, episode_id=ep_id))
     xy_end = _combat_centroid(obs.units)
     beacon_xy = list(beacon) if beacon else None
     log_row = {
@@ -542,6 +555,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
         "tape": [t for i, t in enumerate(trace["tape"])
                  if i == 0 or (i + 1) % 10 == 0 or i + 1 == len(trace["tape"])],
         "ep": ep_id,
+        "episode_id": ep_id,
         "centroid_end": xy_end,
         "dist_to_beacon": _dist(xy_end, beacon_xy),
         "n_units_end": len(obs.units or []),
@@ -633,9 +647,9 @@ async def amain(args):
                 print(f"Recargué ckpt iter {it}")
             label = str(ep) if args.episodes <= 0 else f"{ep}/{args.episodes}"
             print(f"\n=== Episodio {label} ===")
-            bc.update({"status": f"episodio {label} — iniciando…", "done": False, "ckpt_iter": it})
+            bc.update({"status": f"episodio {label} — iniciando…", "done": False, "ckpt_iter": it, "episode_id": ""})
             outcome = await run_episode_live(
-                env, net, vocab, device, args, bc, ckpt_iter=it)
+                env, net, vocab, device, args, bc, ckpt_iter=it, ep_index=ep)
             print(f"  result={outcome['result']} ticks={outcome['ticks']} "
                   f"decs={outcome['decisions']} rew={outcome['episode_reward']} "
                   f"dist_beacon={outcome.get('dist_to_beacon')} hist={outcome['hist']}")

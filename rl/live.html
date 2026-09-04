@@ -16,7 +16,6 @@
   .kpi{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 14px;min-width:110px}
   .kpi .l{font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
   .kpi .v{font-size:18px;font-weight:700;font-variant-numeric:tabular-nums}
-  .kpi.small .v{font-size:14px}
   .layout{display:grid;grid-template-columns: minmax(520px,1fr) 320px;gap:14px}
   @media(max-width:900px){.layout{grid-template-columns:1fr}}
   canvas{background:#0f141f;border:1px solid var(--border);border-radius:8px;width:100%;height:auto;display:block}
@@ -28,13 +27,23 @@
   .dot{width:10px;height:10px;border-radius:2px;display:inline-block;vertical-align:middle;margin-right:4px}
   #action{font-size:12px;white-space:pre-wrap;word-break:break-word;background:#0b0e14;border:1px solid var(--border);border-radius:6px;padding:8px;max-height:220px;overflow:auto}
   .status{font-size:12px;color:var(--amber)}
+  .btn{border:1px solid var(--border);background:var(--card);color:var(--fg);border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer}
+  .btn:hover{border-color:var(--blue)}
+  .btn.rec{background:#3a1515;border-color:var(--red);color:#ffb4b0}
+  .btn.rec.on{background:var(--red);color:#fff;animation:pulse 1.2s infinite}
+  .eid{font-size:11px;color:var(--muted);font-family:ui-monospace,Consolas,monospace}
+  .rec-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red);margin-right:6px;vertical-align:middle}
+  #comp{position:fixed;left:-99999px;top:0;width:1000px;height:640px;opacity:0;pointer-events:none}
 </style>
 </head>
 <body>
 <header>
-  <h1>🔴 OpenRA Live — Checkpoint vs Bot</h1>
+  <h1>OpenRA Live — Checkpoint vs Bot</h1>
   <span class="live" id="live-lbl">conectando…</span>
   <span class="status" id="status"></span>
+  <button class="btn rec" id="btn-rec" type="button">● Grabar</button>
+  <span class="eid" id="rec-lbl"></span>
+  <span class="eid" id="eid-lbl"></span>
 </header>
 
 <div class="bar" id="kpis">
@@ -85,13 +94,208 @@
   </div>
 </div>
 
+<canvas id="comp" width="1000" height="640"></canvas>
+
 <script>
 const API = '/api/state';
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
+const comp = document.getElementById('comp');
+const cctx = comp.getContext('2d');
+const MAP = 640, HUD = 360;
 let lastState = null;
+let wasDone = false;
+
+let recorder = null;
+let recChunks = [];
+let recording = false;
+let recEpisodeId = '';
 
 function fmt(n){ if(n==null) return '—'; return typeof n==='number'? (Number.isInteger(n)?n:n.toFixed(1)) : n; }
+
+function rosterText(s){
+  function tally(arr){
+    const c = {};
+    for(const o of (arr||[])){
+      const k = o.type || '?';
+      c[k] = (c[k]||0)+1;
+    }
+    return Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([k,v])=>k+'x'+v).join('  ') || '—';
+  }
+  const u = tally(s.units);
+  const ub = tally(s.buildings);
+  const eb = tally(s.ene_buildings);
+  const eu = tally(s.ene_units);
+  return 'U: ' + u + (ub && ub !== '—' ? (' | bld ' + ub) : '')
+       + '\nE: u ' + eu + ' | bld ' + eb;
+}
+
+function histText(s){
+  if(!s.hist) return '—';
+  return Object.entries(s.hist).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([k,v])=>`${k}:${v}`).join('  ') || '—';
+}
+
+function paintComposite(s){
+  comp.width = MAP + HUD;
+  comp.height = MAP;
+  cctx.fillStyle = '#0b0e14';
+  cctx.fillRect(0,0,comp.width,comp.height);
+  cctx.drawImage(canvas, 0, 0);
+  const x0 = MAP + 12;
+  let y = 18;
+  const line = (label, val, color) => {
+    cctx.fillStyle = '#8b98a9';
+    cctx.font = '12px Segoe UI,sans-serif';
+    cctx.fillText(label, x0, y);
+    cctx.fillStyle = color || '#e6edf3';
+    cctx.font = 'bold 14px Segoe UI,sans-serif';
+    cctx.fillText(String(val), x0 + 120, y);
+    y += 22;
+  };
+  cctx.fillStyle = '#e6edf3';
+  cctx.font = 'bold 14px Segoe UI,sans-serif';
+  cctx.fillText('OpenRA Live', x0, y); y += 22;
+  cctx.fillStyle = '#8b98a9';
+  cctx.font = '11px Consolas,monospace';
+  cctx.fillText(s.episode_id || '(sin episode_id)', x0, y); y += 26;
+  line('Tick', fmt(s.tick));
+  line('Cash', fmt(s.cash));
+  line('Ore/cap', s.ore!=null ? `${fmt(s.ore)}/${fmt(s.cap)}` : '—');
+  line('Power', s.power_provided!=null ? `${s.power_provided}/${s.power_drained}` : '—');
+  line('Units/Bld', `${fmt(s.n_units)} / ${fmt(s.n_bld)}`);
+  line('Ene U/B', `${fmt(s.n_ene_u)}/${fmt(s.n_ene_b)}`);
+  line('Reward', s.episode_reward!=null ? s.episode_reward.toFixed(2) : '—');
+  line('Result', s.result || '—', s.result==='win' ? '#3fb950' : s.result==='lose' ? '#f85149' : '#e6edf3');
+  line('Decs', fmt(s.decisions));
+  line('Adv ticks', fmt(s.advanced_ticks));
+  line('Sup diff', s.sup_diff!=null ? ((s.sup_diff>0?'+':'')+fmt(s.sup_diff)) : '—',
+       s.sup_diff>0 ? '#3fb950' : s.sup_diff<0 ? '#f85149' : '#e6edf3');
+  y += 8;
+  cctx.fillStyle = '#8b98a9';
+  cctx.font = '11px Segoe UI,sans-serif';
+  cctx.fillText('Última acción', x0, y); y += 16;
+  cctx.fillStyle = '#e6edf3';
+  cctx.font = '12px Consolas,monospace';
+  wrapText(String(s.last_action || '—'), x0, y, HUD - 24, 16);
+  y += 70;
+  cctx.fillStyle = '#8b98a9';
+  cctx.font = '11px Segoe UI,sans-serif';
+  cctx.fillText('Mapa', x0, y); y += 16;
+  cctx.fillStyle = '#e6edf3';
+  cctx.font = '12px Consolas,monospace';
+  wrapText(rosterText(s), x0, y, HUD - 24, 16);
+  y += 50;
+  cctx.fillStyle = '#8b98a9';
+  cctx.font = '11px Segoe UI,sans-serif';
+  cctx.fillText('Histograma', x0, y); y += 16;
+  cctx.fillStyle = '#e6edf3';
+  cctx.font = '12px Consolas,monospace';
+  wrapText(histText(s), x0, y, HUD - 24, 16);
+  if(recording){
+    cctx.fillStyle = '#f85149';
+    cctx.beginPath(); cctx.arc(comp.width - 18, 18, 7, 0, Math.PI*2); cctx.fill();
+    cctx.fillStyle = '#ffb4b0';
+    cctx.font = 'bold 12px Segoe UI,sans-serif';
+    cctx.fillText('REC', comp.width - 48, 22);
+  }
+}
+
+function wrapText(text, x, y, maxW, lineH){
+  const parts = String(text).split(/\n/);
+  for(const part of parts){
+    let line = '';
+    for(const ch of part){
+      const test = line + ch;
+      if(cctx.measureText(test).width > maxW){
+        cctx.fillText(line, x, y); y += lineH; line = ch;
+      } else line = test;
+    }
+    cctx.fillText(line, x, y); y += lineH;
+  }
+  return y;
+}
+
+function pickMime(){
+  const cands = [
+    'video/webm;codecs=vp9,opus',
+    'video/webm;codecs=vp8,opus',
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+  ];
+  for(const m of cands){
+    if(window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return '';
+}
+
+async function startRec(){
+  if(recording) return;
+  if(!window.MediaRecorder){
+    alert('MediaRecorder no disponible en este navegador');
+    return;
+  }
+  const mime = pickMime();
+  if(!mime){
+    alert('Este navegador no soporta WebM/MediaRecorder');
+    return;
+  }
+  if(lastState) paintComposite(lastState);
+  const stream = comp.captureStream(5);
+  recChunks = [];
+  recEpisodeId = (lastState && lastState.episode_id) || ('live_' + Date.now());
+  recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2_500_000 });
+  recorder.ondataavailable = (e) => { if(e.data && e.data.size) recChunks.push(e.data); };
+  recorder.onstop = () => finishRec();
+  recorder.start(1000);
+  recording = true;
+  document.getElementById('btn-rec').classList.add('on');
+  document.getElementById('btn-rec').textContent = '■ Detener';
+  document.getElementById('rec-lbl').innerHTML = '<span class="rec-dot"></span>grabando…';
+}
+
+async function stopRec(){
+  if(!recording || !recorder) return;
+  recording = false;
+  document.getElementById('btn-rec').classList.remove('on');
+  document.getElementById('btn-rec').textContent = '● Grabar';
+  document.getElementById('rec-lbl').textContent = 'cerrando…';
+  try { recorder.stop(); } catch(_) {}
+}
+
+async function finishRec(){
+  const eid = recEpisodeId || ((lastState && lastState.episode_id) || ('live_' + Date.now()));
+  const blob = new Blob(recChunks, { type: recorder && recorder.mimeType ? recorder.mimeType : 'video/webm' });
+  recorder = null;
+  recChunks = [];
+  document.getElementById('rec-lbl').textContent = `subiendo ${eid}.webm (${Math.round(blob.size/1024)} KB)…`;
+  let saved = false;
+  try{
+    const r = await fetch('/api/recording?episode_id=' + encodeURIComponent(eid), {
+      method: 'POST',
+      headers: { 'Content-Type': 'video/webm' },
+      body: blob,
+    });
+    if(r.ok){
+      const j = await r.json();
+      document.getElementById('rec-lbl').textContent = 'guardado: ' + (j.path || eid + '.webm');
+      saved = true;
+    }
+  }catch(e){
+    console.warn('upload failed', e);
+  }
+  // también descarga local por si el POST falló
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = eid + '.webm';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 30_000);
+  if(!saved) document.getElementById('rec-lbl').textContent = 'descargado ' + eid + '.webm (server off)';
+}
+
+document.getElementById('btn-rec').addEventListener('click', () => {
+  if(recording) stopRec(); else startRec();
+});
 
 async function poll(){
   try{
@@ -102,7 +306,14 @@ async function poll(){
     document.getElementById('live-lbl').textContent = s.done ? 'finalizado' : 'en vivo';
     document.getElementById('live-lbl').style.color = s.done ? '#f85149' : '#8b98a9';
     document.getElementById('status').textContent = s.status || '';
+    document.getElementById('eid-lbl').textContent = s.episode_id ? ('id ' + s.episode_id) : '';
     render(s);
+    if(recording && s.episode_id) recEpisodeId = s.episode_id;
+    // auto-stop al terminar la partida
+    if(recording && s.done && !wasDone){
+      stopRec();
+    }
+    wasDone = !!s.done;
   }catch(e){
     document.getElementById('live-lbl').textContent = 'sin conexión ('+e.message+')';
   }
@@ -112,7 +323,7 @@ function render(s){
   document.getElementById('k-tick').textContent = fmt(s.tick);
   document.getElementById('k-cash').textContent = fmt(s.cash);
   document.getElementById('k-ore').textContent = s.ore!=null ? `${fmt(s.ore)}/${fmt(s.cap)}` : '—';
-  document.getElementById('k-power').textContent = s.power!=null ? `${s.power_provided}/${s.power_drained}` : '—';
+  document.getElementById('k-power').textContent = s.power_provided!=null ? `${s.power_provided}/${s.power_drained}` : '—';
   document.getElementById('k-units').textContent = fmt(s.n_units);
   document.getElementById('k-bld').textContent = fmt(s.n_bld);
   document.getElementById('k-ene').textContent = `${fmt(s.n_ene_u)}/${fmt(s.n_ene_b)}`;
@@ -125,52 +336,33 @@ function render(s){
   document.getElementById('p-diff').textContent = s.sup_diff!=null ? (s.sup_diff>0?'+':'')+fmt(s.sup_diff) : '—';
   document.getElementById('p-diff').style.color = s.sup_diff>0 ? '#3fb950' : s.sup_diff<0 ? '#f85149' : '#e6edf3';
   document.getElementById('action').textContent = s.last_action || '—';
-  (function(){
-    function tally(arr){
-      const c = {};
-      for(const o of (arr||[])){
-        const k = o.type || '?';
-        c[k] = (c[k]||0)+1;
-      }
-      return Object.entries(c).sort((a,b)=>b[1]-a[1]).map(([k,v])=>k+'x'+v).join('  ') || '—';
-    }
-    const el = document.getElementById('roster');
-    if(el) el.textContent = 'U: ' + tally(s.units) + '\nE: ' + tally(s.buildings);
-  })();
-  if(s.hist){
-    const top = Object.entries(s.hist).sort((a,b)=>b[1]-a[1]).slice(0,6).map(([k,v])=>`${k}:${v}`).join('  ');
-    document.getElementById('hist').textContent = top || '—';
-  }
+  document.getElementById('roster').textContent = rosterText(s);
+  document.getElementById('hist').textContent = histText(s);
   drawMap(s);
+  paintComposite(s);
 }
 
 function drawMap(s){
   const W = s.map_w || 64, H = s.map_h || 64;
-  // ajustar canvas al ratio del mapa
   const size = 640;
   canvas.width = size; canvas.height = size;
   const scaleX = size / W, scaleY = size / H;
   ctx.clearRect(0,0,size,size);
-  // fondo
   ctx.fillStyle = '#0f141f';
   ctx.fillRect(0,0,size,size);
-  // grid suave
   ctx.strokeStyle = 'rgba(255,255,255,.04)';
   ctx.lineWidth = 1;
   for(let x=0;x<W;x+=8){ ctx.beginPath(); ctx.moveTo(x*scaleX,0); ctx.lineTo(x*scaleX,size); ctx.stroke(); }
   for(let y=0;y<H;y+=8){ ctx.beginPath(); ctx.moveTo(0,y*scaleY); ctx.lineTo(size,y*scaleY); ctx.stroke(); }
 
-  // recursos (si viene spatial resumido)
   if(s.resources){
     ctx.fillStyle = 'rgba(63,185,80,.9)';
     for(const [x,y] of s.resources){ ctx.fillRect(x*scaleX, y*scaleY, Math.max(2,scaleX*0.9), Math.max(2,scaleY*0.9)); }
   }
-  // niebla como overlay (si viene fog)
   if(s.fog){
     ctx.fillStyle = 'rgba(0,0,0,.55)';
     for(const [x,y] of s.fog){ ctx.fillRect(x*scaleX, y*scaleY, scaleX, scaleY); }
   }
-  // edificios propios (azul)
   if(s.buildings){
     for(const b of s.buildings){
       ctx.fillStyle = b.hp!=null && b.hp<0.4 ? '#1f4a8a' : '#58a6ff';
@@ -184,7 +376,6 @@ function drawMap(s){
       }
     }
   }
-  // unidades propias (cyan)
   if(s.units){
     for(const u of s.units){
       ctx.beginPath();
@@ -200,14 +391,12 @@ function drawMap(s){
       }
     }
   }
-  // edificios enemigos (rojo)
   if(s.ene_buildings){
     for(const b of s.ene_buildings){
       ctx.fillStyle = '#f85149';
       ctx.fillRect(b.x*scaleX, b.y*scaleY, scaleX*1.4, scaleY*1.4);
     }
   }
-  // unidades enemigas (naranja)
   if(s.ene_units){
     for(const u of s.ene_units){
       ctx.beginPath();
@@ -215,13 +404,11 @@ function drawMap(s){
       ctx.fillStyle = '#f0883e'; ctx.fill();
     }
   }
-  // beacon (objetivo enemigo conocido por curriculum)
   if(s.beacon){
     ctx.strokeStyle = '#d29922'; ctx.lineWidth=2; ctx.setLineDash([6,4]);
     ctx.strokeRect(s.beacon[0]*scaleX-8, s.beacon[1]*scaleY-8, 16, 16);
     ctx.setLineDash([]);
   }
-  // borde mapa
   ctx.strokeStyle = '#232b38'; ctx.lineWidth=2; ctx.strokeRect(0,0,size,size);
 }
 
