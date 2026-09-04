@@ -21,6 +21,7 @@ celda metían ruido en acciones que ni los miraban.
 
 import numpy as np
 import math
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -50,6 +51,9 @@ XF_LAYERS = 2
 XF_FF = 128
 SCATTER_CH = 8
 UNIT_COND_DIM = 64
+QSA_DIM = 32
+QSA_BLOCK = 8
+QSA_TOPK = 8
 SPATIAL_CH = 96
 CELL_HEAD_OLD_IN = SPATIAL_CH + 64 + 64  # fmap + tipo + hidden (pre Capa 2)
 
@@ -183,6 +187,17 @@ class AlphaLiteNet(nn.Module):
         # 0 = dense softmax (legacy). >0 = top-k sparse attn on entity XF
         # (Run46 inductive bias; state_dict unchanged — same MHA weights).
         self.xf_topk = 0
+        # Map QSA (Run47): block indexer → top-k cells only. 0 = dense cell_head.
+        self.qsa_topk = 0
+        self.qsa_block = QSA_BLOCK
+        # Learned block indexer (fmap keys + query from type/unit/hidden).
+        # Small init; block ranking also uses dense logits (distilled prior).
+        self.qsa_key = nn.Conv2d(ch, QSA_DIM, 1)
+        nn.init.normal_(self.qsa_key.weight, std=0.01)
+        nn.init.zeros_(self.qsa_key.bias)
+        self.qsa_query = nn.Linear(HIDDEN_DIM + 64 + UNIT_COND_DIM, QSA_DIM)
+        nn.init.normal_(self.qsa_query.weight, std=0.01)
+        nn.init.zeros_(self.qsa_query.bias)
         fused = ch + 128 + 128
         self.core = nn.GRUCell(fused, HIDDEN_DIM)
 
@@ -426,7 +441,8 @@ class AlphaLiteNet(nn.Module):
         """Logits crudos [B, H*W] de la cabeza de celda.
 
         fmap U-Net + scatter de unidades + emb tipo + GRU + slot (Capa 2).
-        Un rifle y un MCV ya no ven el mismo heatmap.
+        Si qsa_topk>0: QSA de mapa — ranking de bloques BxB, top-k, el resto
+        a -inf (softmax solo sobre regiones relevantes; doc 13 / Run47).
         """
         b, _, H, W = fmap.shape
         scatter = self._scatter_units(
@@ -437,10 +453,73 @@ class AlphaLiteNet(nn.Module):
         unit_map = self._unit_cond_map(
             tokens, unit_valid, unit_slot, chosen_type, (H, W),
             unit_own_mask=unit_own_mask)
+        # unit_cond vector (pre-broadcast) for QSA query
+        slot = unit_slot.clamp(0, max(tokens.size(1) - 1, 0))
+        chosen = tokens[torch.arange(b, device=tokens.device), slot]
+        pool_m = unit_own_mask if unit_own_mask is not None else unit_valid
+        valid_f = pool_m.float().unsqueeze(-1)
+        pooled = (tokens * valid_f).sum(1) / valid_f.sum(1).clamp(min=1.0)
+        use_u = _heads_used(chosen_type, tokens.device)[0]
+        unit_cond = torch.where(use_u.unsqueeze(-1), chosen, pooled)
+        unit_cond = F.relu(self.unit_cond_proj(unit_cond))
+
         logits_map = self.cell_head(
             torch.cat([fmap, scatter, emb_map, hd, unit_map], dim=1)).squeeze(1)
+        topk = int(getattr(self, "qsa_topk", 0) or 0)
+        if topk > 0:
+            logits_map = self._apply_map_qsa(
+                logits_map, fmap, hidden, emb, unit_cond, topk)
         logits_map = _mask_illegal(logits_map, ~cell_mask.view(b, H, W))
         return logits_map.reshape(b, -1)
+
+    def _apply_map_qsa(self, logits_map, fmap, hidden, type_emb, unit_cond,
+                       topk: int):
+        """Block top-k mask over cell logits (Query Sparse Attention lite).
+
+        Block score = mean dense logit in block + learned (query·key).
+        Cells outside the top-k blocks get -1e4 (AMP-safe).
+        """
+        b, H, W = logits_map.shape
+        block = max(1, int(getattr(self, "qsa_block", QSA_BLOCK) or QSA_BLOCK))
+        # Pad to multiple of block
+        pad_h = (block - H % block) % block
+        pad_w = (block - W % block) % block
+        if pad_h or pad_w:
+            logits_pad = F.pad(logits_map, (0, pad_w, 0, pad_h), value=-1e4)
+            fmap_pad = F.pad(fmap, (0, pad_w, 0, pad_h))
+        else:
+            logits_pad = logits_map
+            fmap_pad = fmap
+        Hp, Wp = logits_pad.shape[-2:]
+        gh, gw = Hp // block, Wp // block
+        n_blocks = gh * gw
+        # Dense prior: mean logit per block
+        prior = F.avg_pool2d(
+            logits_pad.unsqueeze(1), block, block).view(b, n_blocks)
+        # Learned indexer (independent of cell_head — no IndexShare)
+        keys = self.qsa_key(fmap_pad)
+        keys = F.avg_pool2d(keys, block, block)  # [B,D,gh,gw]
+        keys = keys.view(b, QSA_DIM, n_blocks).transpose(1, 2)  # [B,N,D]
+        q = self.qsa_query(
+            torch.cat([hidden, type_emb, unit_cond], dim=-1))  # [B,D]
+        learned = torch.einsum("bd,bnd->bn", q, keys) / math.sqrt(QSA_DIM)
+        scores = prior + learned
+        k_use = min(int(topk), n_blocks)
+        _, idx = torch.topk(scores, k=k_use, dim=-1)  # [B,k]
+        # Build boolean mask of selected cells
+        flat = torch.zeros(b, n_blocks, dtype=torch.bool, device=logits_map.device)
+        flat.scatter_(1, idx, True)
+        block_mask = flat.view(b, gh, gw)
+        cell_keep = block_mask.repeat_interleave(block, dim=1).repeat_interleave(
+            block, dim=2)[:, :H, :W]
+        out = logits_map.masked_fill(~cell_keep, -1e4)
+        # STE: hard mask in forward; let qsa_query/key get grad on kept cells
+        learned_map = learned.view(b, gh, gw)
+        learned_map = learned_map.repeat_interleave(block, dim=1).repeat_interleave(
+            block, dim=2)[:, :H, :W]
+        keep_f = cell_keep.float()
+        out = out + (learned_map - learned_map.detach()) * keep_f
+        return out
 
     def dist_cell(self, fmap, chosen_type, cell_mask, hidden,
                   tokens, unit_feats, unit_valid, unit_slot,

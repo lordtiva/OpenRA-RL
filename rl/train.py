@@ -136,6 +136,10 @@ async def amain(args):
     if getattr(args, "xf_topk", 0):
         net.xf_topk = int(args.xf_topk)
         print(f"entity XF top-k={net.xf_topk}", flush=True)
+    if getattr(args, "qsa_topk", 0):
+        net.qsa_topk = int(args.qsa_topk)
+        net.qsa_block = int(getattr(args, "qsa_block", 8) or 8)
+        print(f"map QSA top-k={net.qsa_topk} block={net.qsa_block}", flush=True)
     vocab = Vocab()
     trainer = PPOTrainer(
         net, lr=args.lr, device=device,
@@ -763,6 +767,10 @@ def main():
                     help="GRU burn-in steps before each BPTT segment (R2D2; Run46: 8)")
     ap.add_argument("--xf-topk", type=int, default=0,
                     help="entity transformer top-k attention (0=dense softmax; Run46: 16)")
+    ap.add_argument("--qsa-topk", type=int, default=0,
+                    help="map QSA: keep top-k spatial blocks for cell head (0=off; Run47: 8)")
+    ap.add_argument("--qsa-block", type=int, default=8,
+                    help="map QSA block size in cells (default 8)")
     ap.add_argument("--gamma", type=float, default=0.995)
     ap.add_argument("--lam", type=float, default=0.95)
     ap.add_argument("--device", default="auto")

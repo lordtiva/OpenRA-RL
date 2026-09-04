@@ -605,7 +605,9 @@ async def amain(args):
     device = pick_device(args.device)
     print(f"Device: {device} | ckpt: {ckpt_path}")
     net = AlphaLiteNet()
-    net.xf_topk = int(getattr(args, 'xf_topk', 16) or 0)
+    net.xf_topk = int(getattr(args, "xf_topk", 16) or 0)
+    net.qsa_topk = int(getattr(args, "qsa_topk", 8) or 0)
+    net.qsa_block = int(getattr(args, "qsa_block", 8) or 8)
     vocab = Vocab()
     it = load_checkpoint(str(ckpt_path), net, vocab=vocab)
     net.to(device)
@@ -689,6 +691,10 @@ def main():
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
     ap.add_argument("--xf-topk", type=int, default=16,
                     help="entity XF top-k (0=dense; default 16 = Run46)")
+    ap.add_argument("--qsa-topk", type=int, default=8,
+                    help="map QSA top-k blocks (0=off)")
+    ap.add_argument("--qsa-block", type=int, default=8,
+                    help="map QSA block size")
     ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")
     ap.add_argument("--log-file", default="rl/ckpts/live_games.jsonl",
                     help="jsonl por partida completa (win/lose/incomplete). Vacío = off. Ctrl+C no escribe.")
