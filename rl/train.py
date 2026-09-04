@@ -133,10 +133,14 @@ async def amain(args):
         os.replace(args.metrics, args.metrics + f".old_{stamp}")
 
     net = AlphaLiteNet()
+    if getattr(args, "xf_topk", 0):
+        net.xf_topk = int(args.xf_topk)
+        print(f"entity XF top-k={net.xf_topk}", flush=True)
     vocab = Vocab()
     trainer = PPOTrainer(
         net, lr=args.lr, device=device,
         clip_eps=args.clip_eps, max_grad_norm=args.max_grad_norm,
+        burn_in_len=args.burn_in,
     )
 
     start_iter = 0
@@ -755,6 +759,10 @@ def main():
                     help="PPO ratio clip epsilon (Informe-3 Run45: 0.15)")
     ap.add_argument("--max-grad-norm", type=float, default=0.5,
                     help="grad clip norm (Informe-3 Run45: 1.0)")
+    ap.add_argument("--burn-in", type=int, default=0,
+                    help="GRU burn-in steps before each BPTT segment (R2D2; Run46: 8)")
+    ap.add_argument("--xf-topk", type=int, default=0,
+                    help="entity transformer top-k attention (0=dense softmax; Run46: 16)")
     ap.add_argument("--gamma", type=float, default=0.995)
     ap.add_argument("--lam", type=float, default=0.95)
     ap.add_argument("--device", default="auto")

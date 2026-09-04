@@ -29,6 +29,7 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | **17** | 17-run43-no-war-nudge.md | **Run 43: seed best@79, war nudge OFF, PFSP medium+rl** | **2026-09-03** |
 | **18** | 18-run44-pack-total-lr.md | **Run 44: PACK_ARMY total>=12 + LR 1e-4, seed best@80** | **2026-09-03** |
 | **19** | `19-run45-reseed-best80.md` | **Run 45: reseed seed-best80 post Run44 plateau** | **2026-09-04** |
+| **20** | `20-run46-burnin-topk.md` | **Run 46: burn-in 8 + XF top-k 16** | **2026-09-04** |
 
 ## Cómo leer esto
 

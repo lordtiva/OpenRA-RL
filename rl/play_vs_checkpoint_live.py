@@ -605,6 +605,7 @@ async def amain(args):
     device = pick_device(args.device)
     print(f"Device: {device} | ckpt: {ckpt_path}")
     net = AlphaLiteNet()
+    net.xf_topk = int(getattr(args, 'xf_topk', 16) or 0)
     vocab = Vocab()
     it = load_checkpoint(str(ckpt_path), net, vocab=vocab)
     net.to(device)
@@ -686,6 +687,8 @@ def main():
     ap.add_argument("--no-war-nudge", action="store_true",
                     help="igual que el train Run 43: apaga raid/push/fog-scout; PPO manda la guerra")
     ap.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"])
+    ap.add_argument("--xf-topk", type=int, default=16,
+                    help="entity XF top-k (0=dense; default 16 = Run46)")
     ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")
     ap.add_argument("--log-file", default="rl/ckpts/live_games.jsonl",
                     help="jsonl por partida completa (win/lose/incomplete). Vacío = off. Ctrl+C no escribe.")

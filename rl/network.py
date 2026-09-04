@@ -20,6 +20,7 @@ celda metían ruido en acciones que ni los miraban.
 """
 
 import numpy as np
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -179,6 +180,9 @@ class AlphaLiteNet(nn.Module):
             xf_layer, num_layers=XF_LAYERS, enable_nested_tensor=False)
         self.unit_xf_out = nn.Linear(XF_DIM, 128)
         self.unit_xf_scale = nn.Parameter(torch.zeros(1))
+        # 0 = dense softmax (legacy). >0 = top-k sparse attn on entity XF
+        # (Run46 inductive bias; state_dict unchanged — same MHA weights).
+        self.xf_topk = 0
         fused = ch + 128 + 128
         self.core = nn.GRUCell(fused, HIDDEN_DIM)
 
@@ -239,14 +243,63 @@ class AlphaLiteNet(nn.Module):
         return x
 
     def _entity_tokens(self, u, unit_valid):
-        """MLP tokens + transformer residual (scale=0 → identidad 922)."""
+        """MLP tokens + transformer residual (scale=0 → identidad 922).
+
+        Si xf_topk>0, cada capa del unit_xf usa atención top-k (filtro de
+        ruido entre ~128 tokens) reutilizando los pesos MHA existentes.
+        """
         pad = ~unit_valid
         all_pad = pad.all(dim=-1)
         pad = pad.clone()
         pad[all_pad, 0] = False
-        tok = self.unit_xf(self.unit_xf_in(u), src_key_padding_mask=pad)
-        tok = tok.masked_fill(all_pad[:, None, None], 0.0)
-        return u + self.unit_xf_scale * self.unit_xf_out(tok)
+        x = self.unit_xf_in(u)
+        topk = int(getattr(self, "xf_topk", 0) or 0)
+        if topk > 0:
+            for layer in self.unit_xf.layers:
+                x = self._xf_layer_topk(layer, x, pad, topk)
+        else:
+            x = self.unit_xf(x, src_key_padding_mask=pad)
+        x = x.masked_fill(all_pad[:, None, None], 0.0)
+        return u + self.unit_xf_scale * self.unit_xf_out(x)
+
+    def _xf_layer_topk(self, layer, x, pad, topk: int):
+        """Una TransformerEncoderLayer (norm_first) con self-attn top-k."""
+        y = layer.norm1(x)
+        y = self._topk_mha(layer.self_attn, y, pad, topk)
+        x = x + y
+        y = layer.norm2(x)
+        y = layer.linear2(layer.activation(layer.linear1(y)))
+        x = x + y
+        return x
+
+    def _topk_mha(self, mha: nn.MultiheadAttention, x, pad, topk: int):
+        """Self-attn batch_first con máscara top-k (resto → -inf).
+
+        Gradiente solo fluye por las k claves elegidas (sesgo inductivo).
+        Compatible con AMP: fill -1e4.
+        """
+        B, N, E = x.shape
+        H = mha.num_heads
+        Dh = E // H
+        qkv = F.linear(x, mha.in_proj_weight, mha.in_proj_bias)
+        q, k, v = qkv.chunk(3, dim=-1)
+        def _split(t):
+            return t.view(B, N, H, Dh).transpose(1, 2)  # [B,H,N,Dh]
+        q, k, v = _split(q), _split(k), _split(v)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(Dh)
+        # pad True = ignore key
+        if pad is not None:
+            scores = scores.masked_fill(pad[:, None, None, :], -1e4)
+        k_use = min(int(topk), N)
+        if k_use < N:
+            vals, idx = torch.topk(scores, k=k_use, dim=-1)
+            sparse = scores.new_full(scores.shape, -1e4)
+            sparse.scatter_(-1, idx, vals)
+            scores = sparse
+        attn = torch.softmax(scores, dim=-1)
+        out = torch.matmul(attn, v)  # [B,H,N,Dh]
+        out = out.transpose(1, 2).contiguous().view(B, N, E)
+        return F.linear(out, mha.out_proj.weight, mha.out_proj.bias)
 
     def _unit_in(self, unit_feats, role_ids):
         """cat(feats11, role_emb8) → 19-d para mlp/scatter/scorer."""
@@ -645,8 +698,8 @@ class AlphaLiteNet(nn.Module):
         """BPTT sobre B segmentos en paralelo (pad al final).
 
         El h_in del primer step de cada seg entra como constante; el GRU
-        propaga sin detach. Pasos de padding no entran al loss ni al hidden
-        siguiente (where sobre valid).
+        propaga sin detach. Pasos `_burn` (burn-in) avanzan h pero no
+        entran al loss. Padding no entra al loss ni al hidden siguiente.
 
         Devuelve lp, entropy, value, valid — todos [B, T].
         """
@@ -676,17 +729,23 @@ class AlphaLiteNet(nn.Module):
         for t in range(T):
             steps = []
             active = []
+            burn = []
             for seg in segs:
                 if t < len(seg):
                     steps.append(seg[t])
                     active.append(True)
+                    burn.append(bool(seg[t].get("_burn")))
                 else:
                     steps.append(seg[-1])
                     active.append(False)
-            row_valid = torch.tensor(active, dtype=torch.bool, device=device)
+                    burn.append(False)
+            # Pad steps stay inactive. Burn-in steps advance h but skip loss.
+            row_active = torch.tensor(active, dtype=torch.bool, device=device)
+            row_burn = torch.tensor(burn, dtype=torch.bool, device=device)
+            row_valid = row_active & ~row_burn
             batch, actions = _stack_steps(steps, device)
             lp, ent, val, h_new = self._eval_step(batch, h, actions)
-            h = torch.where(row_valid.unsqueeze(-1), h_new, h)
+            h = torch.where(row_active.unsqueeze(-1), h_new, h)
             lp_t.append(lp)
             ent_t.append(ent)
             val_t.append(val)

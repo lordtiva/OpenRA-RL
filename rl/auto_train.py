@@ -80,7 +80,7 @@ DAEMONS = (
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
-    "--iters", "400",
+    "--iters", "20",
     "--concurrency", "4",
     "--max-steps", "1000",
     "--macro-ticks", "50",
@@ -88,6 +88,8 @@ TRAIN_ARGS = [
     "--epochs", "1",
     "--clip-eps", "0.15",
     "--max-grad-norm", "1.0",
+    "--burn-in", "8",
+    "--xf-topk", "16",
     "--batch-size", "128",
     "--scenario", "a_short",
     "--bot-type", "easy",

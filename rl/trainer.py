@@ -95,19 +95,37 @@ def prefetch_steps(steps: list, device: str, inplace: bool = False) -> list:
     return steps if inplace else out
 
 
-def _split_segments(samples: list, bptt_len: int) -> list:
+def _split_segments(samples: list, bptt_len: int,
+                   burn_in_len: int = 0) -> list:
+    """Segmentos de hasta bptt_len pasos entrenables.
+
+    Si burn_in_len>0, cada segmento (salvo el arranque de episodio) antepone
+    hasta burn_in_len pasos previos marcados `_burn=True`: la GRU los propaga
+    sin entrar al loss (R2D2-style burn-in).
+    """
     if not samples:
         return []
-    ep0 = samples[0].get("_ep", 0)
-    segs, run = [], [samples[0]]
-    for s in samples[1:]:
-        if s.get("_ep", ep0) != run[0].get("_ep", ep0) or len(run) >= bptt_len:
-            segs.append(run)
-            run = [s]
-        else:
-            run.append(s)
-    if run:
-        segs.append(run)
+    episodes: dict = {}
+    for s in samples:
+        episodes.setdefault(s.get("_ep", 0), []).append(s)
+    segs = []
+    burn_in_len = max(0, int(burn_in_len))
+    for ep_samples in episodes.values():
+        n = len(ep_samples)
+        for start in range(0, n, bptt_len):
+            end = min(start + bptt_len, n)
+            b_start = max(0, start - burn_in_len)
+            n_burn = start - b_start
+            seg = []
+            for i, s in enumerate(ep_samples[b_start:end]):
+                if i < n_burn:
+                    ns = dict(s)
+                    ns["_burn"] = True
+                    seg.append(ns)
+                else:
+                    seg.append(s)
+            if seg:
+                segs.append(seg)
     return segs
 
 
@@ -142,7 +160,8 @@ class PPOTrainer:
     def __init__(self, net, lr: float = 3e-4, device: str = "cpu",
                  clip_eps: float = 0.2, vf_coef: float = 0.5,
                  ent_lo: float = 0.01, ent_hi: float = 0.04,
-                 max_grad_norm: float = 0.5, bptt_len: int = 32):
+                 max_grad_norm: float = 0.5, bptt_len: int = 32,
+                 burn_in_len: int = 0):
         self.net = net.to(device)
         self.opt = torch.optim.Adam(self.net.parameters(), lr=lr)
         self.device = device
@@ -152,6 +171,7 @@ class PPOTrainer:
         self.ent_hi = ent_hi
         self.max_grad_norm = max_grad_norm
         self.bptt_len = bptt_len  # longitud de segmento para BPTT truncado
+        self.burn_in_len = max(0, int(burn_in_len))
         self.scaler = _make_scaler(device)
         self.use_amp = device == "cuda"
         if self.use_amp:
@@ -208,11 +228,11 @@ class PPOTrainer:
         if not samples:
             return {}
         prefetch_steps(samples, self.device, inplace=True)
-        segs = _split_segments(samples, self.bptt_len)
+        segs = _split_segments(samples, self.bptt_len, self.burn_in_len)
         if not segs:
             return {}
 
-        segs_per_batch = max(1, int(round(batch_size / self.bptt_len)))
+        segs_per_batch = max(1, int(round(batch_size / max(1, self.bptt_len + self.burn_in_len))))
         stats = {"pi_loss": [], "v_loss": [], "entropy": [],
                  "clip_frac": [], "kl": []}
         gn = 0.0
@@ -313,10 +333,10 @@ class PPOTrainer:
             return 0.0
         # Copia a GPU; el EliteBuffer se queda en CPU.
         gpu_steps = prefetch_steps(samples, self.device, inplace=False)
-        segs = _split_segments(gpu_steps, self.bptt_len)
+        segs = _split_segments(gpu_steps, self.bptt_len, self.burn_in_len)
         if not segs:
             return 0.0
-        segs_per_batch = max(1, int(round(batch_size / self.bptt_len)))
+        segs_per_batch = max(1, int(round(batch_size / max(1, self.bptt_len + self.burn_in_len))))
         nlls = []
         try:
             nlls = self._sil_epochs(segs, coef, epochs, segs_per_batch)
