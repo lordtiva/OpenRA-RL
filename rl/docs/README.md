@@ -28,6 +28,7 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | **16** | `16-rl-vs-rl-run42.md` | **RL-vs-RL dual bridge + Run 42 (PFSP-RL, era iter 1, seed best-1141, BC off)** | **Capa 3 self-play — 2026-09-03** |
 | **17** | 17-run43-no-war-nudge.md | **Run 43: seed best@79, war nudge OFF, PFSP medium+rl** | **2026-09-03** |
 | **18** | 18-run44-pack-total-lr.md | **Run 44: PACK_ARMY total>=12 + LR 1e-4, seed best@80** | **2026-09-03** |
+| **19** | `19-run45-reseed-best80.md` | **Run 45: reseed seed-best80 post Run44 plateau** | **2026-09-04** |
 
 ## Cómo leer esto
 
