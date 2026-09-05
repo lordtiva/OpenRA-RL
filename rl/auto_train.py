@@ -12,8 +12,9 @@ auto_train.py — 1 comando que lanza rl.train y lo vigila (sin 2 ventanas).
 - Si el train termina solo (crash/iters completados), también lo relanza.
 - Log en consola + rl/auto_train.log
 - train.py sigue escribiendo latest.pt (dashboard + live). Además, tras cada
-  iter, si el score es ESTRICTAMENTE mejor, copia latest.pt -> rl/ckpts/best.pt
-  (copy, no symlink) + sidecar best.json. Live más adelante: --ckpt rl/ckpts/best.pt
+  iter, si el score es ESTRICTAMENTE mejor, copia latest.pt -> rl/ckpts_v2/best.pt
+  (copy, no symlink) + sidecar best.json. Live más adelante: --ckpt rl/ckpts_v2/best.pt
+  Default A/B v2: rl/ckpts_v2 (override con --ckpt-dir). Control v1.1: rl/ckpts.
 
 Cuelgues — DOS orígenes distintos (no confundirlos):
   A) Cuelgue del PROCESO PYTHON (train): el .py se traba o muere. Lo cubre
@@ -54,12 +55,37 @@ from rl.best_ckpt import (
     DROUGHT_STREAK, dead_policy_reason, is_dead_policy, drought_should_restore,
 )
 from rl import onboard as ob
-CKPT_DIR = ROOT / "rl" / "ckpts"
+# Default v2 A/B root. Override with --ckpt-dir (relativo al ROOT del repo).
+CKPT_DIR_REL = "rl/ckpts_v2"
+CKPT_DIR = ROOT / CKPT_DIR_REL
 METRICS = CKPT_DIR / "metrics.jsonl"
 CURRICULUM = CKPT_DIR / "curriculum.json"
 # Filled in main() when --onboard. launch_train / recover lo leen.
 _onboard = None
+# Seed de emergencia si ckpts_v2 no tiene latest/iter (sigue en el árbol v1.1).
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
+
+
+def apply_ckpt_dir(rel: str) -> None:
+    """Reapunta CKPT_DIR / METRICS / CURRICULUM y los paths en TRAIN_ARGS."""
+    global CKPT_DIR_REL, CKPT_DIR, METRICS, CURRICULUM, TRAIN_ARGS
+    rel = rel.replace("\\", "/").strip().rstrip("/")
+    if not rel:
+        raise ValueError("ckpt-dir vacío")
+    CKPT_DIR_REL = rel
+    CKPT_DIR = ROOT / rel
+    METRICS = CKPT_DIR / "metrics.jsonl"
+    CURRICULUM = CKPT_DIR / "curriculum.json"
+    args = list(TRAIN_ARGS)
+    def _set(flag: str, value: str) -> None:
+        if flag in args:
+            args[args.index(flag) + 1] = value
+        else:
+            args.extend([flag, value])
+    _set("--ckpt-dir", rel)
+    _set("--metrics", f"{rel}/metrics.jsonl")
+    _set("--race-file", f"{rel}/economy_race.jsonl")
+    TRAIN_ARGS = args
 LOGFILE = ROOT / "rl" / "auto_train.log"
 # Capa 1: 4 eps + teacher sequential + PPO+BC+SIL. El primer iter post-launch
 # ronda 5-8 min. 300s mataba el update (GPU 30%) antes de escribir metrics.
@@ -67,6 +93,8 @@ THRESHOLD_S = 540
 # Fase A: 4 teacher + 4 eval alumno. Un iter puede pasar 12-15 min.
 ONBOARD_A_THRESHOLD_S = 1200
 CHECK_EVERY_S = 15
+# Heartbeat de idle: no spamear cada check; solo cada N s o hitos.
+IDLE_LOG_EVERY_S = 300
 GPU_LOW_THRESHOLD = 15  # GPU >= esto = collect/update en vuelo, no es cuelgue
 
 # Cuelgue Docker: cada URL de GAME_URLS tiene su servicio compose.
@@ -134,9 +162,9 @@ TRAIN_ARGS = [
     # Vocab de produccion: ids fijos de roles (scratch / agnostico a faccion).
     "--roles-vocab",
     "--gamma", "0.995",
-    "--ckpt-dir", "rl/ckpts",
-    "--metrics", "rl/ckpts/metrics.jsonl",
-    "--race-file", "rl/ckpts/economy_race.jsonl",
+    "--ckpt-dir", "rl/ckpts_v2",
+    "--metrics", "rl/ckpts_v2/metrics.jsonl",
+    "--race-file", "rl/ckpts_v2/economy_race.jsonl",
 ]
 
 def log(msg: str):
@@ -500,7 +528,7 @@ def launch_train(extra_args=None) -> subprocess.Popen:
     else:
         args = list(TRAIN_ARGS)
     args[args.index("--url") + 1] = urls
-    log(f"servidores de juego: {urls}  ({n_srv} daemon(s); 2do = compose scale openra-rl-2)")
+    log(f"game urls ({n_srv}): {urls}")
     resume = find_resume()
     iters_s = args[args.index("--iters") + 1] if "--iters" in args else "?"
     preset = (TRAIN_ARGS[TRAIN_ARGS.index("--shaper-preset") + 1]
@@ -556,6 +584,10 @@ def parse_auto_args(argv=None):
         "--collapse", action=argparse.BooleanOptionalAction, default=True,
         help="Watchdog de politica muerta / sequia wr20 que restaura best.pt "
              "(default: on). Usa --no-collapse para desactivarlo.")
+    ap.add_argument(
+        "--ckpt-dir", default=None,
+        help="Carpeta de ckpts relativa al repo (default: rl/ckpts_v2). "
+             "Para control v1.1: --ckpt-dir rl/ckpts.")
     return ap.parse_args(argv)
 
 
@@ -622,6 +654,10 @@ def _init_onboard(args) -> None:
 def main():
     global _onboard
     args = parse_auto_args()
+    if getattr(args, "ckpt_dir", None):
+        apply_ckpt_dir(args.ckpt_dir)
+    else:
+        apply_ckpt_dir(CKPT_DIR_REL)  # sync TRAIN_ARGS with default
     _init_onboard(args)
     if args.scratch and not args.onboard:
         os.environ["FORCE_SCRATCH"] = "1"
@@ -629,17 +665,14 @@ def main():
     _cw = "ON" if collapse_watch else "OFF"
     _sc = "yes" if args.scratch else "no"
     _ob = _onboard.get("phase") if _onboard else "off"
-    log(f"auto_train collapse_watch={_cw} scratch={_sc} onboard={_ob}")
-    log(f"auto_train iniciado — threshold {hang_threshold()}s, "
-        f"check {CHECK_EVERY_S}s (GPU baja en collect NO mata)")
-    log(f"métricas={METRICS}  log={LOGFILE}  docker_svc=openra-rl[+openra-rl-2 si up]")
-    if docker_available():
-        log("docker disponible — se vigilará también el cuelgue del daemon")
-    else:
-        log("docker NO disponible — solo se vigilará el cuelgue de proceso Python")
+    _dk = "docker" if docker_available() else "no-docker"
+    log(f"auto_train ckpt={CKPT_DIR_REL} onboard={_ob} collapse={_cw} "
+        f"scratch={_sc} hang={hang_threshold()}s {_dk}")
     proc: subprocess.Popen | None = None
     last_mtime = metrics_mtime()
     last_progress = time.time()
+    last_idle_log = 0.0
+    last_idle_milestone = -1
     gpu_low_streak = 0
     last_restore_iter = 0
     # arranque inicial
@@ -720,6 +753,8 @@ def main():
                 log(f"ok — metrics avanzó a iter {n} (hace {dt:.0f}s){gpu_tag}")
                 last_mtime = mtime
                 last_progress = time.time()
+                last_idle_log = 0.0
+                last_idle_milestone = -1
                 gpu_low_streak = 0
                 if _onboard:
                     nxt = try_promote(int(n))
@@ -804,8 +839,15 @@ def main():
                 last_progress = time.time()
                 gpu_low_streak = 0
             else:
-                extra = f" markers={score}" if score else ""
-                log(f"esperando — idle {idle:.0f}s / {hang_threshold()}s{gpu_tag}{extra}")
+                thr_now = hang_threshold()
+                now = time.time()
+                milestone = int((idle / max(thr_now, 1)) * 4)  # 0..3
+                due = (now - last_idle_log) >= IDLE_LOG_EVERY_S
+                if due or milestone > last_idle_milestone:
+                    last_idle_milestone = milestone
+                    last_idle_log = now
+                    extra = f" markers={score}" if score else ""
+                    log(f"idle {idle:.0f}s/{thr_now}s{gpu_tag}{extra}")
     except KeyboardInterrupt:
         log("Ctrl+C — terminando train y saliendo")
         if proc and proc.poll() is None:

@@ -11,6 +11,7 @@ from openra_env.models import ActionType, CommandModel
 from rl.action_adapter import ActionIndex, TYPE_TO_IDX, Vocab
 from rl.imitation import (
     EliteBuffer,
+    TeacherWinBuffer,
     SIL_PREFER_TICKS,
     balance_bc_samples,
     command_to_indices,
@@ -265,7 +266,7 @@ check("balance no alarga", len(bal) == 52)
 
 win_s = [_step("train")] * 3
 lose_s = [_step("no_op")] * 5
-kept, meta = merge_teacher_wins([
+kept, meta, kept_eps = merge_teacher_wins([
     (win_s, {"result": "win", "ticks": 20000}),
     (lose_s, {"result": "lose", "ticks": 9000}),
     (win_s, {"result": "win_early", "ticks": 15000}),
@@ -273,17 +274,56 @@ kept, meta = merge_teacher_wins([
 check("merge descarta lose", len(kept) == 6)
 check("merge cuenta 2 wins", meta["bc_n_win_eps"] == 2)
 check("merge n_eps 3", meta["bc_n_eps"] == 3)
-empty, meta0 = merge_teacher_wins([
+check("merge kept_eps 2", len(kept_eps) == 2)
+empty, meta0, empty_eps = merge_teacher_wins([
     (lose_s, {"result": "incomplete", "ticks": 52000}),
 ])
-check("merge 0 si no hay win", empty == [] and meta0["bc_n_win_eps"] == 0)
-inc_kept, meta_i = merge_teacher_wins(
+check("merge 0 si no hay win", empty == [] and meta0["bc_n_win_eps"] == 0
+      and empty_eps == [])
+inc_kept, meta_i, inc_eps = merge_teacher_wins(
     [(lose_s, {"result": "incomplete", "ticks": 52000}),
      (win_s, {"result": "lose", "ticks": 9000})],
     keep_incomplete=True,
 )
 check("bc-only guarda incomplete largo", len(inc_kept) == 5)
 check("bc-only sigue tirando lose", meta_i["bc_n_win_eps"] == 0)
+check("bc-only kept_eps incomplete", len(inc_eps) == 1)
+
+# TeacherWinBuffer: add / sample / save / load roundtrip
+import tempfile
+import shutil
+
+tw_dir = Path(tempfile.mkdtemp(prefix="twbuf_"))
+try:
+    tw = TeacherWinBuffer(cap_steps=50, prefer_ticks=40000, path=tw_dir)
+    n0 = tw.add_episode([{"tag": ("L", i)} for i in range(30)],
+                        {"result": "lose", "ticks": 9000})
+    check("TW lose no entra", n0 == 0 and tw.n_episodes == 0)
+    n1 = tw.add_episode([{"tag": ("Sa", i)} for i in range(20)],
+                        {"result": "win", "ticks": 20000})
+    n2 = tw.add_episode([{"tag": ("Sb", i)} for i in range(20)],
+                        {"result": "win_early", "ticks": 22000})
+    check("TW wins entran", n1 == 20 and n2 == 20 and tw.n_episodes == 2)
+    got = tw.sample(10)
+    check("TW sample size", len(got) == 10)
+    tags = {s["tag"][0] for s in got}
+    check("TW sample even-pick ambos wins", tags == {"Sa", "Sb"})
+    tw.save()
+    check("TW manifest existe", (tw_dir / "manifest.json").is_file())
+    tw2 = TeacherWinBuffer(cap_steps=50, prefer_ticks=40000, path=tw_dir)
+    check("TW load eps", tw2.n_episodes == 2)
+    check("TW load steps", len(tw2) == 40)
+    got2 = tw2.sample(8)
+    check("TW sample tras load", len(got2) == 8)
+    tw3 = TeacherWinBuffer(cap_steps=20, prefer_ticks=40000)
+    tw3.add_episode([{"tag": ("L", i)} for i in range(20)],
+                    {"result": "win", "ticks": 50000})
+    tw3.add_episode([{"tag": ("S", i)} for i in range(20)],
+                    {"result": "win", "ticks": 18000})
+    check("TW trim echa largo",
+          tw3.n_episodes == 1 and all(s["tag"][0] == "S" for s in tw3.snapshot()))
+finally:
+    shutil.rmtree(tw_dir, ignore_errors=True)
 
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS"))
 sys.exit(0 if ok else 1)

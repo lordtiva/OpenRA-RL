@@ -15,8 +15,8 @@ Uso (PowerShell, UN comando):
     http://localhost:8786/
 
 Al terminar cada partida (win/lose/incomplete) append a
-rl/ckpts/live_games.jsonl y el tape completo a rl/ckpts/live_tape.jsonl.
-El visor puede grabar WebM (mapa+HUD) a rl/ckpts/live_recordings/{episode_id}.webm
+rl/ckpts_v2/live_games.jsonl y el tape completo a rl/ckpts_v2/live_tape.jsonl.
+El visor puede grabar WebM (mapa+HUD) a {ckpt_dir}/live_recordings/{episode_id}.webm
 con el mismo episode_id que va en el jsonl.
 Ctrl+C / DEADLINE no escriben: un chequeo corto no deja basura del run
 siguiente. No pisa el train.
@@ -416,10 +416,10 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                 cell_txt = f"cell={int(eff_c) % aidx.w},{int(eff_c) // aidx.w}"
             last_action_str = f"{atype_str}  {cell_txt}  item={issued_item or item_name}  units={len(obs.units)} cash={obs.economy.cash}"
             pol_cell = None
-            if atype_str in ("army_attack_move", "attack_move", "move", "attack") and action.commands:
+            if atype_str in ("army_attack_move", "infantry_attack_move", "vehicle_attack_move", "harvesters_move", "attack_move", "move", "attack") and action.commands:
                 pol_cell = _cmd_xy(action.commands[0])
             # Pilar B: auto-harvest/repair gratis (no roba decisión PPO)
-            if atype_str in ("army_attack_move", "attack_move") and action.commands:
+            if atype_str in ("army_attack_move", "infantry_attack_move", "vehicle_attack_move", "harvesters_move", "attack_move") and action.commands:
                 c0 = action.commands[0]
                 if getattr(c0, "target_x", None) is not None:
                     last_push_cell = (int(c0.target_x), int(c0.target_y))
@@ -671,7 +671,7 @@ async def amain(args):
 
 def main():
     ap = argparse.ArgumentParser(description="Checkpoint vs bot con visor EN VIVO en http://localhost:8786/")
-    ap.add_argument("--ckpt", default="rl/ckpts/latest.pt")
+    ap.add_argument("--ckpt", default="rl/ckpts_v2/latest.pt")
     ap.add_argument("--url", default="http://localhost:8000")
     ap.add_argument("--bot-type", default="beginner")
     ap.add_argument("--ai-slot", default=None, help='slot IA: "Multi0" (default) o "" para sin enemigo')
@@ -696,11 +696,18 @@ def main():
     ap.add_argument("--qsa-block", type=int, default=8,
                     help="map QSA block size")
     ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")
-    ap.add_argument("--log-file", default="rl/ckpts/live_games.jsonl",
-                    help="jsonl por partida completa (win/lose/incomplete). Vacío = off. Ctrl+C no escribe.")
-    ap.add_argument("--tape-file", default="rl/ckpts/live_tape.jsonl",
-                    help="jsonl del tape al terminar la partida. Vacío = off. Ctrl+C no escribe.")
+    ap.add_argument("--log-file", default=None,
+                    help="jsonl por partida (default: <ckpt-dir>/live_games.jsonl). Vacío = off.")
+    ap.add_argument("--tape-file", default=None,
+                    help="jsonl del tape (default: <ckpt-dir>/live_tape.jsonl). Vacío = off.")
     args = ap.parse_args()
+    # Defaults next to the ckpt (v2: rl/ckpts_v2; v1.1: pass --ckpt rl/ckpts/...)
+    if args.log_file is None:
+        args.log_file = (Path(args.ckpt).parent / "live_games.jsonl").as_posix()
+    if args.tape_file is None:
+        args.tape_file = (Path(args.ckpt).parent / "live_tape.jsonl").as_posix()
+    from rl import live_server as _ls
+    _ls.RECORDINGS_DIR = Path(args.ckpt).resolve().parent / "live_recordings"
     # --bot-type "" mantiene "" (dummy), solo None es "no tocar". --ai-slot "" desactiva enemigo.
     if args.bot_type == "__none__":
         args.bot_type = None

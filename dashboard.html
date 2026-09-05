@@ -91,7 +91,7 @@
 <header>
   <div>
     <h1>OpenRA-RL</h1>
-    <div class="meta">North star = <b>wr vs ancla</b> · poll 2s · <span id="pathHint">rl/ckpts/</span></div>
+    <div class="meta">North star = <b>wr vs ancla</b> · poll 2s · <span id="pathHint">rl/ckpts_v2/</span></div>
   </div>
   <div class="row" style="align-items:center">
     <span class="pill" id="pfspPill">PFSP …</span>
@@ -152,12 +152,13 @@
   </section>
 
   <section class="card span6">
-    <h2>Salud del PPO (colapso)</h2>
+    <h2>Salud <span id="healthMode" style="color:var(--muted);font-weight:500;font-size:12px"></span></h2>
+    <div class="sub" id="healthNums" style="margin:-4px 0 8px;color:var(--muted);font-size:12px">—</div>
     <canvas id="cHealth"></canvas>
     <div class="legend">
-      <span style="--c:var(--purple)">entropy</span>
-      <span style="--c:var(--warn)">clip_frac</span>
-      <span style="--c:var(--accent)">kl ×10</span>
+      <span style="--c:var(--purple)">entropy / bc_nll</span>
+      <span style="--c:var(--warn)">clip / λbc</span>
+      <span style="--c:var(--accent)">kl×10 / critic_v</span>
     </div>
   </section>
   <section class="card span6">
@@ -194,15 +195,25 @@
   </section>
 </main>
 <footer>
-  Fuentes: <code>rl/ckpts/metrics.jsonl</code> · <code>rl/ckpts/pfsp_stats.json</code> · <code>rl/ckpts/best.json</code>.
-  North star ignora rivales PFSP no-ancla. Backup del dash viejo: <code>dashboard.html.bak</code>.
+  Fuentes: <code id="srcMetrics">rl/ckpts_v2/metrics.jsonl</code> · <code id="srcPfsp">…/pfsp_stats.json</code> · <code id="srcBest">…/best.json</code>.
+  Cambiá carpeta con <code>?dir=rl/ckpts</code> (v1.1) o <code>?dir=rl/ckpts_v2</code> (default). Backup: <code>dashboard.html.bak</code>.
 </footer>
 
 <script>
-const METRICS = "rl/ckpts/metrics.jsonl";
-const PFSP = "rl/ckpts/pfsp_stats.json";
-const BEST = "rl/ckpts/best.json";
+const params = new URLSearchParams(location.search);
+const CKPT_DIR = (params.get("dir") || "rl/ckpts_v2").replace(/\\/g, "/").replace(/\/+$/, "");
+const METRICS = CKPT_DIR + "/metrics.jsonl";
+const PFSP = CKPT_DIR + "/pfsp_stats.json";
+const BEST = CKPT_DIR + "/best.json";
 const POLL_MS = 2000;
+const pathHintEl = document.getElementById("pathHint");
+if (pathHintEl) pathHintEl.textContent = CKPT_DIR + "/";
+const srcM = document.getElementById("srcMetrics");
+if (srcM) srcM.textContent = METRICS;
+const srcP = document.getElementById("srcPfsp");
+if (srcP) srcP.textContent = PFSP;
+const srcB = document.getElementById("srcBest");
+if (srcB) srcB.textContent = BEST;
 
 const $ = (id) => document.getElementById(id);
 
@@ -213,6 +224,18 @@ function fmtPct(x) {
 function fmtNum(x, d=1) {
   if (x == null || Number.isNaN(x)) return "—";
   return Number(x).toFixed(d);
+}
+function fmtEtaMin(m) {
+  if (m == null || Number.isNaN(m) || m < 0) return "—";
+  let sec = Math.round(Number(m) * 60);
+  const d = Math.floor(sec / 86400); sec %= 86400;
+  const h = Math.floor(sec / 3600); sec %= 3600;
+  const min = Math.floor(sec / 60);
+  const parts = [];
+  if (d) parts.push(d + "d");
+  if (h || d) parts.push(h + "h");
+  parts.push(min + "m");
+  return parts.join(" ");
 }
 function last(arr) { return arr.length ? arr[arr.length - 1] : null; }
 
@@ -383,6 +406,11 @@ function renderPfsp(stats) {
   box.innerHTML = html;
 }
 
+
+function isBcOnly(r) {
+  return !!(r && (r.bc_only || r.onboard_phase === "A"));
+}
+
 function buildAlerts(rows, pfsp) {
   const a = [];
   const r = last(rows);
@@ -392,17 +420,37 @@ function buildAlerts(rows, pfsp) {
   const r20 = r.winrate_rolling20;
   const edge = r.economy_race && r.economy_race.harvest_edge;
   const ownB = r.n_buildings && r.n_buildings.own;
+  const bc = isBcOnly(r);
+  const phase = r.onboard_phase;
 
-  if (atk > 0.9 && (ownB == null || ownB < 0.5))
-    a.push(["bad", "Attack-spam collapse: >90% attack y casi sin base"]);
-  if (ent != null && ent < 1.0)
-    a.push(["warn", "Entropy baja (" + fmtNum(ent,2) + ") — riesgo de colapso"]);
-  if (r20 === 0)
-    a.push(["bad", "Rolling20 = 0"]);
+  if (phase)
+    a.push(["accent", "Onboard fase " + phase + (bc ? " (bc_only / sin PPO)" : "")
+      + " · bot " + (r.bot_type || "?") + " · iter " + r.iter]);
+
+  if (bc) {
+    if (r.bc_nll != null && r.bc_nll > 12)
+      a.push(["warn", "bc_nll alto (" + fmtNum(r.bc_nll,2) + ") — teacher duro de clonar"]);
+    const outs = r.outcomes || [];
+    const nInc = outs.filter(x => String(x).startsWith("incomplete")).length;
+    if (outs.length && nInc >= 3)
+      a.push(["warn", "Eval: " + nInc + "/" + outs.length + " incomplete (timeouts)"]);
+    const bcRes = r.bc_results || [];
+    const bcWins = bcRes.filter(x => x === "win").length;
+    if (bcRes.length)
+      a.push(["accent", "Teacher BC: " + bcWins + "/" + bcRes.length + " win · nll "
+        + fmtNum(r.bc_nll,2)]);
+  } else {
+    if (atk > 0.9 && (ownB == null || ownB < 0.5))
+      a.push(["bad", "Attack-spam collapse: >90% attack y casi sin base"]);
+    if (ent != null && ent < 1.0)
+      a.push(["warn", "Entropy baja (" + fmtNum(ent,2) + ") — riesgo de colapso"]);
+    if (r20 === 0)
+      a.push(["bad", "Rolling20 = 0"]);
+    if (r.clip_frac != null && r.clip_frac > 0.35)
+      a.push(["warn", "clip_frac alto (" + fmtNum(r.clip_frac,2) + ")"]);
+  }
   if (edge != null && edge < -500)
     a.push(["warn", "Harvest edge muy negativo (" + fmtNum(edge,0) + ")"]);
-  if (r.clip_frac != null && r.clip_frac > 0.35)
-    a.push(["warn", "clip_frac alto (" + fmtNum(r.clip_frac,2) + ")"]);
   if (pfsp && pfsp.summary) {
     const weak = Object.entries(pfsp.summary)
       .filter(([n,s]) => n !== pfsp.anchor && (s.games||0) >= 4 && (s.wr||0) < 0.2)
@@ -410,12 +458,9 @@ function buildAlerts(rows, pfsp) {
     if (weak.length)
       a.push(["accent", "PFSP flojo vs: " + weak.join(", ")]);
   }
-  if (!a.length) {
-    $("alerts").innerHTML = '<div class="empty" style="color:var(--good)">Sin alertas</div>';
-    return;
-  }
+  a.push(["", "Actualizado " + new Date().toLocaleTimeString() + " · " + rows.length + " iters"]);
   $("alerts").innerHTML = a.map(([cls,msg]) =>
-    `<div style="padding:8px 0;border-bottom:1px solid var(--border)" class="${cls}">${msg}</div>`
+    `<div style="padding:8px 0;border-bottom:1px solid var(--border)" class="${cls||""}">${msg}</div>`
   ).join("");
 }
 
@@ -437,8 +482,13 @@ function render(rows, pfsp, best) {
   $("kR20").className = "val " + ((r.winrate_rolling20||0) >= 0.35 ? "good" : ((r.winrate_rolling20||0) === 0 ? "bad" : ""));
 
   $("kIter").textContent = r.iter;
-  const eta = r.eta_min != null ? `eta ${fmtNum(r.eta_min,0)}m` : "";
-  $("kIterSub").textContent = [r.bot_type, eta, best && best.iter != null ? `best@${best.iter}` : ""]
+  const phase = r.onboard_phase ? `fase ${r.onboard_phase}` : "";
+  // eta_min is to --iters (onboard A: bc_iters=10000), NOT to promote B
+  const eta = r.eta_min != null ? `eta ${fmtEtaMin(r.eta_min)}` : "";
+  const etaNote = (r.onboard_phase === "A" && r.eta_min != null && r.eta_min > 24*60)
+    ? "(hasta --iters, no hasta B)" : "";
+  $("kIterSub").textContent = [r.bot_type, phase, eta, etaNote,
+    best && best.iter != null ? `best@${best.iter}` : ""]
     .filter(Boolean).join(" · ");
 
   const edge = r.economy_race && r.economy_race.harvest_edge;
@@ -490,11 +540,33 @@ function render(rows, pfsp, best) {
     { ys: rows.map(x => x.economy_race && x.economy_race.harvest_edge), color: "#67e8f9" },
   ]);
 
-  drawLines($("cHealth"), [
-    { ys: rows.map(x => x.entropy), color: "#b794f6" },
-    { ys: rows.map(x => x.clip_frac), color: "#f5c542" },
-    { ys: rows.map(x => x.kl == null ? null : x.kl * 10), color: "#6ea8fe" },
-  ]);
+  {
+    const bc = isBcOnly(r);
+    const hm = $("healthMode");
+    const hn = $("healthNums");
+    if (hm) hm.textContent = bc ? "(BC / onboard — sin PPO)" : "del PPO (colapso)";
+    if (bc) {
+      if (hn) hn.textContent = "bc_nll " + fmtNum(r.bc_nll,2)
+        + " · bc_n " + (r.bc_n||0) + "/" + (r.bc_n_raw||0)
+        + " · λbc " + fmtNum(r.lambda_bc,2)
+        + " · critic_v " + fmtNum(r.critic_v_mean,3);
+      drawLines($("cHealth"), [
+        { ys: rows.map(x => x.bc_nll), color: "#b794f6" },
+        { ys: rows.map(x => x.critic_v_mean), color: "#6ea8fe" },
+        { ys: rows.map(x => x.lambda_bc), color: "#f5c542" },
+      ]);
+    } else {
+      if (hn) hn.textContent = "H " + fmtNum(r.entropy,2)
+        + " · clip " + fmtNum(r.clip_frac,2)
+        + " · kl " + fmtNum(r.kl,4)
+        + " · |g| " + fmtNum(r.grad_norm,2);
+      drawLines($("cHealth"), [
+        { ys: rows.map(x => x.entropy), color: "#b794f6" },
+        { ys: rows.map(x => x.clip_frac), color: "#f5c542" },
+        { ys: rows.map(x => x.kl == null ? null : x.kl * 10), color: "#6ea8fe" },
+      ]);
+    }
+  }
 
   drawLines($("cAct"), [
     { ys: rows.map(x => attackFrac(x.action_hist)), color: "#ff6b7a" },

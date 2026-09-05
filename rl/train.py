@@ -38,7 +38,8 @@ from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
 from rl.best_ckpt import batch_is_dead, batch_is_wipe, maybe_update_best
 from rl.pfsp import BotPFSP, parse_pool
 from rl.imitation import (
-    EliteBuffer, balance_bc_samples, lambda_bc_at, merge_teacher_wins,
+    EliteBuffer, TeacherWinBuffer, SIL_PREFER_TICKS,
+    balance_bc_samples, lambda_bc_at, merge_teacher_wins,
 )
 from rl.scripted_teacher import ScriptedTeacher
 
@@ -170,28 +171,27 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
         for p in parts:
             if p is not None:
                 episodes.append(p)
-    keep_inc = bool(
-        getattr(args, "bc_only", False)
-        or getattr(args, "bc_keep_incomplete", False))
-    kept, meta = merge_teacher_wins(
+    # Wins-only by default. Incomplete tapes teach timeout-turtle; only keep
+    # them with an explicit --bc-keep-incomplete (legacy opening clone).
+    # Return per-episode dicts for TeacherWinBuffer; balance happens after
+    # sampling the persistent ring in amain.
+    keep_inc = bool(getattr(args, "bc_keep_incomplete", False))
+    kept, meta, kept_eps = merge_teacher_wins(
         episodes,
         keep_incomplete=keep_inc)
-    n_pre = len(kept)
-    kept = balance_bc_samples(kept)
-    for s in kept:
-        s["_ep"] = 10_000
     meta["bc_n"] = len(kept)
-    meta["bc_n_raw"] = n_pre
-    if not kept:
+    meta["bc_n_raw"] = len(kept)
+    if not kept_eps:
         print(f"  [bc] 0 samples (wins={meta.get('bc_n_win_eps', 0)} "
               f"inc={meta.get('bc_n_incomplete_eps', 0)}/"
               f"{meta.get('bc_n_eps', 0)}; no clonar derrotas)", flush=True)
     else:
         print(f"  [bc] keep wins={meta.get('bc_n_win_eps', 0)} "
               f"inc={meta.get('bc_n_incomplete_eps', 0)}/"
-              f"{meta.get('bc_n_eps', 0)} steps {n_pre}->{len(kept)}",
+              f"{meta.get('bc_n_eps', 0)} steps={len(kept)} "
+              f"eps={len(kept_eps)}",
               flush=True)
-    return kept, meta
+    return kept_eps, meta
 
 
 async def amain(args):
@@ -248,9 +248,8 @@ async def amain(args):
         # de la red; solo re-sembra el vocab de roles con ids deterministas.
         vocab.type_to_id = {}
         vocab.seed_roles()
-        print(f"[roles-vocab] vocab de ROLES sembrado: "
-              f"{len(vocab.type_to_id)} roles estables "
-              f"(ids deterministas, agnóstico a facción)")
+        print(f"[roles-vocab] {len(vocab.type_to_id)} roles", flush=True)
+
 
     infer_net = AlphaLiteNet().to(device)
     infer_net.load_state_dict(net.state_dict())
@@ -271,19 +270,26 @@ async def amain(args):
             print(f"  [rvr] no pude cargar oponente {ckpt_path}: {e}", flush=True)
             return None
 
-    print(f"Device: {device} | params: "
-          f"{sum(p.numel() for p in net.parameters())/1e6:.2f}M")
-    print("Capa 2c-B: 96 own + 32 ene, role+team (resume 1141; remate off)")
-    print("Nudge: raid=attack_move idle casa; push=farthest/prod. Sin beacon/crédito.")
-    print("Pack-12: army_attack_move de la red solo con >=12 combate en casa.")
-    print("PLACE: colas Building+Defense. Harvest: idle sin celda (hasta 2). TRAIN 2do harv.")
-    print("Higiene: PLACE/cancel crédito via role_of (no palanca wr).")
-    print("SIL: solo wins, even-pick por win, prefiere <40k ticks. Sequía wr20 restaura best.")
-    print("Update: BPTT batcheado + AMP fp16 + prefetch GPU una vez (no AdamW/Lion).")
-    print("Overlap: collect k+1 (infer_net) || update k (thread)")
-    print(f"Server: {args.url} | {args.episodes} ep/iter, "
-          f"k_skip={args.k_skip}, pool={args.concurrency}"
-          + (f", MACRO {args.macro_ticks} t/decisión" if args.macro_ticks else ""))
+    _bc_only = bool(getattr(args, "bc_only", False))
+    n_params = sum(p.numel() for p in net.parameters()) / 1e6
+    mode = []
+    if _bc_only:
+        mode.append("BC-ONLY/SFT")
+    else:
+        mode.append("PPO")
+        if getattr(args, "bc", False):
+            mode.append("BC")
+        if getattr(args, "sil", False):
+            mode.append("SIL")
+    if getattr(args, "onboard_phase", None):
+        mode.append(f"onboard={args.onboard_phase}")
+    print(
+        f"Device: {device} | params: {n_params:.2f}M | "
+        f"{'+'.join(mode)} | server={args.url} | "
+        f"ep={args.episodes} k_skip={args.k_skip} pool={args.concurrency}"
+        + (f" macro={args.macro_ticks}" if args.macro_ticks else ""),
+        flush=True,
+    )
 
     # Pool persistente de conexiones, repartido entre N servidores
     # (--url acepta lista separada por comas: un contenedor por URL)
@@ -304,8 +310,8 @@ async def amain(args):
         base_url = urls[i % len(urls)]
         pool.append(OpenRAEnv(base_url=base_url, message_timeout_s=ws_timeout))
     await asyncio.gather(*(env.connect() for env in pool))
-    print(f"Pool: {pool_size} conexiones sobre {len(urls)} servidor(es) | "
-          f"ws_timeout={ws_timeout:.0f}s")
+    print(f"Pool: {pool_size} envs / {len(urls)} urls | ws_timeout={ws_timeout:.0f}s",
+          flush=True)
 
     # Curriculum Fase 2: --scenario A resetea con el mapa pre-construido
     # (base del cliente + 8 rifles vs beginner). None = juego completo.
@@ -320,8 +326,7 @@ async def amain(args):
         # episodio => cache fria en cada reset (~+100 s/iter medida).
         reset_kwargs = {"map_data": base64.b64encode(mapa.read_bytes()).decode(),
                         "map_name": f"fase2_{args.scenario.lower()}.oramap"}
-        print(f"Escenario {args.scenario}: base pre-construida "
-              f"({mapa.name}, b64 {len(reset_kwargs['map_data'])} chars)")
+        print(f"Escenario {args.scenario} ({mapa.name})", flush=True)
 
     # Oponente configurable por sesion: el server procesa bot_type en los
     # kwargs de reset (openra_environment.py). Curriculum de oponentes —
@@ -329,7 +334,7 @@ async def amain(args):
     # el nivel actual (un cambio de regimen a la vez).
     if args.bot_type:
         reset_kwargs["bot_type"] = args.bot_type
-        print(f"Rival: bot_type={args.bot_type}")
+        print(f"Rival: {args.bot_type}", flush=True)
 
     pfsp = None
     if getattr(args, "pfsp", False):
@@ -355,16 +360,16 @@ async def amain(args):
 
     if args.auto_support:
         if args.no_war_nudge:
-            print("AUTO-SUPPORT ON, WAR NUDGE OFF: PPO owns targeting.", flush=True)
+            print("auto-support=on war_nudge=off", flush=True)
         else:
-            print("AUTO-SUPPORT ON, war nudge ON (raid/push/fog-scout).", flush=True)
+            print("auto-support=on war_nudge=on", flush=True)
 
     bc_only = bool(getattr(args, "bc_only", False))
     if bc_only:
         args.bc = True
-        print("BC-ONLY: SFT del ScriptedTeacher, sin PPO.", flush=True)
+        pass  # mode already in banner
     if getattr(args, "onboard_phase", None):
-        print(f"Onboard phase {args.onboard_phase}", flush=True)
+        pass  # in banner
 
     def launch_collection(prev_task):
         """Lanza una tanda de episodios repartidos entre los workers."""
@@ -512,14 +517,27 @@ async def amain(args):
     ema_collect = ema_update = None
     t_start = time.time()
     elite = EliteBuffer(cap_steps=2000) if args.sil else None
-    if args.bc or args.sil:
-        print(f"Capa 1: bc={args.bc} bc_only={bc_only} sil={args.sil} "
-              f"warmup={args.bc_warmup} lambda_sil={args.lambda_sil} "
-              f"bc_start_iter={bc_start_iter} "
-              f"bc_games={getattr(args, 'bc_games', 1)} "
-              f"bc_epochs={getattr(args, 'bc_epochs', 1)} "
-              f"teacher_bot={getattr(args, 'bc_teacher_bot', None)}",
+    teacher_wins = None
+    if args.bc or bc_only:
+        win_cap = int(getattr(args, "bc_win_cap", 4000) or 4000)
+        win_dir = getattr(args, "bc_win_dir", None) or os.path.join(
+            args.ckpt_dir, "teacher_wins")
+        teacher_wins = TeacherWinBuffer(
+            cap_steps=win_cap,
+            prefer_ticks=SIL_PREFER_TICKS,
+            path=win_dir,
+            keep_incomplete=bool(getattr(args, "bc_keep_incomplete", False)),
+        )
+        print(f"  [bc] TeacherWinBuffer cap={win_cap} dir={win_dir} "
+              f"loaded eps={teacher_wins.n_episodes} steps={len(teacher_wins)}",
               flush=True)
+    if args.bc or args.sil:
+        print(
+            f"BC games={getattr(args, 'bc_games', 1)} epochs={getattr(args, 'bc_epochs', 1)} "
+            f"teacher={getattr(args, 'bc_teacher_bot', None)} "
+            f"start_iter={bc_start_iter}",
+            flush=True,
+        )
 
     # --iters = ultima iter INCLUSIVE (absoluto). Scratch --iters 100 => 1..100.
     # El +1 del range es el stop exclusivo de Python, no una iter extra.
@@ -572,14 +590,50 @@ async def amain(args):
         bc_meta = {}
         if args.bc and lmb_bc > 0.0:
             try:
-                bc_samples, bc_meta = await collect_teacher_games(
+                new_eps, bc_meta = await collect_teacher_games(
                     pool, infer_net, vocab, device, args, reset_kwargs)
+                new_wins = 0
+                if teacher_wins is not None:
+                    for ep in new_eps or []:
+                        n_add = teacher_wins.add_episode(
+                            ep.get("steps") or [],
+                            {"result": ep.get("result"),
+                             "ticks": ep.get("ticks")})
+                        if n_add > 0:
+                            new_wins += 1
+                    if new_wins:
+                        teacher_wins.save()
+                    raw = teacher_wins.sample(max_steps=teacher_wins.cap)
+                    bc_samples = balance_bc_samples(raw)
+                    print(f"  [bc] buffer eps={teacher_wins.n_episodes} "
+                          f"steps={len(teacher_wins)} (+new_wins={new_wins}) "
+                          f"sample={len(bc_samples)}", flush=True)
+                    bc_meta["bc_n"] = len(bc_samples)
+                    bc_meta["bc_buffer_eps"] = teacher_wins.n_episodes
+                    bc_meta["bc_buffer_steps"] = len(teacher_wins)
+                    bc_meta["bc_new_wins"] = new_wins
+                else:
+                    # Fallback: flatten this-iter wins (no persistent buffer).
+                    flat = []
+                    for ep in new_eps or []:
+                        flat.extend(ep.get("steps") or [])
+                    bc_samples = balance_bc_samples(flat)
+                    bc_meta["bc_n"] = len(bc_samples)
                 for s in bc_samples:
                     s["_ep"] = 10_000 + it
             except Exception as e:
                 print(f"  [bc] teacher fail: {e}", flush=True)
-                bc_samples = []
                 bc_meta = {"bc_n": 0, "bc_result": "fail"}
+                if teacher_wins is not None and len(teacher_wins) > 0:
+                    bc_samples = balance_bc_samples(
+                        teacher_wins.sample(max_steps=teacher_wins.cap))
+                    for s in bc_samples:
+                        s["_ep"] = 10_000 + it
+                    bc_meta["bc_n"] = len(bc_samples)
+                    print(f"  [bc] buffer fallback sample={len(bc_samples)}",
+                          flush=True)
+                else:
+                    bc_samples = []
         elif args.bc:
             print(f"  [bc] skip teacher (lambda_bc=0)", flush=True)
         if not bc_only:
@@ -984,7 +1038,7 @@ def main():
                          "Fase B usa 0.25 para no apagar el teacher.")
     ap.add_argument("--bc-keep-incomplete", action="store_true",
                     help="Clonar incomplete largos del teacher (build order). "
-                         "Default en --bc-only; fase B lo pasa a mano.")
+                         "Default off (wins-only); solo si se pasa el flag.")
     ap.add_argument("--bc-macro-ticks", type=int, default=0,
                     help="Macro del teacher (0 = --macro-ticks del PPO).")
     ap.add_argument("--bc-max-steps", type=int, default=0,
@@ -992,6 +1046,12 @@ def main():
     ap.add_argument("--bc-start-iter", type=int, default=0,
                     help="Origen del warmup BC. 0 = ckpt o start_iter. "
                          "No debe resetearse en cada --resume.")
+    ap.add_argument("--bc-win-cap", type=int, default=4000,
+                    help="Cap de steps del TeacherWinBuffer persistente "
+                         "(default 4000).")
+    ap.add_argument("--bc-win-dir", default=None,
+                    help="Dir del TeacherWinBuffer (default "
+                         "{ckpt_dir}/teacher_wins).")
     ap.add_argument("--lambda-sil", type=float, default=0.5,
                     help="Peso SIL cuando --sil (default 0.5).")
     args = ap.parse_args()

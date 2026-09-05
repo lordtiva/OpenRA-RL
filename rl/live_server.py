@@ -8,7 +8,7 @@ Uso desde play_vs_checkpoint_live:
     bc.update({...})
 
 POST /api/recording?episode_id=...  body=webm bytes
-  -> rl/ckpts/live_recordings/{episode_id}.webm
+  -> <ckpt_dir>/live_recordings/{episode_id}.webm (default rl/ckpts_v2/...)
 """
 import json
 import re
@@ -20,7 +20,7 @@ from urllib.parse import parse_qs, urlparse
 LIVE_HTML = Path(__file__).parent / "live.html"
 # repo root = parent of rl/
 _REPO = Path(__file__).resolve().parent.parent
-RECORDINGS_DIR = _REPO / "rl" / "ckpts" / "live_recordings"
+RECORDINGS_DIR = _REPO / "rl" / "ckpts_v2" / "live_recordings"
 
 _SAFE_ID = re.compile(r"^[\w.\-]{1,120}$")
 

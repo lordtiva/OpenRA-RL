@@ -11,6 +11,10 @@ vuelve a λ=1.0.
 """
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 import torch
 
 from rl.action_adapter import ENABLED_TYPES, TYPE_TO_IDX
@@ -86,15 +90,19 @@ def _even_pick(group: list, cap: int) -> list:
 
 
 def merge_teacher_wins(episodes: list, keep_incomplete: bool = False,
-                       incomplete_min_ticks: int = 15000) -> tuple[list, dict]:
+                       incomplete_min_ticks: int = 15000) -> tuple[list, dict, list]:
     """Keep teacher tapes worth cloning.
 
     Always: result startswith win.
     Never: lose / engine_error (clonar palizas enseña a morir).
-    Optional (`keep_incomplete`, fase A): incomplete largo — el build order
+    Optional (`keep_incomplete`, legacy): incomplete largo — el build order
     sigue ahí aunque a_short no declare win.
+
+    Returns (flat_steps, meta, kept_episodes) where kept_episodes is a list of
+    {"steps", "ticks", "result"} for per-episode buffers (TeacherWinBuffer).
     """
     kept: list = []
+    kept_eps: list = []
     results: list[str] = []
     n_raw = 0
     n_win = 0
@@ -116,6 +124,7 @@ def merge_teacher_wins(episodes: list, keep_incomplete: bool = False,
             n_inc += 1
         if take:
             kept.extend(chunk)
+            kept_eps.append({"steps": chunk, "ticks": ticks, "result": r})
             if r.startswith("win"):
                 n_win += 1
     return kept, {
@@ -126,7 +135,7 @@ def merge_teacher_wins(episodes: list, keep_incomplete: bool = False,
         "bc_n_incomplete_eps": n_inc,
         "bc_results": results,
         "bc_result": results[-1] if results else "",
-    }
+    }, kept_eps
 
 
 def balance_bc_samples(samples: list, per_type_cap: int = 96,
@@ -283,3 +292,190 @@ class EliteBuffer:
             q = base + (1 if i < extra else 0)
             out.extend(_even_pick(e["steps"], q))
         return out
+
+class TeacherWinBuffer:
+    """Persistent ring of teacher win episodes for BC/SFT (across iters).
+
+    Same trim/sample pattern as EliteBuffer (prefer short wins), plus
+    `{ckpt_dir}/teacher_wins/` manifest + ep_XXXX.pt so a resume still has
+    past wins when the current iter collects 0.
+    """
+
+    def __init__(self, cap_steps: int = 4000,
+                 prefer_ticks: int = SIL_PREFER_TICKS,
+                 path: str | os.PathLike | None = None,
+                 keep_incomplete: bool = False,
+                 incomplete_min_ticks: int = 15000):
+        self.cap = int(cap_steps)
+        self.prefer_ticks = int(prefer_ticks)
+        self.path = Path(path) if path else None
+        self.keep_incomplete = bool(keep_incomplete)
+        self.incomplete_min_ticks = int(incomplete_min_ticks)
+        self._episodes: list[dict] = []
+        self._next_id = 0
+        if self.path is not None and self.path.is_dir():
+            self.load()
+
+    def __len__(self) -> int:
+        return self._n_steps()
+
+    @property
+    def n_episodes(self) -> int:
+        return len(self._episodes)
+
+    def _n_steps(self) -> int:
+        return sum(len(e.get("steps") or ()) for e in self._episodes)
+
+    def _accept(self, result: str, ticks: int) -> bool:
+        if result.startswith("win"):
+            return True
+        if (self.keep_incomplete and result == "incomplete"
+                and ticks >= self.incomplete_min_ticks):
+            return True
+        return False
+
+    def add_episode(self, samples: list, outcome: dict | None) -> int:
+        if not samples:
+            return 0
+        oc = outcome or {}
+        result = str(oc.get("result", "") or "")
+        try:
+            ticks = int(oc.get("ticks") or 0)
+        except (TypeError, ValueError):
+            ticks = 0
+        if not self._accept(result, ticks):
+            return 0
+        cloned = [_cpu_clone_step(s) for s in samples]
+        self._episodes.append({
+            "id": int(self._next_id),
+            "steps": cloned,
+            "ticks": ticks,
+            "result": result,
+        })
+        self._next_id += 1
+        self._trim()
+        return len(cloned)
+
+    def _trim(self) -> None:
+        """Drop oldest long wins first; if one ep exceeds cap, even-pick it."""
+        while self._episodes and self._n_steps() > self.cap:
+            if len(self._episodes) == 1:
+                ep = self._episodes[0]
+                ep["steps"] = _even_pick(ep["steps"], self.cap)
+                break
+            long_i = next(
+                (i for i, e in enumerate(self._episodes)
+                 if int(e.get("ticks") or 0) >= self.prefer_ticks),
+                None,
+            )
+            if long_i is not None:
+                self._episodes.pop(long_i)
+            else:
+                self._episodes.pop(0)
+
+    def snapshot(self) -> list:
+        out = []
+        for e in self._episodes:
+            out.extend(e.get("steps") or ())
+        return out
+
+    def sample(self, max_steps: int = 512) -> list:
+        """Even-pick across kept episodes. Prefer ticks < prefer_ticks."""
+        if max_steps <= 0 or not self._episodes:
+            return []
+        eps = [e for e in self._episodes if e.get("steps")]
+        if not eps:
+            return []
+        short = [
+            e for e in eps
+            if 0 < int(e.get("ticks") or 0) < self.prefer_ticks
+        ]
+        pool = short if short else eps
+        n = len(pool)
+        if n <= 0:
+            return []
+        base = int(max_steps) // n
+        extra = int(max_steps) % n
+        out = []
+        for i, e in enumerate(pool):
+            q = base + (1 if i < extra else 0)
+            out.extend(_even_pick(e["steps"], q))
+        return out
+
+    def save(self, path: str | os.PathLike | None = None) -> None:
+        root = Path(path) if path is not None else self.path
+        if root is None:
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        for old in root.glob("ep_*.pt"):
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        manifest = {
+            "cap": self.cap,
+            "prefer_ticks": self.prefer_ticks,
+            "episodes": [],
+        }
+        for e in self._episodes:
+            eid = int(e.get("id", 0))
+            fname = f"ep_{eid:04d}.pt"
+            torch.save({
+                "steps": e.get("steps") or [],
+                "ticks": int(e.get("ticks") or 0),
+                "result": str(e.get("result") or "win"),
+            }, root / fname)
+            manifest["episodes"].append({
+                "id": eid,
+                "file": fname,
+                "ticks": int(e.get("ticks") or 0),
+                "result": str(e.get("result") or "win"),
+                "n_steps": len(e.get("steps") or ()),
+            })
+        (root / "manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8")
+        self.path = root
+
+    def load(self, path: str | os.PathLike | None = None) -> int:
+        root = Path(path) if path is not None else self.path
+        if root is None or not root.is_dir():
+            return 0
+        man_path = root / "manifest.json"
+        if not man_path.is_file():
+            return 0
+        try:
+            manifest = json.loads(man_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return 0
+        loaded: list[dict] = []
+        max_id = -1
+        for entry in manifest.get("episodes") or []:
+            fname = str(entry.get("file") or "")
+            if not fname:
+                eid = int(entry.get("id") or 0)
+                fname = f"ep_{eid:04d}.pt"
+            fpath = root / fname
+            if not fpath.is_file():
+                continue
+            try:
+                blob = torch.load(fpath, map_location="cpu", weights_only=False)
+            except TypeError:
+                blob = torch.load(fpath, map_location="cpu")
+            except Exception:
+                continue
+            steps = list(blob.get("steps") or [])
+            if not steps:
+                continue
+            eid = int(entry.get("id", blob.get("id", 0)) or 0)
+            max_id = max(max_id, eid)
+            loaded.append({
+                "id": eid,
+                "steps": steps,
+                "ticks": int(blob.get("ticks") or entry.get("ticks") or 0),
+                "result": str(blob.get("result") or entry.get("result") or "win"),
+            })
+        self._episodes = loaded
+        self._next_id = max_id + 1
+        self.path = root
+        self._trim()
+        return len(self._episodes)

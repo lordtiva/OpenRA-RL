@@ -62,6 +62,12 @@ class ScriptedTeacher(ScriptedBot):
         "hpad", "afld", "syrd",
     })
 
+    def __init__(self, verbose: bool = False, rush_attack_move: int | None = None):
+        """Optional per-instance RUSH override for benches; class default unchanged."""
+        super().__init__(verbose=verbose)
+        if rush_attack_move is not None:
+            self.RUSH_ATTACK_MOVE = int(rush_attack_move)
+
     def _handle_guards(self, obs: OpenRAObservation) -> List[CommandModel]:
         return []
 
