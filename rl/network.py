@@ -1,14 +1,14 @@
 """Red política estilo AlphaStar-lite para OpenRA.
 
 Arquitectura:
-    - Encoder espacial: CNN+ResBlocks sobre el tensor 9×H×W
+    - Encoder espacial: U-Net lite mid=64 → fmap 96 (v2 shrink)
     - Encoder de escalares: MLP sobre economía/militar
     - Encoder de unidades: MLP por-slot + transformer 3×4h d=96 FF=256 (arch v2)
       residual gate=0 al init; pools Friendly/Enemy/Global → Fusion MLP → GRU
     - Core: GRU (memoria de parcialmente-observable; hidden se guarda entre
       steps y se DESACOPLA del gradiente — sin BPTT, simplificación deliberada)
     - Cabezas AUTORREGRESIVAS con máscaras de acciones legales:
-        1) tipo de acción (21 tipos)
+        1) tipo de acción (25 tipos)
         2) slot de unidad (condicionada al tipo elegido)
         3) celda objetivo H×W (conv 1×1: fmap + scatter + tipo + GRU + unidad)
         4) ítem de producción (embedding de tipos de actor)
@@ -34,6 +34,8 @@ ACTION_TYPES = [
     "cancel_production", "set_rally_point", "guard", "set_stance",
     "enter_transport", "unload", "power_down", "set_primary", "surrender",
     "army_attack_move",
+    # v2 multi-select macros (adapter emite N× ATTACK_MOVE / MOVE)
+    "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
 ]
 N_ACTION_TYPES = len(ACTION_TYPES)
 TYPE_TO_IDX = {t: i for i, t in enumerate(ACTION_TYPES)}
@@ -43,7 +45,7 @@ HIDDEN_DIM = 416
 # Residual/zero-init para Net2Net desde 922 (GRU y U-Net se conservan).
 # 2c-C (attack-actor) se revirtió: smoke wr20→0, pointer casi no se usó.
 ROLE_EMB_DIM = 8
-UNIT_MLP_IN = UNIT_FEAT_DIM + ROLE_EMB_DIM  # 11 + 8 = 19
+UNIT_MLP_IN = UNIT_FEAT_DIM + ROLE_EMB_DIM  # 14 + 8 = 22 (v2 ghosts)
 # Arch v2 phase 1: bigger entity XF + Friendly/Enemy/Global fusion.
 XF_DIM = 96
 XF_HEADS = 4
@@ -59,7 +61,8 @@ UNIT_COND_DIM = 64
 QSA_DIM = 32
 QSA_BLOCK = 8
 QSA_TOPK = 8
-SPATIAL_CH = 96
+SPATIAL_CH = 96          # fmap out / GRU spatial_vec / cell_head (compatible)
+SPATIAL_MID = 64         # v2 U-Net shrink: enc/bott/dec1 internos
 CELL_HEAD_OLD_IN = SPATIAL_CH + 64 + 64  # fmap + tipo + hidden (pre Capa 2)
 
 # Qué cabeza usa cada tipo de acción (FUENTE ÚNICA para log_prob condicional;
@@ -67,7 +70,11 @@ CELL_HEAD_OLD_IN = SPATIAL_CH + 64 + 64  # fmap + tipo + hidden (pre Capa 2)
 TYPES_USE_UNIT = {"move", "attack_move", "attack", "stop", "set_stance",
                   "harvest", "deploy"}
 TYPES_USE_CELL = {"move", "attack_move", "attack", "place_building",
-                  "army_attack_move"}
+                  "army_attack_move", "infantry_attack_move",
+                  "vehicle_attack_move", "harvesters_move"}
+# Role-group macros: cell only (no unit head); adapter multi-commands.
+TYPES_GROUP_MACRO = {"army_attack_move", "infantry_attack_move",
+                     "vehicle_attack_move", "harvesters_move"}
 TYPES_USE_ITEM = {"train", "build", "place_building", "cancel_production"}
 
 # Tablas [N_ACTION_TYPES] — indexar t_idx en GPU, sin .item() por step
@@ -118,7 +125,9 @@ def build_type_masks(obs) -> torch.Tensor:
     have_buildings = len(obs.buildings) > 0
     if have_units:
         for t in ("move", "attack_move", "attack", "stop", "guard",
-                  "harvest", "set_stance", "army_attack_move"):
+                  "harvest", "set_stance", "army_attack_move",
+                  "infantry_attack_move", "vehicle_attack_move",
+                  "harvesters_move"):
             m[TYPE_TO_IDX[t]] = True
         m[TYPE_TO_IDX["deploy"]] = any("mcv" in u.type.lower() for u in obs.units)
     if have_buildings:
@@ -155,22 +164,24 @@ class AlphaLiteNet(nn.Module):
         # cualquier H×W (adaptive pool para el vector global)
 
         ch = SPATIAL_CH
-        # Encoder espacial con CoordConv (canales 9-10: x,y normalizados a
-        # [-1,1]) y U-Net lite (2 niveles down/up con skip) para ampliar el
-        # campo receptivo (~9 celdas -> ~35-45) sin perder resolución en el
-        # fmap final (sigue [B,ch,H,W]).
+        mid = SPATIAL_MID
+        # Encoder espacial CoordConv + U-Net lite. v2 shrink: niveles
+        # profundos en mid=64; skip full-res y fmap final siguen en ch=96
+        # (cell_head / QSA / scatter / GRU spatial_vec sin romper firma).
         self.spatial_in = nn.Sequential(
             nn.Conv2d(9 + 2, ch, 3, padding=1), nn.ReLU())
         self.enc1 = nn.Sequential(
-            ResBlock(ch), nn.Conv2d(ch, ch, 3, stride=2, padding=1),
-            nn.ReLU(), ResBlock(ch))
+            ResBlock(ch),
+            nn.Conv2d(ch, mid, 3, stride=2, padding=1), nn.ReLU(),
+            ResBlock(mid))
         self.enc2 = nn.Sequential(
-            nn.Conv2d(ch, ch, 3, stride=2, padding=1), nn.ReLU(), ResBlock(ch))
-        self.bott = ResBlock(ch)
+            nn.Conv2d(mid, mid, 3, stride=2, padding=1), nn.ReLU(),
+            ResBlock(mid), ResBlock(mid))
+        self.bott = ResBlock(mid)
         self.dec1 = nn.Sequential(
-            nn.Conv2d(2 * ch, ch, 3, padding=1), nn.ReLU(), ResBlock(ch))
+            nn.Conv2d(2 * mid, mid, 3, padding=1), nn.ReLU(), ResBlock(mid))
         self.dec0 = nn.Sequential(
-            nn.Conv2d(2 * ch, ch, 3, padding=1), nn.ReLU(), ResBlock(ch))
+            nn.Conv2d(mid + ch, ch, 3, padding=1), nn.ReLU(), ResBlock(ch))
         self.scalar_mlp = nn.Sequential(
             nn.Linear(SCALAR_DIM, 256), nn.ReLU(), nn.Linear(256, 128), nn.ReLU(),
         )
@@ -335,7 +346,7 @@ class AlphaLiteNet(nn.Module):
         return F.linear(out, mha.out_proj.weight, mha.out_proj.bias)
 
     def _unit_in(self, unit_feats, role_ids):
-        """cat(feats11, role_emb8) → 19-d para mlp/scatter/scorer."""
+        """cat(feats14, role_emb8) → 22-d para mlp/scatter/scorer."""
         if role_ids is None:
             role_ids = torch.zeros(unit_feats.shape[:2], dtype=torch.long,
                                    device=unit_feats.device)
@@ -1004,6 +1015,36 @@ def adapt_v2_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
         # Not a parameter — strip before load; caller may log via side channel
         pass
     out.pop("_adapt_v2_dropped", None)
+
+    # Spatial U-Net shrink (ch→mid): soft-copy overlapping conv filters.
+    spat_prefs = ("spatial_in.", "enc1.", "enc2.", "bott.", "dec1.", "dec0.")
+    for key, want in target.items():
+        if not any(key.startswith(p) for p in spat_prefs):
+            continue
+        if key not in out:
+            continue
+        old = out[key]
+        if tuple(old.shape) == tuple(want.shape):
+            continue
+        expanded = _soft_expand_tensor(old, tuple(want.shape))
+        if expanded is None:
+            out.pop(key, None)
+        else:
+            out[key] = expanded
+
+    # Type head / embedding grow when ACTION_TYPES gains group macros.
+    for key in ("head_type.weight", "head_type.bias", "type_embedding.weight"):
+        if key not in out or key not in target:
+            continue
+        old = out[key]
+        want = target[key]
+        if tuple(old.shape) == tuple(want.shape):
+            continue
+        expanded = _soft_expand_tensor(old, tuple(want.shape))
+        if expanded is None:
+            out.pop(key, None)
+        else:
+            out[key] = expanded
     return out
 
 
@@ -1054,22 +1095,41 @@ def _expand_feat_in(old_w: torch.Tensor, old_feat: int, extra: int) -> torch.Ten
     return new_w
 
 
-def adapt_capa2c_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
-    """Net2Net 2c-A (feats 10) → 2c-B (11 + role_emb 8 = 19).
+def _pad_unit_mlp_in(old_w: torch.Tensor, want_in: int) -> torch.Tensor | None:
+    """Soft-pad unit_mlp/scatter/scorer input: feats grow, role_emb stays tail.
 
-    Copia cols 0:10; team+role nacen 0. `role_emb` no está en el ckpt A
-    (missing keys). `unit_xf_scale` / GRU / U-Net 1:1 — no resetear.
+    Layout: [feat0..featK) || [role_emb ROLE_EMB_DIM].
+    Ckpts: 10 (pre-team) | 11+8=19 (2c-B) | 14+8=22 (v2 ghosts).
+    """
+    if old_w.dim() != 2:
+        return None
+    out_f, old_in = old_w.shape
+    if old_in == want_in:
+        return old_w
+    role = ROLE_EMB_DIM
+    # Infer old feat dim: if old_in > role, assume trailing role block.
+    if old_in >= role and want_in >= role:
+        old_feat = old_in - role
+        new_feat = want_in - role
+        if new_feat < old_feat:
+            return None
+        new_w = old_w.new_zeros(out_f, want_in)
+        new_w[:, :old_feat] = old_w[:, :old_feat]
+        new_w[:, new_feat:new_feat + role] = old_w[:, old_feat:old_feat + role]
+        return new_w
+    # Fallback: prefix copy
+    return _soft_expand_tensor(old_w, (out_f, want_in))
+
+
+def adapt_capa2c_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
+    """Net2Net feat growth: 10 → 11+role → 14+role (v2 ghosts).
+
+    Inserta cols nuevas (team / visible/conf/t_seen) en 0; role_emb al final
+    se conserva. `role_emb` ausente en ckpts viejos = missing keys OK.
     """
     out = dict(raw)
-    extra = int(UNIT_MLP_IN - 10)
-    if extra <= 0:
-        return out
     target = net.state_dict()
-    for key, old_feat in (
-        ("unit_mlp.0.weight", 10),
-        ("scatter_proj.weight", 10),
-        ("unit_scorer.0.weight", 10),
-    ):
+    for key in ("unit_mlp.0.weight", "scatter_proj.weight", "unit_scorer.0.weight"):
         if key not in out or key not in target:
             continue
         old_w = out[key]
@@ -1078,10 +1138,8 @@ def adapt_capa2c_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
             continue
         if old_w.dim() != 2 or old_w.shape[0] != want.shape[0]:
             continue
-        if old_w.shape[1] < old_feat:
-            continue
-        padded = _expand_feat_in(old_w, old_feat, extra)
-        if padded.shape == want.shape:
+        padded = _pad_unit_mlp_in(old_w, want.shape[1])
+        if padded is not None and padded.shape == want.shape:
             out[key] = padded
     return out
 

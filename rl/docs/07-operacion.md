@@ -111,7 +111,7 @@ Politica vs bot / vs ckpt, con WebM opcional:
   --ckpt rl\ckpts\latest.pt --bot-type easy --no-greedy --no-war-nudge
 ```
 
-* Device CUDA si hay. Ckpts **pre arch v2** cargan tronco con `strict=False` + soft-adapt XF/fusion (`adapt_v2_state_dict`); cell head Sequential / scalar pad siguen. Adam fresco si hay mismatch. **A/B:** train v2 en `rl/ckpts_v2/` (no mezclar con v1.1 en `rl/ckpts/`).
+* Device CUDA si hay. Ckpts **pre arch v2** cargan tronco con `strict=False` + soft-adapt XF/fusion/spatial/feats/type (`adapt_v2_state_dict` + capa2c/scalar). Adam fresco si hay mismatch. **A/B:** train v2 en `rl/ckpts_v2/` (no mezclar con v1.1 en `rl/ckpts/`).
 * Grabaciones: `rl/ckpts/live_recordings/{episode_id}.webm` cuando el pipeline de MediaRecorder esta activo.
 
 Script helper (si existe en el repo): `rl/watch_live.ps1` — alinear flags a `TRAIN_ARGS` (`--no-war-nudge`, etc.).
@@ -134,17 +134,22 @@ cd C:\Users\lordc\Desktop\OpenRA-RL\OpenRA
 
 ## Arquitectura / obs (snapshot Sep 2026)
 
-### AlphaLiteNet v2 vs v1.1 (phase 1)
+### AlphaLiteNet v2 vs v1.1 (**completa**)
 
-* **v1.1:** XF 2 capas d=64 FF=128; `unit_vec` = proj(`own_mean || own_max || ene_mean`); cell head Sequential 1x1->SiLU->3x3. ~3.0M params. Ckpts en `rl/ckpts/`.
-* **v2 phase 1:** XF **3** capas d=**96** FF=**256**; pools **Friendly / Enemy / Global** tras XF -> Fusion MLP -> GRU (misma dim 128 al core). Cell head / U-Net / cabezas iguales. ~3.3M params. **Usar `rl/ckpts_v2/`** para A/B limpio vs v1.1 (`--ckpt-dir rl/ckpts_v2`). Load desde v1.1: soft-pad XF + fusion; layer3 y canales nuevos (ene_max, global) nacen en 0.
-* **Fuera de phase 1:** fog last_seen, multi-select group masks, gutear U-Net.
+* **v1.1:** XF 2 capas d=64 FF=128; `unit_vec` = proj(`own_mean || own_max || ene_mean`); cell head Sequential 1x1->SiLU->3x3; U-Net full ch=96. ~3.0M params. Ckpts en `rl/ckpts/`.
+* **v2 completa** (phase 1+2+3):
+  1. **Entity XF** 3×4h d=96 FF=256 + pools **Friendly / Enemy / Global** → Fusion MLP → GRU.
+  2. **Fog `last_seen`:** `EnemyBeliefStore` por episodio; ghosts con visible/conf/time_since_seen (`UNIT_FEAT_DIM=14`); entran al pool enemigo del XF / F/E/G.
+  3. **Multi-select macros:** `infantry_attack_move` / `vehicle_attack_move` / `harvesters_move` (+ `army_attack_move`); adapter emite N× MOVE/ATTACK_MOVE. Single-unit AR intacto para BUILD/PLACE/etc.
+  4. **U-Net shrink:** mid=64 en enc/bott/dec1; fmap out sigue **96** (cell/QSA/scatter). Spatial ~1.0M (antes ~1.5M). Total net ~3.0–3.3M.
+* **A/B:** train v2 en **`rl/ckpts_v2/`** (`--ckpt-dir rl/ckpts_v2`) vs v1.1 en `rl/ckpts/`. Load: soft-pad XF/fusion/feats/spatial/type-head; Adam fresco si mismatch.
 
 | Pieza | Estado |
 |-------|--------|
 | `SCALAR_DIM` | **25** (21 clasicos + AOA `rel_power/health/speed/strong`). Pad Net2Net en load. |
+| `UNIT_FEAT_DIM` | **14** (11 + visible/conf/time_since_seen). Ghosts en slots enemigo ≤32. |
 | Force edge | Reward chico en `eradicate_v4` (`w_force_edge`) si Strong y combate lejos de base. Modulo `rl/force_estimate.py`. |
-| Arch v2 (phase 1) | Entity XF **3x4h d=96 FF=256**; GRU `unit_vec` = FusionMLP(Friendly mean||max || Enemy mean||max || Global mean). Cell head Sequential (v1.1) sin cambios. ~3.3M params. A/B: `rl/ckpts_v2/` vs v1.1 en `rl/ckpts/`. |
+| Arch v2 completa | XF 3×96 FF=256; F/E/G fusion; fog ghosts; group macros; U-Net mid64→fmap96. A/B: `rl/ckpts_v2/`. |
 | Entity XF | 128 tokens, **3 layers / d=96 / FF=256** (v2); top-k sparse (`--xf-topk`). |
 | Map QSA | Bloques 8×8, top-8 (`--qsa-topk` / `--qsa-block`). |
 | Burn-in | `--burn-in 8` (GRU sin loss antes del BPTT). |
@@ -199,4 +204,4 @@ Detalle historico de cortes: docs `13`–`21`. Regla practica ahora:
 * Facciones / roles: `15-facciones-mods-roles.md`
 * Filosofia / pilares: `06-filosofia-rl.md`
 * Reward: `rl/reward_shaping.py` (`eradicate_v4`)
-* Red: `rl/network.py` (arch v2 phase 1; v1.1 = pools mean/max sin global + XF 2x64)
+* Red: `rl/network.py` (arch v2 completa; v1.1 = XF 2x64 + U-Net full-96)

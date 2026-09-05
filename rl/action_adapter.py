@@ -31,6 +31,7 @@ ENABLED_TYPES = {
     "no_op", "move", "attack_move", "attack", "stop", "harvest",
     "set_stance", "deploy", "train", "build", "place_building",
     "cancel_production", "army_attack_move",
+    "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
 }
 
 UNIT_ACTION_TYPES = {"move", "attack_move", "attack", "stop", "set_stance",
@@ -110,10 +111,20 @@ COMBAT_TRAIN_ROLES = {
     "ship_sub", "ship_combat", "ship_amphib",
 }
 ECONOMY_BUILD_ROLES = {"power", "refinery"}  # legal BUILD before proc exists
-MOVE_CELL_TYPES = {"move", "attack_move", "attack", "army_attack_move"}
+MOVE_CELL_TYPES = {
+    "move", "attack_move", "attack", "army_attack_move",
+    "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
+}
 # Combat movement: masked until a refinery stands. Otherwise PPO
 # reward-hacks army_attack_move / attack_move (the 201-309 collapse).
-COMBAT_MOVE_TYPES = ("army_attack_move", "attack_move", "attack")
+COMBAT_MOVE_TYPES = (
+    "army_attack_move", "attack_move", "attack",
+    "infantry_attack_move", "vehicle_attack_move",
+)
+GROUP_MACRO_TYPES = (
+    "army_attack_move", "infantry_attack_move",
+    "vehicle_attack_move", "harvesters_move",
+)
 # Group push: legal once TOTAL combat >= PACK_ARMY (home OR field).
 # Run 43: home-only gate froze 200+ units mid-map (incomplete @53k) because
 # n_home dropped below 12 after the march. Still blocks drip-4 at home.
@@ -159,6 +170,70 @@ def n_combat_total(obs) -> int:
         if _is_combat_unit(u):
             n += 1
     return int(n)
+
+
+_INFANTRY_TYPE_PREFIXES = ("e1", "e2", "e3", "e4", "e6", "dog", "spy", "med",
+                           "shok", "thf", "chan", "delphi")
+
+
+def _utype(u) -> str:
+    return str(getattr(u, "type", "") or "").lower()
+
+
+def _is_infantry_unit(u) -> bool:
+    t = _utype(u)
+    return any(t == p or t.startswith(p) for p in _INFANTRY_TYPE_PREFIXES)
+
+
+def _is_vehicle_combat(u) -> bool:
+    if not _is_combat_unit(u):
+        return False
+    return not _is_infantry_unit(u)
+
+
+def _is_harvester_unit(u) -> bool:
+    return "harv" in _utype(u)
+
+
+def n_infantry_total(obs) -> int:
+    return sum(1 for u in (getattr(obs, "units", None) or [])
+               if _is_infantry_unit(u))
+
+
+def n_vehicle_combat_total(obs) -> int:
+    return sum(1 for u in (getattr(obs, "units", None) or [])
+               if _is_vehicle_combat(u))
+
+
+def n_harvester_total(obs) -> int:
+    return sum(1 for u in (getattr(obs, "units", None) or [])
+               if _is_harvester_unit(u))
+
+
+def group_actor_ids(obs, group: str, limit: int = 64) -> list:
+    """Actor ids for a role-group macro (stable actor_id order)."""
+    units = list(getattr(obs, "units", None) or [])
+    units.sort(key=lambda u: int(getattr(u, "actor_id", 0) or 0))
+    out = []
+    for u in units:
+        aid = int(getattr(u, "actor_id", 0) or 0)
+        if aid <= 0:
+            continue
+        if group == "army":
+            ok = _is_combat_unit(u)
+        elif group == "infantry":
+            ok = _is_infantry_unit(u)
+        elif group == "vehicle":
+            ok = _is_vehicle_combat(u)
+        elif group == "harvesters":
+            ok = _is_harvester_unit(u)
+        else:
+            ok = False
+        if ok:
+            out.append(aid)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def n_combat_near_own_base(obs, radius: int = PACK_HOME_RADIUS) -> int:
@@ -507,6 +582,13 @@ class ActionIndex:
         # Pack-12: group push with a real army anywhere (Run 44 field remate).
         if n_combat_total(obs) < PACK_ARMY:
             m[TYPE_TO_IDX["army_attack_move"]] = False
+        # v2 role-group macros: >=2 matching (harvesters >=1).
+        if n_infantry_total(obs) < 2:
+            m[TYPE_TO_IDX["infantry_attack_move"]] = False
+        if n_vehicle_combat_total(obs) < 2:
+            m[TYPE_TO_IDX["vehicle_attack_move"]] = False
+        if n_harvester_total(obs) < 1:
+            m[TYPE_TO_IDX["harvesters_move"]] = False
         self.type_mask = torch.from_numpy(m)
 
 
@@ -620,6 +702,12 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         t_name = "no_op"
     if t_name == "army_attack_move" and n_combat_total(obs) < PACK_ARMY:
         t_name = "no_op"
+    if t_name == "infantry_attack_move" and n_infantry_total(obs) < 2:
+        t_name = "no_op"
+    if t_name == "vehicle_attack_move" and n_vehicle_combat_total(obs) < 2:
+        t_name = "no_op"
+    if t_name == "harvesters_move" and n_harvester_total(obs) < 1:
+        t_name = "no_op"
 
     # Recolectora no combate: move/attack_move/attack sobre harv es harvest.
     # Dest credit + rally weap la mandaban al beacon (visor 921). El C#
@@ -643,7 +731,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     # TRAIN/BUILD/PLACE ignore this (place keeps the sampled cell).
     if t_name in MOVE_CELL_TYPES:
         cx, cy = remap_move_cell(obs, aidx, cx, cy, actor_id)
-        if t_name == "army_attack_move":
+        if t_name in ("army_attack_move", "infantry_attack_move",
+                      "vehicle_attack_move"):
             cx, cy = stage_army_attack_cell(obs, aidx, cx, cy)
     eff_cell_flat = int(cy) * aidx.w + int(cx)
     if t_name in ("train", "build", "place_building", "cancel_production"):
@@ -660,6 +749,7 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
             eff_unit_slot = aidx.unit_ids.index(m_id)
 
     cmd = None
+    group_cmds = None  # v2: multi CommandModel for role-group macros
     t = ActionType(t_name)
     if t == ActionType.NO_OP:
         cmd = CommandModel(action=t)
@@ -670,6 +760,22 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         # Fase 2: sin actor_id — el C# itera TODAS las unidades de combate
         # propias y les emite AttackMove hacia la celda.
         cmd = CommandModel(action=t, target_x=cx, target_y=cy)
+    elif t in (ActionType.INFANTRY_ATTACK_MOVE, ActionType.VEHICLE_ATTACK_MOVE,
+               ActionType.HARVESTERS_MOVE):
+        # v2: N per-unit cmds (engine has no typed group macros besides army).
+        gkey = {
+            ActionType.INFANTRY_ATTACK_MOVE: "infantry",
+            ActionType.VEHICLE_ATTACK_MOVE: "vehicle",
+            ActionType.HARVESTERS_MOVE: "harvesters",
+        }[t]
+        ids = group_actor_ids(obs, gkey)
+        atk = (ActionType.MOVE if t == ActionType.HARVESTERS_MOVE
+               else ActionType.ATTACK_MOVE)
+        group_cmds = [
+            CommandModel(action=atk, actor_id=aid, target_x=cx, target_y=cy)
+            for aid in ids
+        ]
+        cmd = group_cmds[0] if group_cmds else CommandModel(action=ActionType.NO_OP)
     elif t == ActionType.ATTACK:
         # Con la degradación temprana F1, acá solo se llega CON enemigo
         # resolvible; el if queda como defensa en profundidad.
@@ -702,8 +808,12 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         cmd = CommandModel(action=t, item_type=item_type)
     else:
         cmd = CommandModel(action=ActionType.NO_OP)
-    return OpenRAAction(commands=[cmd]), (eff_type, eff_unit_slot,
-                                          eff_item_slot, eff_cell_flat)
+    if group_cmds:
+        out_cmds = group_cmds
+    else:
+        out_cmds = [cmd] if cmd is not None else []
+    return OpenRAAction(commands=out_cmds), (eff_type, eff_unit_slot,
+                                             eff_item_slot, eff_cell_flat)
 
 
 def _nearest_enemy_at_cell(obs, cx: int, cy: int):

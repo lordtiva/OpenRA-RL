@@ -25,7 +25,7 @@ from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_co
 from rl.imitation import command_to_indices, pick_bc_command
 from rl.network import ACTION_TYPES, HIDDEN_DIM
 from rl.obs_encoding import (
-    decode_spatial, scalar_features, unit_tokens,
+    decode_spatial, scalar_features, unit_tokens, EnemyBeliefStore,
 )
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
@@ -33,7 +33,7 @@ from rl.economy_race import EconomyRace
 from rl.auto_support import apply_dest_credit, support_commands
 
 
-def _batch_of(obs, vocab, device):
+def _batch_of(obs, vocab, device, belief: EnemyBeliefStore | None = None):
     """Observación del env -> dict de tensores para la red (+ActionIndex)."""
     h = max(obs.map_info.height, 1)
     w = max(obs.map_info.width, 1)
@@ -44,7 +44,7 @@ def _batch_of(obs, vocab, device):
     if spatial is None:
         spatial = np.zeros((9, h, w), dtype=np.float32)
 
-    units_feats, role_ids, unit_valid, own_mask = unit_tokens(obs)
+    units_feats, role_ids, unit_valid, own_mask = unit_tokens(obs, belief=belief)
 
     aidx = ActionIndex(obs, vocab)
     # Channel 3 is passability (0/1). Mask illegal cells in the cell head so
@@ -144,6 +144,9 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     hidden = torch.zeros(1, HIDDEN_DIM, device=device)
     opponent_hidden = torch.zeros(1, HIDDEN_DIM, device=device) if opponent_net is not None else None
     peer_obs = peer_obs_from_metadata(obs) if opponent_net is not None else None
+    # Fog belief ghosts (v2): last_seen enemigos por episodio (no entre mapas).
+    belief = EnemyBeliefStore()
+    peer_belief = EnemyBeliefStore() if opponent_net is not None else None
     traj = []
     episode_reward = 0.0
     t0 = time.time()
@@ -196,15 +199,18 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
             # Shell -> real map: drop GRU state baked on the wrong HxW.
             if dims_switched:
                 hidden = torch.zeros(1, HIDDEN_DIM, device=device)
+                belief.reset()
                 if opponent_hidden is not None:
                     opponent_hidden = torch.zeros(1, HIDDEN_DIM, device=device)
+                if peer_belief is not None:
+                    peer_belief.reset()
             if not record_sample:
                 # Avanzar env sin meter tensors del shell (u otro HxW) al traj.
                 pending_cmd = _noop_action()
                 pending_sample = None
                 atype = "no_op"
             else:
-                batch, aidx = _batch_of(obs, vocab, device)
+                batch, aidx = _batch_of(obs, vocab, device, belief=belief)
                 h_in = hidden.detach().clone()
                 had_item = aidx.item_mask.any().view(1).to(device)
                 if teacher is not None:
@@ -349,7 +355,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
         if (opponent_net is not None and can_decide and pending_cmd is not None
                 and peer_obs is not None):
             try:
-                p_batch, p_aidx = _batch_of(peer_obs, vocab, device)
+                p_batch, p_aidx = _batch_of(peer_obs, vocab, device, belief=peer_belief)
                 with torch.no_grad():
                     p_out = opponent_net.act(p_batch, opponent_hidden, temperature=temperature)
                     opponent_hidden = p_out["hidden"].detach()
@@ -533,7 +539,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     # Se computa acá porque solo el rollout tiene la obs final + hidden.
     if traj and not done and not outcome_error:
         with torch.no_grad():
-            b_final, _ = _batch_of(obs, vocab, device)
+            b_final, _ = _batch_of(obs, vocab, device, belief=belief)
             _, _, h_fin, _tok = net.encode(
                 b_final["spatial"], b_final["scalars"],
                 b_final["unit_feats"], b_final["unit_valid"], hidden,

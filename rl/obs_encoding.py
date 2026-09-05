@@ -209,10 +209,16 @@ def scalar_features(obs) -> np.ndarray:
 
 
 MAX_UNITS = 96  # Capa 2c-A: techo de slots propios (pesos del xf no crecen con n)
-MAX_ENEMIES = 32  # Capa 2c-B: visibles en niebla
+MAX_ENEMIES = 32  # Capa 2c-B: visibles + ghosts de niebla
 MAX_TOKENS = MAX_UNITS + MAX_ENEMIES  # 128: own ++ ene
 UNIT_FEAT_BASE = 10  # HP..facing (A)
-UNIT_FEAT_DIM = 11   # + team (0 propio, 1 enemigo)
+# v2: + team + visible + confidence + time_since_seen (belief ghosts)
+UNIT_FEAT_DIM = 14
+# Indices estables (scatter / heads leen xy en 7/8):
+# 0 hp, 1 can_attack, 2 idle, 3 speed, 4 range, 5 xp, 6 stance,
+# 7 cell_x, 8 cell_y, 9 facing, 10 team, 11 visible, 12 conf, 13 t_seen
+GHOST_TTL = 48          # decision steps sin ver -> drop
+GHOST_CONF_FLOOR = 0.05
 # Mismo radio que el dest-defend viejo: combate que ve el raid entra al set
 # aunque tenga actor_id alto (los e1 nuevos no cabían en oldest-48).
 THREAT_RADIUS = 18
@@ -304,7 +310,9 @@ def select_unit_slots(obs, max_units: int = MAX_UNITS):
     return picked
 
 
-def _unit_feat(u, team: float = 0.0) -> list:
+def _unit_feat(u, team: float = 0.0, visible: float = 1.0,
+               confidence: float = 1.0, time_since_seen: float = 0.0) -> list:
+    """Features de entidad. Ghosts: visible=0, conf decay, xy/hp = last_seen."""
     return [
         float(getattr(u, "hp_percent", 1.0) or 0.0),
         1.0 if getattr(u, "can_attack", False) else 0.0,
@@ -317,18 +325,124 @@ def _unit_feat(u, team: float = 0.0) -> list:
         float(getattr(u, "cell_y", 0) or 0) / 128.0,
         float(getattr(u, "facing", 0) or 0) / 1023.0,
         float(team),
+        float(visible),
+        float(confidence),
+        float(time_since_seen),
     ]
 
 
-def select_enemy_slots(obs, max_enemies: int = MAX_ENEMIES):
-    """Hasta max_enemies visibles, orden estable por actor_id."""
+class _GhostUnit:
+    """Proxy minimo para reusar _unit_feat / role_id_of con last_seen."""
+    __slots__ = (
+        "actor_id", "type", "hp_percent", "can_attack", "is_idle", "speed",
+        "attack_range", "experience_level", "stance", "cell_x", "cell_y",
+        "facing",
+    )
+
+    def __init__(self, rec: dict):
+        for k in self.__slots__:
+            setattr(self, k, rec.get(k, 0))
+
+
+class EnemyBeliefStore:
+    """Belief ghosts por episodio: last_seen de enemigos que salieron de fog.
+
+    Visible -> refresh conf=1, t=0. Invisible recordado -> conf decay, t++.
+    Drop tras GHOST_TTL o conf < GHOST_CONF_FLOOR. No inventa campos OpenRA:
+    solo cachea lo que ya expone visible_enemies (hp/pos/type/...).
+    """
+
+    __slots__ = ("_mem",)
+
+    def __init__(self):
+        self._mem: dict[int, dict] = {}
+
+    def reset(self):
+        self._mem.clear()
+
+    def _snapshot(self, u) -> dict:
+        return {
+            "actor_id": _actor_id(u),
+            "type": str(getattr(u, "type", "") or ""),
+            "hp_percent": float(getattr(u, "hp_percent", 1.0) or 0.0),
+            "can_attack": bool(getattr(u, "can_attack", False)),
+            "is_idle": bool(getattr(u, "is_idle", True)),
+            "speed": float(getattr(u, "speed", 0) or 0),
+            "attack_range": float(getattr(u, "attack_range", 0) or 0),
+            "experience_level": float(getattr(u, "experience_level", 0) or 0),
+            "stance": float(getattr(u, "stance", 0) or 0),
+            "cell_x": int(getattr(u, "cell_x", 0) or 0),
+            "cell_y": int(getattr(u, "cell_y", 0) or 0),
+            "facing": float(getattr(u, "facing", 0) or 0),
+            "time_since_seen": 0,
+            "confidence": 1.0,
+        }
+
+    def update(self, obs) -> None:
+        visible = list(getattr(obs, "visible_enemies", None) or [])
+        seen_ids = set()
+        for u in visible:
+            aid = _actor_id(u)
+            if aid <= 0:
+                continue
+            seen_ids.add(aid)
+            self._mem[aid] = self._snapshot(u)
+        ttl = float(GHOST_TTL)
+        drop = []
+        for aid, rec in self._mem.items():
+            if aid in seen_ids:
+                continue
+            t = int(rec.get("time_since_seen", 0)) + 1
+            conf = max(0.0, 1.0 - (t / max(ttl, 1.0)))
+            rec["time_since_seen"] = t
+            rec["confidence"] = conf
+            if t >= GHOST_TTL or conf < GHOST_CONF_FLOOR:
+                drop.append(aid)
+        for aid in drop:
+            self._mem.pop(aid, None)
+
+    def select_enemies(self, obs, max_enemies: int = MAX_ENEMIES):
+        """Visibles primero (conf=1), luego ghosts por conf desc. Cap max_enemies."""
+        self.update(obs)
+        visible = list(getattr(obs, "visible_enemies", None) or [])
+        visible.sort(key=_actor_id)
+        out = []  # list[(unit_or_ghost, visible, conf, t_norm)]
+        used = set()
+        for u in visible:
+            if len(out) >= max_enemies:
+                break
+            aid = _actor_id(u)
+            used.add(aid)
+            out.append((u, 1.0, 1.0, 0.0))
+        ghosts = []
+        for aid, rec in self._mem.items():
+            if aid in used:
+                continue
+            if int(rec.get("time_since_seen", 0)) <= 0:
+                continue  # still "visible" path
+            ghosts.append(rec)
+        ghosts.sort(key=lambda r: (-float(r.get("confidence", 0)), _actor_id(r)))
+        ttl = float(max(GHOST_TTL, 1))
+        for rec in ghosts:
+            if len(out) >= max_enemies:
+                break
+            t = int(rec.get("time_since_seen", 0))
+            conf = float(rec.get("confidence", 0.0))
+            out.append((_GhostUnit(rec), 0.0, conf, min(t / ttl, 1.0)))
+        return out
+
+
+def select_enemy_slots(obs, max_enemies: int = MAX_ENEMIES, belief=None):
+    """Hasta max_enemies: visibles (+ ghosts si belief). Orden id en solo-visibles."""
+    if belief is not None:
+        return [u for u, _, _, _ in belief.select_enemies(obs, max_enemies)]
     enemies = list(getattr(obs, "visible_enemies", None) or [])
     enemies.sort(key=_actor_id)
     return enemies[: max(0, int(max_enemies))]
 
 
 def unit_slots(obs):
-    """Hasta MAX_UNITS propias: (features [N,11] team=0, válidos bool[N])."""
+    """Hasta MAX_UNITS propias: (features [N,F] team=0, válidos bool[N])."""
     units = select_unit_slots(obs)
     if not units:
         return (np.zeros((0, UNIT_FEAT_DIM), dtype=np.float32),
@@ -338,25 +452,32 @@ def unit_slots(obs):
     return feats, valid
 
 
-def unit_tokens(obs):
+def unit_tokens(obs, belief: EnemyBeliefStore | None = None):
     """own (≤96) ++ ene (≤32) padded a MAX_TOKENS.
 
-    Devuelve feats[U,11], role_ids[U] int64, valid[U], own_mask[U].
+    Devuelve feats[U,UNIT_FEAT_DIM], role_ids[U] int64, valid[U], own_mask[U].
     Slots 0..MAX_UNITS-1 = propias (cabeza 2 / adapter). 96..127 = enemigos
-    (xf y scatter; ilegales en dist_unit).
+    visibles + ghosts de belief (xf / F/E/G / scatter; ilegales en dist_unit).
     """
     feats = np.zeros((MAX_TOKENS, UNIT_FEAT_DIM), dtype=np.float32)
     role_ids = np.zeros(MAX_TOKENS, dtype=np.int64)
     valid = np.zeros(MAX_TOKENS, dtype=bool)
     own_mask = np.zeros(MAX_TOKENS, dtype=bool)
     for i, u in enumerate(select_unit_slots(obs)[:MAX_UNITS]):
-        feats[i] = _unit_feat(u, 0.0)
+        feats[i] = _unit_feat(u, 0.0, visible=1.0, confidence=1.0,
+                              time_since_seen=0.0)
         role_ids[i] = role_id_of(getattr(u, "type", "") or "")
         valid[i] = True
         own_mask[i] = True
-    for j, u in enumerate(select_enemy_slots(obs)[:MAX_ENEMIES]):
+    if belief is not None:
+        ene_list = belief.select_enemies(obs, MAX_ENEMIES)
+    else:
+        ene_list = [(u, 1.0, 1.0, 0.0)
+                    for u in select_enemy_slots(obs)[:MAX_ENEMIES]]
+    for j, (u, vis, conf, t_seen) in enumerate(ene_list[:MAX_ENEMIES]):
         i = MAX_UNITS + j
-        feats[i] = _unit_feat(u, 1.0)
+        feats[i] = _unit_feat(u, 1.0, visible=vis, confidence=conf,
+                              time_since_seen=t_seen)
         role_ids[i] = role_id_of(getattr(u, "type", "") or "")
         valid[i] = True
     return feats, role_ids, valid, own_mask

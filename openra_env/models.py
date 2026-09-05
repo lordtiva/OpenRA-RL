@@ -42,6 +42,9 @@ class ActionType(str, Enum):
     FAST_ADVANCE = "fast_advance"
     PATROL = "patrol"
     ARMY_ATTACK_MOVE = "army_attack_move"
+    INFANTRY_ATTACK_MOVE = "infantry_attack_move"
+    VEHICLE_ATTACK_MOVE = "vehicle_attack_move"
+    HARVESTERS_MOVE = "harvesters_move"
 
 
 class CommandModel(Action):
