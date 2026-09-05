@@ -111,7 +111,7 @@ Politica vs bot / vs ckpt, con WebM opcional:
   --ckpt rl\ckpts\latest.pt --bot-type easy --no-greedy --no-war-nudge
 ```
 
-* Device CUDA si hay. Ckpts **pre arch v1.1** cargan tronco con `strict=False` (cell head Sequential + `unit_pool_proj` nacen frescos; Adam fresco si hay mismatch).
+* Device CUDA si hay. Ckpts **pre arch v2** cargan tronco con `strict=False` + soft-adapt XF/fusion (`adapt_v2_state_dict`); cell head Sequential / scalar pad siguen. Adam fresco si hay mismatch. **A/B:** train v2 en `rl/ckpts_v2/` (no mezclar con v1.1 en `rl/ckpts/`).
 * Grabaciones: `rl/ckpts/live_recordings/{episode_id}.webm` cuando el pipeline de MediaRecorder esta activo.
 
 Script helper (si existe en el repo): `rl/watch_live.ps1` — alinear flags a `TRAIN_ARGS` (`--no-war-nudge`, etc.).
@@ -134,12 +134,18 @@ cd C:\Users\lordc\Desktop\OpenRA-RL\OpenRA
 
 ## Arquitectura / obs (snapshot Sep 2026)
 
+### AlphaLiteNet v2 vs v1.1 (phase 1)
+
+* **v1.1:** XF 2 capas d=64 FF=128; `unit_vec` = proj(`own_mean || own_max || ene_mean`); cell head Sequential 1x1->SiLU->3x3. ~3.0M params. Ckpts en `rl/ckpts/`.
+* **v2 phase 1:** XF **3** capas d=**96** FF=**256**; pools **Friendly / Enemy / Global** tras XF -> Fusion MLP -> GRU (misma dim 128 al core). Cell head / U-Net / cabezas iguales. ~3.3M params. **Usar `rl/ckpts_v2/`** para A/B limpio vs v1.1 (`--ckpt-dir rl/ckpts_v2`). Load desde v1.1: soft-pad XF + fusion; layer3 y canales nuevos (ene_max, global) nacen en 0.
+* **Fuera de phase 1:** fog last_seen, multi-select group masks, gutear U-Net.
+
 | Pieza | Estado |
 |-------|--------|
 | `SCALAR_DIM` | **25** (21 clasicos + AOA `rel_power/health/speed/strong`). Pad Net2Net en load. |
 | Force edge | Reward chico en `eradicate_v4` (`w_force_edge`) si Strong y combate lejos de base. Modulo `rl/force_estimate.py`. |
-| Arch v1.1 | Cell head `Conv 296->64 -> SiLU -> Conv3×3->1`; GRU `unit_vec` = proj(`own_mean ‖ own_max ‖ ene_mean`). ~3.0M params. |
-| Entity XF | 128 tokens, top-k sparse (`--xf-topk`). |
+| Arch v2 (phase 1) | Entity XF **3x4h d=96 FF=256**; GRU `unit_vec` = FusionMLP(Friendly mean||max || Enemy mean||max || Global mean). Cell head Sequential (v1.1) sin cambios. ~3.3M params. A/B: `rl/ckpts_v2/` vs v1.1 en `rl/ckpts/`. |
+| Entity XF | 128 tokens, **3 layers / d=96 / FF=256** (v2); top-k sparse (`--xf-topk`). |
 | Map QSA | Bloques 8×8, top-8 (`--qsa-topk` / `--qsa-block`). |
 | Burn-in | `--burn-in 8` (GRU sin loss antes del BPTT). |
 | Roles | `--roles-vocab` siembra ids fijos de produccion; embedding de entidad ya fijo en `ROLE_VOCAB`. |
@@ -193,4 +199,4 @@ Detalle historico de cortes: docs `13`–`21`. Regla practica ahora:
 * Facciones / roles: `15-facciones-mods-roles.md`
 * Filosofia / pilares: `06-filosofia-rl.md`
 * Reward: `rl/reward_shaping.py` (`eradicate_v4`)
-* Red: `rl/network.py` (arch v1.1)
+* Red: `rl/network.py` (arch v2 phase 1; v1.1 = pools mean/max sin global + XF 2x64)

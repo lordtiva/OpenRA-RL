@@ -3,8 +3,8 @@
 Arquitectura:
     - Encoder espacial: CNN+ResBlocks sobre el tensor 9×H×W
     - Encoder de escalares: MLP sobre economía/militar
-    - Encoder de unidades: MLP por-slot + transformer 2×4h d=64 (Capa 2)
-      residual gate=0 al init → GRU ve el mean 922
+    - Encoder de unidades: MLP por-slot + transformer 3×4h d=96 FF=256 (arch v2)
+      residual gate=0 al init; pools Friendly/Enemy/Global → Fusion MLP → GRU
     - Core: GRU (memoria de parcialmente-observable; hidden se guarda entre
       steps y se DESACOPLA del gradiente — sin BPTT, simplificación deliberada)
     - Cabezas AUTORREGRESIVAS con máscaras de acciones legales:
@@ -20,7 +20,6 @@ celda metían ruido en acciones que ni los miraban.
 """
 
 import numpy as np
-import math
 import math
 import torch
 import torch.nn as nn
@@ -45,10 +44,16 @@ HIDDEN_DIM = 416
 # 2c-C (attack-actor) se revirtió: smoke wr20→0, pointer casi no se usó.
 ROLE_EMB_DIM = 8
 UNIT_MLP_IN = UNIT_FEAT_DIM + ROLE_EMB_DIM  # 11 + 8 = 19
-XF_DIM = 64
+# Arch v2 phase 1: bigger entity XF + Friendly/Enemy/Global fusion.
+XF_DIM = 96
 XF_HEADS = 4
-XF_LAYERS = 2
-XF_FF = 128
+XF_LAYERS = 3
+XF_FF = 256
+TOKEN_DIM = 128  # unit_mlp out / residual stream
+# Pools: friendly(mean||max) + enemy(mean||max) + global(mean) = 5 * TOKEN_DIM
+FUSION_IN = TOKEN_DIM * 5  # 640
+FUSION_HIDDEN = 256
+UNIT_VEC_DIM = 128  # GRU unit branch (keeps fused = ch+128+128)
 SCATTER_CH = 8
 UNIT_COND_DIM = 64
 QSA_DIM = 32
@@ -174,7 +179,7 @@ class AlphaLiteNet(nn.Module):
         self.unit_mlp = nn.Sequential(
             nn.Linear(UNIT_MLP_IN, 128), nn.ReLU(), nn.Linear(128, 128), nn.ReLU(),
         )
-        # Transformer de entidades: residual * scale, scale=0 → mean 922.
+        # Transformer de entidades (v2): residual * scale, scale=0 → identidad MLP.
         xf_layer = nn.TransformerEncoderLayer(
             d_model=XF_DIM, nhead=XF_HEADS, dim_feedforward=XF_FF,
             dropout=0.0, batch_first=True, norm_first=True,
@@ -184,12 +189,12 @@ class AlphaLiteNet(nn.Module):
             xf_layer, num_layers=XF_LAYERS, enable_nested_tensor=False)
         self.unit_xf_out = nn.Linear(XF_DIM, 128)
         self.unit_xf_scale = nn.Parameter(torch.zeros(1))
-        # Arch v1.1: GRU unit_vec = proj(own_mean || own_max || ene_mean).
-        # Mean solo aplastaba emergencias; max + enemy pool las hacen visibles.
+        # Arch v2: Friendly / Enemy / Global pools → Fusion MLP → GRU.
+        # Extiende v1.1 (own_mean||own_max||ene_mean) con ene_max + global_mean.
         self.unit_pool_proj = nn.Sequential(
-            nn.Linear(128 * 3, 128),
+            nn.Linear(FUSION_IN, FUSION_HIDDEN),
             nn.ReLU(),
-            nn.Linear(128, 128),
+            nn.Linear(FUSION_HIDDEN, UNIT_VEC_DIM),
         )
         # 0 = dense softmax (legacy). >0 = top-k sparse attn on entity XF
         # (Run46 inductive bias; state_dict unchanged — same MHA weights).
@@ -364,10 +369,11 @@ class AlphaLiteNet(nn.Module):
 
 
     def _unit_vec_for_gru(self, tokens, unit_valid, unit_own_mask=None):
-        """Resumen estrategico para la GRU: mean+max propias + mean enemigas.
+        """Friendly / Enemy / Global pools → Fusion MLP → unit_vec para la GRU.
 
-        tokens [B,U,128] post-XF. Enemigos = valid & ~own. Sin propias/enemigas
-        el max/mean correspondiente es 0 (no -1e9).
+        tokens [B,U,TOKEN_DIM] post-XF. Enemigos = valid & ~own.
+        Friendly = mean||max propias; Enemy = mean||max enemigas;
+        Global = mean de todos los tokens validos. Sin miembros, mean/max = 0.
         """
         own = unit_own_mask if unit_own_mask is not None else unit_valid
         own_b = own.bool()
@@ -375,8 +381,11 @@ class AlphaLiteNet(nn.Module):
         ene_b = valid_b & ~own_b
         own_f = own_b.float().unsqueeze(-1)
         ene_f = ene_b.float().unsqueeze(-1)
+        valid_f = valid_b.float().unsqueeze(-1)
 
         mean_own = (tokens * own_f).sum(1) / own_f.sum(1).clamp(min=1.0)
+        mean_ene = (tokens * ene_f).sum(1) / ene_f.sum(1).clamp(min=1.0)
+        mean_all = (tokens * valid_f).sum(1) / valid_f.sum(1).clamp(min=1.0)
 
         neg = tokens.new_full(tokens.shape, -1e9)
         tok_own = torch.where(own_b.unsqueeze(-1), tokens, neg)
@@ -384,11 +393,17 @@ class AlphaLiteNet(nn.Module):
         has_own = own_b.any(dim=-1)
         max_own = torch.where(has_own.unsqueeze(-1), max_own, torch.zeros_like(max_own))
 
-        mean_ene = (tokens * ene_f).sum(1) / ene_f.sum(1).clamp(min=1.0)
+        tok_ene = torch.where(ene_b.unsqueeze(-1), tokens, neg)
+        max_ene = tok_ene.max(dim=1).values
         has_ene = ene_b.any(dim=-1)
+        max_ene = torch.where(has_ene.unsqueeze(-1), max_ene, torch.zeros_like(max_ene))
         mean_ene = torch.where(has_ene.unsqueeze(-1), mean_ene, torch.zeros_like(mean_ene))
+        has_any = valid_b.any(dim=-1)
+        mean_all = torch.where(has_any.unsqueeze(-1), mean_all, torch.zeros_like(mean_all))
 
-        return self.unit_pool_proj(torch.cat([mean_own, max_own, mean_ene], dim=-1))
+        # cat: friendly(mean||max) || enemy(mean||max) || global(mean)
+        return self.unit_pool_proj(torch.cat(
+            [mean_own, max_own, mean_ene, max_ene, mean_all], dim=-1))
 
     def encode(self, spatial, scalars, unit_feats, unit_valid, hidden,
                unit_role_ids=None, unit_own_mask=None):
@@ -396,7 +411,7 @@ class AlphaLiteNet(nn.Module):
 
         Devuelve (fmap, feat_map_flat, new_hidden, tokens). tokens [B,U,128]
         alimentan dist_cell (Capa 2). feat_map_flat se conserva por firma.
-        GRU unit_vec: own_mean||own_max||ene_mean -> proj 128. El xf ve own++ene.
+        GRU unit_vec: Friendly||Enemy||Global -> Fusion MLP 128 (arch v2).
         """
         fmap = self._enc_spatial(self._coord_conv(spatial))
         feat_map_flat = fmap.flatten(1)
@@ -926,6 +941,70 @@ def cell_head_weight_shape(cell_head) -> tuple:
         if last is not None:
             return tuple(last.weight.shape)
     return ()
+
+
+
+def _soft_expand_tensor(old: torch.Tensor, want_shape: tuple) -> torch.Tensor | None:
+    """Copy overlapping prefix; zero-pad new rows/cols. None if rank mismatch."""
+    if tuple(old.shape) == tuple(want_shape):
+        return old
+    if old.dim() != len(want_shape):
+        return None
+    new = old.new_zeros(want_shape)
+    slices = tuple(slice(0, min(a, b)) for a, b in zip(old.shape, want_shape))
+    new[slices] = old[slices]
+    return new
+
+
+def adapt_v2_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
+    """Arch v1.1 -> v2: soft-expand XF / fusion when dims grow; else drop key.
+
+    - unit_xf_in/out + unit_xf.layers.*: pad overlapping weights (d=64->96,
+      FF 128->256, layer2 nace fresco si falta).
+    - unit_pool_proj: v1.1 era Linear(384->128); v2 Fusion(640->256->128).
+      Soft-copy overlapping friendly/ene_mean cols; ene_max+global nacen 0.
+    - Si un tensor no se puede adaptar, se elimina (clear failure -> missing
+      key en load_state_dict, init fresco). cell_head / scalar siguen en sus
+      adapt_* previos.
+    """
+    out = dict(raw)
+    # Meta key must not reach load_state_dict
+    out.pop("_adapt_v2_dropped", None)
+    target = net.state_dict()
+    # Rename legacy alias if ever present
+    for k in list(out.keys()):
+        if k.startswith("unit_fusion."):
+            alt = "unit_pool_proj." + k[len("unit_fusion."):]
+            if alt not in out:
+                out[alt] = out.pop(k)
+            else:
+                out.pop(k)
+
+    dropped = []
+    for key, want in target.items():
+        if not (key.startswith("unit_xf") or key.startswith("unit_pool_proj")):
+            continue
+        if key not in out:
+            continue
+        old = out[key]
+        if tuple(old.shape) == tuple(want.shape):
+            continue
+        expanded = _soft_expand_tensor(old, tuple(want.shape))
+        if expanded is None:
+            out.pop(key)
+            dropped.append(key)
+        else:
+            out[key] = expanded
+    for key in list(out.keys()):
+        if key.startswith("unit_xf") or key.startswith("unit_pool_proj"):
+            if key not in target:
+                out.pop(key)
+                dropped.append(key)
+    if dropped:
+        # Not a parameter — strip before load; caller may log via side channel
+        pass
+    out.pop("_adapt_v2_dropped", None)
+    return out
 
 
 def adapt_capa2_state_dict(net: AlphaLiteNet, raw: dict) -> dict:

@@ -402,10 +402,15 @@ def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False,
     dead policy keep the type-head pinned even after weights are replaced.
     """
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    from rl.network import adapt_capa2_state_dict, adapt_capa2c_state_dict, adapt_scalar_state_dict
+    from rl.network import (
+        adapt_capa2_state_dict, adapt_capa2c_state_dict,
+        adapt_scalar_state_dict, adapt_v2_state_dict,
+    )
     raw = ckpt["net"]
     adapted = adapt_scalar_state_dict(
-        net, adapt_capa2c_state_dict(net, adapt_capa2_state_dict(net, raw)))
+        net, adapt_v2_state_dict(
+            net, adapt_capa2c_state_dict(
+                net, adapt_capa2_state_dict(net, raw))))
     incompat = net.load_state_dict(adapted, strict=False)
     n_miss = len(incompat.missing_keys)
     n_unex = len(incompat.unexpected_keys)
@@ -421,8 +426,8 @@ def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False,
         or (bool(old_shape) and bool(new_shape) and old_shape != new_shape)
     )
     if n_miss or n_unex:
-        print(f"[ckpt] Capa 2c Net2Net missing={n_miss} unexpected={n_unex} "
-              f"(role_emb / mlp pad; tronco A)", flush=True)
+        print(f"[ckpt] Net2Net/adapt missing={n_miss} unexpected={n_unex} "
+              f"(v2 XF/fusion soft-pad; role_emb / scalar; tronco)", flush=True)
     do_reset = bool(reset_opt or ckpt.get("reset_opt") or arch_changed)
     if opt is not None and "opt" in ckpt and not do_reset:
         try:
