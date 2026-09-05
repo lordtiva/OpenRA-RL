@@ -402,13 +402,24 @@ def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False,
     dead policy keep the type-head pinned even after weights are replaced.
     """
     ckpt = torch.load(path, map_location="cpu", weights_only=False)
-    from rl.network import adapt_capa2_state_dict, adapt_capa2c_state_dict
+    from rl.network import adapt_capa2_state_dict, adapt_capa2c_state_dict, adapt_scalar_state_dict
     raw = ckpt["net"]
-    adapted = adapt_capa2c_state_dict(net, adapt_capa2_state_dict(net, raw))
+    adapted = adapt_scalar_state_dict(
+        net, adapt_capa2c_state_dict(net, adapt_capa2_state_dict(net, raw)))
     incompat = net.load_state_dict(adapted, strict=False)
     n_miss = len(incompat.missing_keys)
     n_unex = len(incompat.unexpected_keys)
-    arch_changed = n_miss > 0 or n_unex > 0 or raw.get("cell_head.weight", torch.empty(0)).shape != net.cell_head.weight.shape
+    # cell_head puede ser Conv2d (legacy) o Sequential (arch v1.1); no asumir .weight
+    from rl.network import cell_head_weight_shape
+    old_cell = raw.get("cell_head.weight")
+    if old_cell is None:
+        old_cell = raw.get("cell_head.2.weight")  # Sequential: ultimo conv
+    old_shape = tuple(old_cell.shape) if old_cell is not None else ()
+    new_shape = cell_head_weight_shape(net.cell_head)
+    arch_changed = (
+        n_miss > 0 or n_unex > 0
+        or (bool(old_shape) and bool(new_shape) and old_shape != new_shape)
+    )
     if n_miss or n_unex:
         print(f"[ckpt] Capa 2c Net2Net missing={n_miss} unexpected={n_unex} "
               f"(role_emb / mlp pad; tronco A)", flush=True)

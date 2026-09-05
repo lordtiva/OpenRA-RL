@@ -15,6 +15,7 @@ from rl.imitation import (
     balance_bc_samples,
     command_to_indices,
     lambda_bc_at,
+    merge_teacher_wins,
     pick_bc_command,
     sample_type_name,
 )
@@ -66,6 +67,7 @@ check("lambda start", abs(lambda_bc_at(100, 100, warmup=80) - 1.0) < 1e-9)
 check("lambda mid", abs(lambda_bc_at(140, 100, warmup=80) - 0.5) < 1e-9)
 check("lambda end", abs(lambda_bc_at(180, 100, warmup=80) - 0.0) < 1e-9)
 check("lambda after", abs(lambda_bc_at(200, 100, warmup=80) - 0.0) < 1e-9)
+check("lambda piso", abs(lambda_bc_at(200, 100, warmup=80, end=0.25) - 0.25) < 1e-9)
 
 cmds = [
     CommandModel(action=ActionType.GUARD, actor_id=1, target_actor_id=2),
@@ -167,9 +169,21 @@ check("trim echa el win largo primero",
       len(buf_t) == 80 and all(s["tag"][0] == "Sa" for s in buf_t.snapshot()))
 
 th = ScriptedTeacher()
+from rl.action_adapter import PACK_ARMY as _PACK
+
 check("teacher proc antes de barracks",
       th.BUILD_PRIORITY.index("proc") < th.BUILD_PRIORITY.index("barracks"))
-check("teacher army umbral > 6", th.INFANTRY_TRAIN_TARGET >= 16)
+check("teacher rush sin weap", "weap" not in th.BUILD_PRIORITY)
+check("teacher pack = PACK_ARMY", th.INFANTRY_TRAIN_TARGET == _PACK)
+check("teacher rush AM 8", th.RUSH_ATTACK_MOVE == 8)
+check("teacher 0 guards", th.GUARD_COUNT == 0)
+th.phase = "build_base"
+th._update_phase(_obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(1, "e1", 12, 16)],
+))
+check("barracks => train_army (no espera weap)", th.phase == "train_army")
 th.phase = "attack"
 obs_atk = _obs(
     cash=5000, harv=1,
@@ -180,6 +194,58 @@ obs_atk = _obs(
 prod_cmds = th._handle_production(obs_atk)
 check("teacher TRAIN en attack aunque ya hay 16+ e1",
       any(c.action == ActionType.TRAIN for c in prod_cmds))
+check("teacher no encola APC",
+      all(getattr(c, "item_type", "") != "apc" for c in prod_cmds))
+
+obs_fog = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 6)],
+)
+th.phase = "train_army"
+scout = th._handle_combat(obs_fog)
+check("sin pack no army_attack_move",
+      all(c.action != ActionType.ARMY_ATTACK_MOVE for c in scout))
+check("sin pack scoutea",
+      any(c.action == ActionType.ATTACK_MOVE for c in scout))
+obs_rush = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 9)],
+    enemy_bldgs=[_b("proc", 200, 80, 20)],
+)
+th.phase = "attack"
+rush = th._handle_combat(obs_rush)
+check("rush 8 no army_attack_move",
+      all(c.action != ActionType.ARMY_ATTACK_MOVE for c in rush))
+check("rush 8 mueve el blob",
+      sum(1 for c in rush if c.action == ActionType.ATTACK_MOVE) >= 8)
+dest = th._find_attack_target(obs_fog)
+check("dest es beacon no centro", dest == (95, 11))
+
+obs_pack = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 14)],
+)
+th.phase = "attack"
+push = th._handle_combat(obs_pack)
+check("con pack emite army_attack_move",
+      any(c.action == ActionType.ARMY_ATTACK_MOVE for c in push))
+am = next(c for c in push if c.action == ActionType.ARMY_ATTACK_MOVE)
+check("army va al beacon", (am.target_x, am.target_y) == (95, 11))
+
+obs_raid = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 14)],
+    enemies=[_u(99, "e1", 14, 16)],
+)
+peel = th._handle_combat(obs_raid)
+check("raid peel no yank de grupo",
+      all(c.action != ActionType.ARMY_ATTACK_MOVE for c in peel))
+check("raid peel attack_move",
+      any(c.action == ActionType.ATTACK_MOVE for c in peel))
 
 import torch
 from rl.action_adapter import TYPE_TO_IDX as _T
@@ -196,6 +262,28 @@ n_train = sum(1 for s in bal if sample_type_name(s) == "train")
 check("balance capea army", n_army == 40)
 check("balance conserva train", n_train == 12)
 check("balance no alarga", len(bal) == 52)
+
+win_s = [_step("train")] * 3
+lose_s = [_step("no_op")] * 5
+kept, meta = merge_teacher_wins([
+    (win_s, {"result": "win", "ticks": 20000}),
+    (lose_s, {"result": "lose", "ticks": 9000}),
+    (win_s, {"result": "win_early", "ticks": 15000}),
+])
+check("merge descarta lose", len(kept) == 6)
+check("merge cuenta 2 wins", meta["bc_n_win_eps"] == 2)
+check("merge n_eps 3", meta["bc_n_eps"] == 3)
+empty, meta0 = merge_teacher_wins([
+    (lose_s, {"result": "incomplete", "ticks": 52000}),
+])
+check("merge 0 si no hay win", empty == [] and meta0["bc_n_win_eps"] == 0)
+inc_kept, meta_i = merge_teacher_wins(
+    [(lose_s, {"result": "incomplete", "ticks": 52000}),
+     (win_s, {"result": "lose", "ticks": 9000})],
+    keep_incomplete=True,
+)
+check("bc-only guarda incomplete largo", len(inc_kept) == 5)
+check("bc-only sigue tirando lose", meta_i["bc_n_win_eps"] == 0)
 
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS"))
 sys.exit(0 if ok else 1)

@@ -87,7 +87,7 @@ def _preset_kwargs(preset: str) -> dict:
         # Run3 — Coloso con remate: v3 + gradiente ofensivo calibrado + full-stack infra
         # w_raze 1.0->2.0 (2x, no 3x para no tapar minería), w_timeout 0->1.0->6.0 (Run45: incomplete must lose to a failed push).
         # (rankea win > incomplete > lose sin reintroducir pesimismo).
-        # SCALAR 21 (military_ratio + tech_tier) y auto_support van por fuera
+        # SCALAR 25 (+ aoa force) ; auto_support OFF en este regimen
         # del preset pero se entrenan juntos en este run (congelado acá).
         return dict(
             w_kills=0.15, w_deaths=0.05, combat_scale=1000.0,
@@ -108,6 +108,9 @@ def _preset_kwargs(preset: str) -> dict:
                         # Run 8: naked 8k-tick death was -2.57, a failed fight
                         # ~-6. Extra -4 makes "deploy then sit" worse than playing.
                         w_no_econ_lose=4.0,
+                        # Run 48: AttackOrFlee edge — Strong + ejercito lejos de base
+                        # (no auto-support). Escala chica vs combate/raze.
+                        w_force_edge=0.5,
                     )
     raise ValueError(f"preset desconocido: {preset!r} (validos: {PRESETS})")
 
@@ -156,6 +159,7 @@ class ShapedReward:
         self.w_garrison = cfg.get("w_garrison", 0.0)
         self.w_naked_base = cfg.get("w_naked_base", 0.0)
         self.w_no_econ_lose = cfg.get("w_no_econ_lose", 0.0)
+        self.w_force_edge = cfg.get("w_force_edge", 0.0)
         self._first_ore_paid = False
         # en v2/v3/v4 el raze se paga por VALOR del global_summary (no counting)
         self._raze_by_value = preset in ("eradicate_v2", "eradicate_v3", "eradicate_v4")
@@ -189,6 +193,7 @@ class ShapedReward:
             "cancel_penalty": 0.0,
             "garrison": 0.0, "early_refinery": 0.0, "first_ore": 0.0,
             "no_econ_lose": 0.0,
+            "force_edge": 0.0,
         }
 
     def reset(self, obs):
@@ -269,6 +274,9 @@ class ShapedReward:
                 r_v2 += self._v3_econ(obs, gs, action_type, closing)
 
         r += r_v2
+
+        r_force = self._force_edge(obs)
+        r += r_force
 
         self._last_mil = mil
 
@@ -514,6 +522,20 @@ class ShapedReward:
             self.last_components["cancel_penalty"] += r_cancel
 
         return r_mining + r_defense_posture + r_produce + r_cancel
+
+
+    def _force_edge(self, obs) -> float:
+        """Reward chico si Strong (cost ratio > 1.1) y combate lejos de base.
+
+        Proxies de AttackOrFleeFuzzy / Rush. No auto-support: solo senal de
+        reward para que el policy use la ventaja en vez de turtlear.
+        """
+        if self.w_force_edge <= 0:
+            return 0.0
+        from rl.force_estimate import force_edge_reward
+        r = force_edge_reward(obs, self.w_force_edge)
+        self.last_components["force_edge"] += r
+        return r
 
     def _raze_delta(self, obs, mil) -> float:
         """Pago por edificio enemigo NETO destruido, tope por episodio.

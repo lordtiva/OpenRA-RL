@@ -28,7 +28,22 @@ Cuelgues — DOS orígenes distintos (no confundirlos):
      del log del contenedor y recrea el servicio 'openra-rl' solo.
 
 Uso:  .venv/Scripts/python.exe rl/auto_train.py
+      .venv/Scripts/python.exe rl/auto_train.py --scratch
+      .venv/Scripts/python.exe rl/auto_train.py --scratch --onboard
+      .venv/Scripts/python.exe rl/auto_train.py --onboard --onboard-rewind 24
+      .venv/Scripts/python.exe rl/auto_train.py --no-collapse
 Ctrl+C para parar todo.
+
+Flags del launcher (no van a rl.train):
+  --scratch       pesos random; ignora latest/seed
+  --onboard       curriculum A→B→C (SFT teacher vs beginner, PPO+BC beginner,
+                  PPO easy). Ver rl/docs/22-onboard.md.
+  --onboard-rewind N
+                  Una vez, en B: latest <- best/iterN, trunca metrics/race,
+                  pinnea BC start. Luego el launch es --onboard.
+  --collapse / --no-collapse
+                  watchdog COLAPSO (politica muerta) + SEQUIA wr20
+                  que restaura best.pt (default: --collapse).
 """
 import subprocess, sys, time, pathlib, signal, os, json, re, urllib.request, shutil
 
@@ -38,13 +53,19 @@ if str(ROOT) not in sys.path:
 from rl.best_ckpt import (
     DROUGHT_STREAK, dead_policy_reason, is_dead_policy, drought_should_restore,
 )
+from rl import onboard as ob
 CKPT_DIR = ROOT / "rl" / "ckpts"
 METRICS = CKPT_DIR / "metrics.jsonl"
+CURRICULUM = CKPT_DIR / "curriculum.json"
+# Filled in main() when --onboard. launch_train / recover lo leen.
+_onboard = None
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
 LOGFILE = ROOT / "rl" / "auto_train.log"
 # Capa 1: 4 eps + teacher sequential + PPO+BC+SIL. El primer iter post-launch
 # ronda 5-8 min. 300s mataba el update (GPU 30%) antes de escribir metrics.
 THRESHOLD_S = 540
+# Fase A: 4 teacher + 4 eval alumno. Un iter puede pasar 12-15 min.
+ONBOARD_A_THRESHOLD_S = 1200
 CHECK_EVERY_S = 15
 GPU_LOW_THRESHOLD = 15  # GPU >= esto = collect/update en vuelo, no es cuelgue
 
@@ -80,7 +101,7 @@ DAEMONS = (
 TRAIN_ARGS = [
     sys.executable, "-m", "rl.train",
     "--url", "http://localhost:8000",
-    "--iters", "200",
+    "--iters", "400",
     "--concurrency", "4",
     "--max-steps", "1000",
     "--macro-ticks", "50",
@@ -94,18 +115,24 @@ TRAIN_ARGS = [
     "--qsa-block", "8",
     "--batch-size", "128",
     "--scenario", "a_short",
-    "--bot-type", "medium",
-    #"--pfsp",
-    #"--pfsp-rl",
-    #"--pfsp-pool", "rl",
-    #"--pfsp-anchor-prob", "0.5",
+    "--bot-type", "easy",
+    "--pfsp",
+    "--pfsp-rl",
+    "--pfsp-pool", "rl",
+    "--pfsp-anchor-prob", "0.5",
     "--shaper-preset", "eradicate_v4",
     "--auto-support",
     "--no-war-nudge",
-    # BC off: pesos ya maduros (best-1141 / best@79). Con bc-start-iter=1 el teacher
-    # volvería a lambda=1 por ~80 iters y pisa lo aprendido. SIL sí queda.
-    #"--sil",
-    #"--lambda-sil", "0.5",
+    # Scratch / Capa 1: BC activo las primeras --bc-warmup iters (lambda 1->0),
+    # despues queda SIL. bc-start-iter=1 (no uses 0: train.py trata 0 como
+    # unset y en un resume reiniciaria el warmup al start_iter actual).
+    #"--bc",
+    #"--bc-warmup", "100",
+    #"--bc-start-iter", "1",
+    "--sil",
+    "--lambda-sil", "0.5",
+    # Vocab de produccion: ids fijos de roles (scratch / agnostico a faccion).
+    "--roles-vocab",
     "--gamma", "0.995",
     "--ckpt-dir", "rl/ckpts",
     "--metrics", "rl/ckpts/metrics.jsonl",
@@ -132,17 +159,41 @@ def live_game_urls() -> str:
     return ",".join(ok) if ok else GAME_URLS[0]
 
 
+def hang_threshold() -> int:
+    # A: teacher SFT. B: 4 PPO + 2 teacher games; primer iter post-launch
+    # puede pasar 540s (THRESHOLD_S) antes de escribir metrics.
+    if _onboard and _onboard.get("phase") in ("A", "B"):
+        return ONBOARD_A_THRESHOLD_S
+    return THRESHOLD_S
+
+
+def find_latest_pt() -> str | None:
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
+    latest = CKPT_DIR / "latest.pt"
+    if latest.exists():
+        return str(latest)
+    return None
+
+
 def find_resume() -> str | None:
     """Resume latest.pt de la raíz de ckpts (lo que mira el dashboard).
 
     El probe_short quedó archivado en 'Run probe_short-scratch'. Si la raíz
     no tiene latest.pt, cae a Run3. glob de iter*.pt es solo la raíz, no
     las subcarpetas de runs viejos.
+    Onboard fase A (primer launch) = tabula rasa, sin caer a Run3.
     """
     CKPT_DIR.mkdir(parents=True, exist_ok=True)
-    latest = CKPT_DIR / "latest.pt"
-    if latest.exists():
-        return str(latest)
+    if _onboard is not None:
+        if not ob.should_resume(_onboard):
+            return None
+        return find_latest_pt()
+    # FORCE_SCRATCH=1 o --scratch en argv: pesos aleatorios, ignora latest/seed.
+    if os.environ.get("FORCE_SCRATCH", "").strip() in ("1", "true", "yes") or "--scratch" in sys.argv:
+        return None
+    hit = find_latest_pt()
+    if hit:
+        return hit
     pts = sorted(CKPT_DIR.glob("iter*.pt"),
                  key=lambda p: p.stat().st_mtime, reverse=True)
     if pts:
@@ -386,14 +437,75 @@ def recover_from_docker_hang(proc) -> subprocess.Popen:
     time.sleep(2)
     return launch_train()
 
+def _after_onboard_launch():
+    """Primer launch de A ya no es scratch; primer launch de C ya hizo --reset-opt."""
+    global _onboard
+    if not _onboard:
+        return
+    dirty = False
+    if _onboard.get("phase") == "A" and not _onboard.get("a_launched"):
+        _onboard["a_launched"] = True
+        dirty = True
+    if _onboard.get("phase") == "C" and not _onboard.get("c_reset_opt_done"):
+        _onboard["c_reset_opt_done"] = True
+        dirty = True
+    if dirty:
+        ob.save_curriculum(CURRICULUM, _onboard)
+
+
+def last_iter_from_metrics() -> int:
+    last_iter = 0
+    try:
+        with open(METRICS, encoding="utf-8") as _fm:
+            for _line in _fm:
+                try:
+                    _j = json.loads(_line)
+                except Exception:
+                    continue
+                if isinstance(_j.get("iter"), int):
+                    last_iter = max(last_iter, _j["iter"])
+    except OSError:
+        pass
+    return last_iter
+
+
+def try_promote(last_iter: int) -> str | None:
+    """Avanza A→B→C→done. Devuelve la fase nueva, o None."""
+    global _onboard
+    if not _onboard:
+        return None
+    rows = last_metrics_rows(800)
+    nxt = ob.should_promote(_onboard, rows, last_iter, games_per_iter=4)
+    if not nxt:
+        return None
+    old = _onboard.get("phase")
+    log(f"onboard PROMOTE {old} -> {nxt} @ iter {last_iter}")
+    _onboard["phase"] = nxt
+    _onboard["phase_started_iter"] = int(last_iter)
+    if nxt == "B":
+        ob.append_era_reset(METRICS, "onboard phase B beginner PPO+BC", "beginner")
+    elif nxt == "C":
+        _onboard["c_reset_opt_done"] = False
+        ob.append_era_reset(METRICS, "onboard phase C easy", "easy")
+    ob.save_curriculum(CURRICULUM, _onboard)
+    return nxt
+
+
 def launch_train(extra_args=None) -> subprocess.Popen:
     urls = live_game_urls()
     n_srv = urls.count("http")
-    args = list(TRAIN_ARGS)
+    extra_args = list(extra_args or [])
+    if _onboard is not None:
+        args = ob.build_train_argv(list(TRAIN_ARGS), _onboard["phase"], _onboard)
+    else:
+        args = list(TRAIN_ARGS)
     args[args.index("--url") + 1] = urls
     log(f"servidores de juego: {urls}  ({n_srv} daemon(s); 2do = compose scale openra-rl-2)")
     resume = find_resume()
-    extra_args = list(extra_args or [])
+    iters_s = args[args.index("--iters") + 1] if "--iters" in args else "?"
+    preset = (TRAIN_ARGS[TRAIN_ARGS.index("--shaper-preset") + 1]
+              if "--shaper-preset" in TRAIN_ARGS else "?")
+    phase_tag = (f" onboard={_onboard.get('phase')}" if _onboard else "")
     if resume and pathlib.Path(resume).exists():
         cmd = args + ["--resume", resume] + extra_args
         rel = pathlib.Path(resume)
@@ -402,17 +514,124 @@ def launch_train(extra_args=None) -> subprocess.Popen:
         except Exception:
             pass
         extra_tag = (" " + " ".join(extra_args)) if extra_args else ""
-        log(f"LANZANDO train --resume {rel}{extra_tag}  (iters {TRAIN_ARGS[TRAIN_ARGS.index('--iters')+1]}, preset {TRAIN_ARGS[TRAIN_ARGS.index('--shaper-preset')+1]})")
+        log(f"LANZANDO train --resume {rel}{extra_tag}{phase_tag}  "
+            f"(iters {iters_s}, preset {preset})")
     else:
         cmd = args + extra_args
-        log(f"LANZANDO train FROM SCRATCH (pesos aleatorios, sin --resume, iters {TRAIN_ARGS[TRAIN_ARGS.index('--iters')+1]})")
-    # cwd=ROOT para que los paths relativos funcionen
+        log(f"LANZANDO train FROM SCRATCH (pesos aleatorios, sin --resume, "
+            f"iters {iters_s}){phase_tag}")
     env = os.environ.copy()
     env["PYTHONPATH"] = ""
-    return subprocess.Popen(cmd, cwd=str(ROOT), env=env)
+    proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env)
+    _after_onboard_launch()
+    return proc
+
+def parse_auto_args(argv=None):
+    """Flags del launcher auto_train (no se reenvian a rl.train)."""
+    import argparse
+    ap = argparse.ArgumentParser(
+        description="Lanza rl.train y lo vigila (cuelgue + colapso opcional).")
+    ap.add_argument(
+        "--scratch", action="store_true",
+        help="Pesos aleatorios: no resume latest/seed.")
+    ap.add_argument(
+        "--onboard", action="store_true",
+        help="Curriculum A→B→C para clonar el repo sin .pt. "
+             "Ver rl/docs/22-onboard.md.")
+    ap.add_argument("--onboard-sft-iters", type=int, default=20,
+                    help="Iters de SFT (fase A).")
+    ap.add_argument("--onboard-promote-wr20", type=float, default=0.50,
+                    help="wr20 vs beginner para pasar a easy.")
+    ap.add_argument("--onboard-done-wr20", type=float, default=0.45,
+                    help="wr20 vs easy para marcar DONE.")
+    ap.add_argument("--onboard-streak", type=int, default=10,
+                    help="Iters consecutivos con wr20 sobre el umbral.")
+    ap.add_argument("--onboard-min-iters", type=int, default=20,
+                    help="Iters minimos en B/C antes de promover.")
+    ap.add_argument(
+        "--onboard-rewind", type=int, default=None, metavar="N",
+        help="Fase B: copia best/iterN -> latest, trunca metrics y "
+             "economy_race a iter<=N, pinnea --bc-start-iter=N. Una vez.")
+    ap.add_argument(
+        "--collapse", action=argparse.BooleanOptionalAction, default=True,
+        help="Watchdog de politica muerta / sequia wr20 que restaura best.pt "
+             "(default: on). Usa --no-collapse para desactivarlo.")
+    return ap.parse_args(argv)
+
+
+def _init_onboard(args) -> None:
+    """Carga o crea curriculum.json. --scratch --onboard reinicia en A."""
+    global _onboard
+    if not args.onboard:
+        _onboard = None
+        return
+    overrides = {
+        "sft_iters": int(args.onboard_sft_iters),
+        "promote_wr20": float(args.onboard_promote_wr20),
+        "done_wr20": float(args.onboard_done_wr20),
+        "streak": int(args.onboard_streak),
+        "min_iters": int(args.onboard_min_iters),
+    }
+    existing = ob.load_curriculum(CURRICULUM)
+    if existing and not args.scratch:
+        _onboard = existing
+        for k, v in overrides.items():
+            _onboard[k] = v
+        # Speed knobs: take current defaults so a resume picks up
+        # parallel teacher / B mixed-BC without --scratch.
+        for k in ("bc_games", "a_macro_ticks", "a_max_steps", "a_k_skip",
+                  "a_eval_games",
+                  "b_bc_games", "b_bc_epochs", "b_bc_warmup"):
+            _onboard[k] = ob.DEFAULTS[k]
+        if args.onboard_rewind is not None:
+            keep = int(args.onboard_rewind)
+            log(f"onboard REWIND a iter {keep}")
+            try:
+                _onboard, info = ob.rewind_onboard(CKPT_DIR, keep, cfg=_onboard)
+            except (FileNotFoundError, ValueError) as e:
+                log(f"FAIL: --onboard-rewind {keep}: {e}")
+                sys.exit(2)
+            log(f"  latest <- {info['src']}  metrics_kept={info['metrics_kept']} "
+                f"race_kept={info['race_kept']}  "
+                f"b_bc_start_iter={_onboard.get('b_bc_start_iter')}")
+        else:
+            ob.save_curriculum(CURRICULUM, _onboard)
+        log(f"onboard resume phase={_onboard['phase']} "
+            f"(sft_iters={_onboard['sft_iters']} "
+            f"promote={_onboard['promote_wr20']} "
+            f"done={_onboard['done_wr20']})")
+        return
+    if args.onboard_rewind is not None:
+        log("FAIL: --onboard-rewind necesita curriculum.json en fase B "
+            "(no uses --scratch).")
+        sys.exit(2)
+    if existing and args.scratch:
+        log("onboard --scratch: reinicia curriculum en fase A")
+    elif (CKPT_DIR / "latest.pt").exists() and not args.scratch:
+        log("FAIL: --onboard sin curriculum.json y con latest.pt. "
+            "Para arrancar de 0: --scratch --onboard "
+            "(archivá el run anterior antes).")
+        sys.exit(2)
+    _onboard = ob.new_curriculum(overrides)
+    ob.save_curriculum(CURRICULUM, _onboard)
+    ob.append_era_reset(METRICS, "onboard phase A (SFT teacher)", "beginner")
+    log(f"onboard START phase A — SFT ScriptedTeacher vs beginner, "
+        f"{_onboard['sft_iters']} iters, sin PPO")
+
 
 def main():
-    log(f"auto_train iniciado — threshold {THRESHOLD_S}s, check {CHECK_EVERY_S}s (GPU baja en collect NO mata)")
+    global _onboard
+    args = parse_auto_args()
+    _init_onboard(args)
+    if args.scratch and not args.onboard:
+        os.environ["FORCE_SCRATCH"] = "1"
+    collapse_watch = bool(args.collapse)
+    _cw = "ON" if collapse_watch else "OFF"
+    _sc = "yes" if args.scratch else "no"
+    _ob = _onboard.get("phase") if _onboard else "off"
+    log(f"auto_train collapse_watch={_cw} scratch={_sc} onboard={_ob}")
+    log(f"auto_train iniciado — threshold {hang_threshold()}s, "
+        f"check {CHECK_EVERY_S}s (GPU baja en collect NO mata)")
     log(f"métricas={METRICS}  log={LOGFILE}  docker_svc=openra-rl[+openra-rl-2 si up]")
     if docker_available():
         log("docker disponible — se vigilará también el cuelgue del daemon")
@@ -432,21 +651,42 @@ def main():
             # ¿train sigue vivo?
             poll = proc.poll() if proc else None
             if poll is not None:
+                last_iter = last_iter_from_metrics()
+                if _onboard:
+                    nxt = try_promote(last_iter)
+                    if nxt == "done":
+                        log("ONBOARD DONE — wr20 vs easy en umbral. "
+                            "No relanza. Cerrá esta ventana.")
+                        sys.exit(0)
+                    if nxt:
+                        log(f"onboard relanza fase {nxt}")
+                        time.sleep(2)
+                        proc = launch_train()
+                        last_mtime = metrics_mtime()
+                        last_progress = time.time()
+                        continue
+                    if _onboard.get("phase") == "done":
+                        log("ONBOARD DONE. Cerrá esta ventana.")
+                        sys.exit(0)
+                    # Crash o A todavía corta: relanzar la misma fase.
+                    # No usar last_iter global vs --iters (metrics sucias de
+                    # otro run dirían "completo" en el primer check).
+                    log(f"train terminó con exit {poll} — relanzando onboard "
+                        f"fase {_onboard.get('phase')} en 5s")
+                    time.sleep(5)
+                    proc = launch_train()
+                    last_mtime = metrics_mtime()
+                    last_progress = time.time()
+                    continue
                 # ¿llegamos a --iters target? No relanzar infinito.
                 try:
                     target = int(TRAIN_ARGS[TRAIN_ARGS.index('--iters')+1])
-                    last_iter = 0
-                    with open(METRICS, encoding="utf-8") as _fm:
-                        for _line in _fm:
-                            try: _j = json.loads(_line)
-                            except: continue
-                            if isinstance(_j.get("iter"), int):
-                                last_iter = max(last_iter, _j["iter"])
                     if last_iter >= target:
                         log(f"train terminó con exit {poll} — iter {last_iter} >= {target}, COMPLETADO. No relanza.")
                         log("auto_train finalizado correctamente. Cerrá esta ventana.")
                         sys.exit(0)
-                except Exception: pass
+                except Exception:
+                    pass
                 log(f"train terminó con exit {poll} — relanzando en 5s")
                 time.sleep(5)
                 proc = launch_train()
@@ -481,6 +721,30 @@ def main():
                 last_mtime = mtime
                 last_progress = time.time()
                 gpu_low_streak = 0
+                if _onboard:
+                    nxt = try_promote(int(n))
+                    if nxt == "done":
+                        log("ONBOARD DONE — wr20 vs easy en umbral. "
+                            "Matando train y saliendo.")
+                        kill_train(proc)
+                        sys.exit(0)
+                    if nxt:
+                        log(f"onboard relanza fase {nxt}")
+                        kill_train(proc)
+                        time.sleep(2)
+                        proc = launch_train()
+                        last_mtime = metrics_mtime()
+                        last_progress = time.time()
+                        gpu_low_streak = 0
+                        continue
+                collapse_now = collapse_watch
+                # A: no wr. B: best@24 iwr=0.5 congela el puntero y
+                # deploy-noop cada ~20 iters restaura ese lucky 2/4
+                # (loop 52/70/90/129/156). C ya puede usar collapse.
+                if _onboard and _onboard.get("phase") in ("A", "B"):
+                    collapse_now = False
+                if not collapse_now:
+                    continue
                 rows_tail = last_metrics_rows(max(COLLAPSE_STREAK, DROUGHT_STREAK))
                 rows_era = last_metrics_rows(400)
                 tail = rows_tail[-COLLAPSE_STREAK:] if len(rows_tail) >= COLLAPSE_STREAK else []
@@ -518,7 +782,8 @@ def main():
                 last_progress = time.time()
                 gpu_low_streak = 0
                 continue
-            if idle >= THRESHOLD_S:
+            thr = hang_threshold()
+            if idle >= thr:
                 if gpu is not None and gpu >= GPU_LOW_THRESHOLD:
                     # Update/inferencia en vuelo: el jsonl se escribe al FINAL
                     # del iter. Matar acá era el loop 636 (teacher 623->135 y
@@ -526,7 +791,7 @@ def main():
                     log(f"en vuelo — idle {idle:.0f}s pero GPU {gpu}%, no mato")
                     last_progress = time.time()
                     continue
-                log(f"CUELGUE — idle {idle:.0f}s >= {THRESHOLD_S}s{gpu_tag} markers={score}")
+                log(f"CUELGUE — idle {idle:.0f}s >= {thr}s{gpu_tag} markers={score}")
                 if score >= 1:
                     log("cuelgue es del daemon Docker (no del train) — recreando contenedor")
                     proc = recover_from_docker_hang(proc)
@@ -540,7 +805,7 @@ def main():
                 gpu_low_streak = 0
             else:
                 extra = f" markers={score}" if score else ""
-                log(f"esperando — idle {idle:.0f}s / {THRESHOLD_S}s{gpu_tag}{extra}")
+                log(f"esperando — idle {idle:.0f}s / {hang_threshold()}s{gpu_tag}{extra}")
     except KeyboardInterrupt:
         log("Ctrl+C — terminando train y saliendo")
         if proc and proc.poll() is None:

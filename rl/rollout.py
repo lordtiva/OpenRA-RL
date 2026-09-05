@@ -67,6 +67,51 @@ def _batch_of(obs, vocab, device):
     }, aidx
 
 
+
+def _noop_action():
+    return OpenRAAction(commands=[CommandModel(action=ActionType.NO_OP)])
+
+
+def _update_map_dims_lock(cur_dims, dims_hist, seen_order, locked, obs=None):
+    """Lock real map HxW; do not record shell-map sizes into the traj.
+
+    OpenRA emits obs on the shell map (different MapSize) before the scenario
+    map loads. Those tensors cannot batch with the real map; train.py used to
+    majority-filter them. Skip recording until HxW is locked to the game map.
+
+    Returns (locked_dims, should_record, switched).
+    switched=True when lock moves to a new size (caller should reset GRU).
+    """
+    switched = False
+    if cur_dims not in dims_hist:
+        seen_order.append(cur_dims)
+    dims_hist[cur_dims] = dims_hist.get(cur_dims, 0) + 1
+
+    tick = int(getattr(obs, "tick", 0) or 0) if obs is not None else 0
+    n_b = len(getattr(obs, "buildings", None) or []) if obs is not None else 0
+    game_started = tick > 0 or n_b > 0
+    name = str(getattr(getattr(obs, "map_info", None), "map_name", "") or "").lower()
+    looks_shell = "shell" in name
+
+    if locked is None:
+        if looks_shell:
+            pass  # never lock shell by name
+        elif len(seen_order) >= 2:
+            locked = seen_order[-1]  # shell -> game
+            switched = True
+        elif game_started:
+            # Same HxW from the start and the match already ticks/has buildings
+            locked = cur_dims
+    elif cur_dims != locked and not looks_shell:
+        # Locked shell by mistake, or late map swap: prefer the newest non-shell
+        if len(seen_order) >= 2 and cur_dims == seen_order[-1]:
+            locked = cur_dims
+            switched = True
+
+    record = locked is not None and cur_dims == locked and not looks_shell
+    return locked, record, switched
+
+
 async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                               k_skip: int = 8, max_steps: int = 4000,
                               temperature: float = 1.0,
@@ -104,9 +149,10 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     t0 = time.time()
     pending_cmd = None   # comando re-aplicado durante el frame-skip
     pending_sample = None
-    ep_dims = None       # dims del mapa del episodio (las primeras obs pueden
-                         # venir con dims del shell map mientras inicializa)
-    dims_hist = {}       # histograma de dims vistos; la moda = mapa confiable
+    ep_dims = None       # dims locked del mapa de juego (no shell)
+    dims_hist = {}       # histograma de dims vistos
+    dims_seen_order = [] # orden de primera aparicion (shell suele ser 1ro)
+    map_dims_locked = None
     if shaper_preset not in PRESETS:
         raise ValueError(f"shaper_preset desconocido: {shaper_preset!r}")
     shaper = ShapedReward(preset=shaper_preset)
@@ -133,157 +179,171 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     own_n_buildings = 0
     ene_n_buildings = 0
     last_push_cell = None  # (x, y) del último army/attack_move
+    atype = "no_op"  # ultimo tipo efectivo; NO_OP en shell / pre-lock
 
     for step in range(max_steps):
-        # Decidir SIEMPRE cada k_skip (o cada iteración en modo macro):
-        # las obs iniciales pueden traer dims del shell map; esas muestras
-        # basura las descarta el filtro de dims mayoritario en train.py.
+        # Decidir SIEMPRE cada k_skip (o cada iteracion en modo macro).
+        # Obs del shell map (otro MapSize) no se graban ni se encodean:
+        # NO_OP hasta lockear HxW del mapa de juego.
         can_decide = use_macro or step % k_skip == 0
 
         if can_decide:
-            batch, aidx = _batch_of(obs, vocab, device)
-            cur_dims = (obs.map_info.height, obs.map_info.width)
-            dims_hist[cur_dims] = dims_hist.get(cur_dims, 0) + 1
-            ep_dims = max(dims_hist, key=dims_hist.get)  # moda = mapa real
-            h_in = hidden.detach().clone()
-            had_item = aidx.item_mask.any().view(1).to(device)
-            if teacher is not None:
-                with torch.no_grad():
-                    _fmap, _, hidden, _tok = net.encode(
-                        batch["spatial"], batch["scalars"],
-                        batch["unit_feats"], batch["unit_valid"], hidden,
-                        unit_role_ids=batch.get("unit_role_ids"),
-                        unit_own_mask=batch.get("unit_own_mask"))
-                    hidden = hidden.detach()
-                    value_t = net.value_head(hidden).squeeze(-1)
-                raw = teacher.decide(obs)
-                primary = pick_bc_command(raw.commands)
-                t0, u0, c0, i0 = command_to_indices(obs, primary, aidx)
-                action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
-                    obs, t0, u0, c0, i0, aidx)
-                extras = [c for c in (raw.commands or []) if c is not primary]
-                action.commands.extend(extras)
-                sampled = (t0, u0, i0, c0)
-                out_type = t0
-                out_unit = u0
-                out_item = i0
-                out_cell = c0
-                out_value = float(value_t.item())
-                cell_t = torch.tensor([int(eff_c)], device=device)
-                with torch.no_grad():
-                    log_prob, _, _ = net.evaluate_actions(
-                        batch, h_in, {
-                            "type": torch.tensor([eff_t], device=device),
-                            "unit_slot": torch.tensor([eff_u], device=device),
-                            "cell_flat": cell_t,
-                            "item_slot": torch.tensor([eff_i], device=device),
-                            "had_item": had_item,
-                        })
+            cur_dims = (int(obs.map_info.height or 1), int(obs.map_info.width or 1))
+            map_dims_locked, record_sample, dims_switched = _update_map_dims_lock(
+                cur_dims, dims_hist, dims_seen_order, map_dims_locked, obs=obs)
+            if map_dims_locked is not None:
+                ep_dims = map_dims_locked
+            # Shell -> real map: drop GRU state baked on the wrong HxW.
+            if dims_switched:
+                hidden = torch.zeros(1, HIDDEN_DIM, device=device)
+                if opponent_hidden is not None:
+                    opponent_hidden = torch.zeros(1, HIDDEN_DIM, device=device)
+            if not record_sample:
+                # Avanzar env sin meter tensors del shell (u otro HxW) al traj.
+                pending_cmd = _noop_action()
+                pending_sample = None
+                atype = "no_op"
             else:
-                out = net.act(batch, hidden, temperature=temperature)
-                hidden = out["hidden"].detach()
-                action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
-                    obs, int(out["type"]), int(out["unit_slot"]),
-                    int(out["cell_flat"]), int(out["item_slot"]), aidx,
-                )
-                sampled = (int(out["type"]), int(out["unit_slot"]),
-                           int(out["item_slot"]), int(out["cell_flat"]))
-                out_type = int(out["type"])
-                out_unit = int(out["unit_slot"])
-                out_item = int(out["item_slot"])
-                out_cell = int(out["cell_flat"])
-                out_value = float(out["value"].item())
-                log_prob = out["log_prob"]
-                cell_t = out["cell_flat"]
-            # Crédito de dest (Capa 0/1, no Capa 2): army/attack_move entra al
-            # buffer con el dest de auto_support, no el sample en casa (Ch6).
-            # Mutar el comando + cell_flat; F1 abajo recálcula log π.
-            if auto_support:
-                new_c, _dest_xy = apply_dest_credit(
-                    obs, action, ACTION_TYPES[eff_t], int(eff_c), aidx,
-                    last_push=last_push_cell)
-                if int(new_c) != int(eff_c):
-                    eff_c = int(new_c)
+                batch, aidx = _batch_of(obs, vocab, device)
+                h_in = hidden.detach().clone()
+                had_item = aidx.item_mask.any().view(1).to(device)
+                if teacher is not None:
+                    with torch.no_grad():
+                        _fmap, _, hidden, _tok = net.encode(
+                            batch["spatial"], batch["scalars"],
+                            batch["unit_feats"], batch["unit_valid"], hidden,
+                            unit_role_ids=batch.get("unit_role_ids"),
+                            unit_own_mask=batch.get("unit_own_mask"))
+                        hidden = hidden.detach()
+                        value_t = net.value_head(hidden).squeeze(-1)
+                    raw = teacher.decide(obs)
+                    primary = pick_bc_command(raw.commands)
+                    t0, u0, c0, i0 = command_to_indices(obs, primary, aidx)
+                    action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
+                        obs, t0, u0, c0, i0, aidx)
+                    extras = [c for c in (raw.commands or []) if c is not primary]
+                    action.commands.extend(extras)
+                    sampled = (t0, u0, i0, c0)
+                    out_type = t0
+                    out_unit = u0
+                    out_item = i0
+                    out_cell = c0
+                    out_value = float(value_t.item())
                     cell_t = torch.tensor([int(eff_c)], device=device)
-            # F1 coerción COMPLETA (auditoría 2026-08-24): si una corrección
-            # de seguridad MUTÓ la acción, recalcular log π(a_ejecutada|s)
-            # con h_in — la MISMA semilla de hidden con la que se muestreó —
-            # y guardar en el buffer los ÍNDICES EFECTIVOS.
-            # La versión anterior tenía 3 bugs: (1) recalculaba con hidden
-            # post-act (otra distribución temporal), (2) guardaba los índices
-            # MUESTREADOS junto al log_prob efectivo (el ratio de PPO
-            # comparaba acciones distintas), (3) solo cubría mutaciones con
-            # ítem (attack→attack_move, harvest, deploy quedaban fuera).
-            effective = (eff_t, eff_u, eff_i, int(eff_c))
-            if int(cell_t) != int(eff_c):
-                cell_t = torch.tensor([int(eff_c)], device=device)
-            if sampled != effective:
-                with torch.no_grad():
-                    re_lp, _, _ = net.evaluate_actions(
-                        batch, h_in, {
-                            "type": torch.tensor([eff_t], device=device),
-                            "unit_slot": torch.tensor([eff_u], device=device),
-                            "cell_flat": cell_t if torch.is_tensor(cell_t) else
-                            torch.tensor([int(eff_c)], device=device),
-                            "item_slot": torch.tensor([eff_i], device=device),
-                            "had_item": had_item,
-                        })
-                    log_prob = re_lp
-            # Histograma de tipos de acción EFECTIVOS (traduce la política:
-            # train/no_op vs el remate army_attack_move que nunca usa).
-            atype = ACTION_TYPES[eff_t]
-            action_counts[atype] = action_counts.get(atype, 0) + 1
-            if telemetry is not None:
-                telemetry.append({
-                    "step": step,
-                    "tick": obs.tick,
-                    "type": ACTION_TYPES[int(out_type)],
-                    "unit_id": (aidx.unit_ids[int(out_unit)]
-                                if int(out_unit) < len(aidx.unit_ids)
-                                else None),
-                    "cell": [int(out_cell) % aidx.w,
-                             int(out_cell) // aidx.w],
-                    "item": (aidx.items[int(out_item)]
-                             if int(out_item) < len(aidx.items)
-                             else None),
-                    "n_units": len(obs.units),
-                    "cash": obs.economy.cash,
-                })
-            # Clamp de coordenadas al mapa real (la obs puede ser del shell)
-            for c in action.commands:
-                if c.target_x >= ep_dims[1] or c.target_y >= ep_dims[0]:
-                    c.target_x = min(c.target_x, ep_dims[1] - 1)
-                    c.target_y = min(c.target_y, ep_dims[0] - 1)
-            # Destino de push vivo: si esta decisión fue army/attack_move,
-            # los ociosos de los próximos bloques siguen hacia esa celda.
-            if atype in ("army_attack_move", "attack_move") and action.commands:
-                c0 = action.commands[0]
-                if getattr(c0, "target_x", None) is not None:
-                    last_push_cell = (int(c0.target_x), int(c0.target_y))
-            # Pilar B: autonomía de soporte (0 decisiones, gratis para PPO)
-            if auto_support:
-                for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx, war_nudge=war_nudge):
-                    action.commands.append(cmd)
-            pending_cmd = action
-            # F1: al buffer van los ÍNDICES EFECTIVOS (los de la acción que
-            # realmente se ejecutó), emparejados con SU log_prob. El ratio de
-            # PPO compara así π_nuevo(a_ejecutada) / π_viejo(a_ejecutada).
-            pending_sample = {
-                "batch": {k: v.cpu() for k, v in batch.items()},
-                "action": {
-                    "type": torch.tensor([effective[0]]),
-                    "unit_slot": torch.tensor([effective[1]]),
-                    "cell_flat": (cell_t.detach().cpu() if torch.is_tensor(cell_t)
-                                  else torch.tensor([int(eff_c)])),
-                    "item_slot": torch.tensor([effective[2]]),
-                    "had_item": had_item.cpu(),
-                    # CONGELADOS: la referencia contra la que PPO mide el drift
-                    "log_prob": log_prob.detach().cpu(),
-                },
-                "reward": 0.0,
-                "value_pred": out_value,
-                "h_in": h_in.cpu(),
-            }
+                    with torch.no_grad():
+                        log_prob, _, _ = net.evaluate_actions(
+                            batch, h_in, {
+                                "type": torch.tensor([eff_t], device=device),
+                                "unit_slot": torch.tensor([eff_u], device=device),
+                                "cell_flat": cell_t,
+                                "item_slot": torch.tensor([eff_i], device=device),
+                                "had_item": had_item,
+                            })
+                else:
+                    out = net.act(batch, hidden, temperature=temperature)
+                    hidden = out["hidden"].detach()
+                    action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
+                        obs, int(out["type"]), int(out["unit_slot"]),
+                        int(out["cell_flat"]), int(out["item_slot"]), aidx,
+                    )
+                    sampled = (int(out["type"]), int(out["unit_slot"]),
+                               int(out["item_slot"]), int(out["cell_flat"]))
+                    out_type = int(out["type"])
+                    out_unit = int(out["unit_slot"])
+                    out_item = int(out["item_slot"])
+                    out_cell = int(out["cell_flat"])
+                    out_value = float(out["value"].item())
+                    log_prob = out["log_prob"]
+                    cell_t = out["cell_flat"]
+                # Crédito de dest (Capa 0/1, no Capa 2): army/attack_move entra al
+                # buffer con el dest de auto_support, no el sample en casa (Ch6).
+                # Mutar el comando + cell_flat; F1 abajo recálcula log π.
+                if auto_support:
+                    new_c, _dest_xy = apply_dest_credit(
+                        obs, action, ACTION_TYPES[eff_t], int(eff_c), aidx,
+                        last_push=last_push_cell)
+                    if int(new_c) != int(eff_c):
+                        eff_c = int(new_c)
+                        cell_t = torch.tensor([int(eff_c)], device=device)
+                # F1 coerción COMPLETA (auditoría 2026-08-24): si una corrección
+                # de seguridad MUTÓ la acción, recalcular log π(a_ejecutada|s)
+                # con h_in — la MISMA semilla de hidden con la que se muestreó —
+                # y guardar en el buffer los ÍNDICES EFECTIVOS.
+                # La versión anterior tenía 3 bugs: (1) recalculaba con hidden
+                # post-act (otra distribución temporal), (2) guardaba los índices
+                # MUESTREADOS junto al log_prob efectivo (el ratio de PPO
+                # comparaba acciones distintas), (3) solo cubría mutaciones con
+                # ítem (attack→attack_move, harvest, deploy quedaban fuera).
+                effective = (eff_t, eff_u, eff_i, int(eff_c))
+                if int(cell_t) != int(eff_c):
+                    cell_t = torch.tensor([int(eff_c)], device=device)
+                if sampled != effective:
+                    with torch.no_grad():
+                        re_lp, _, _ = net.evaluate_actions(
+                            batch, h_in, {
+                                "type": torch.tensor([eff_t], device=device),
+                                "unit_slot": torch.tensor([eff_u], device=device),
+                                "cell_flat": cell_t if torch.is_tensor(cell_t) else
+                                torch.tensor([int(eff_c)], device=device),
+                                "item_slot": torch.tensor([eff_i], device=device),
+                                "had_item": had_item,
+                            })
+                        log_prob = re_lp
+                # Histograma de tipos de acción EFECTIVOS (traduce la política:
+                # train/no_op vs el remate army_attack_move que nunca usa).
+                atype = ACTION_TYPES[eff_t]
+                action_counts[atype] = action_counts.get(atype, 0) + 1
+                if telemetry is not None:
+                    telemetry.append({
+                        "step": step,
+                        "tick": obs.tick,
+                        "type": ACTION_TYPES[int(out_type)],
+                        "unit_id": (aidx.unit_ids[int(out_unit)]
+                                    if int(out_unit) < len(aidx.unit_ids)
+                                    else None),
+                        "cell": [int(out_cell) % aidx.w,
+                                 int(out_cell) // aidx.w],
+                        "item": (aidx.items[int(out_item)]
+                                 if int(out_item) < len(aidx.items)
+                                 else None),
+                        "n_units": len(obs.units),
+                        "cash": obs.economy.cash,
+                    })
+                # Clamp de coordenadas al mapa real (la obs puede ser del shell)
+                for c in action.commands:
+                    if c.target_x >= ep_dims[1] or c.target_y >= ep_dims[0]:
+                        c.target_x = min(c.target_x, ep_dims[1] - 1)
+                        c.target_y = min(c.target_y, ep_dims[0] - 1)
+                # Destino de push vivo: si esta decisión fue army/attack_move,
+                # los ociosos de los próximos bloques siguen hacia esa celda.
+                if atype in ("army_attack_move", "attack_move") and action.commands:
+                    c0 = action.commands[0]
+                    if getattr(c0, "target_x", None) is not None:
+                        last_push_cell = (int(c0.target_x), int(c0.target_y))
+                # Pilar B: autonomía de soporte (0 decisiones, gratis para PPO)
+                if auto_support:
+                    for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx, war_nudge=war_nudge):
+                        action.commands.append(cmd)
+                pending_cmd = action
+                # F1: al buffer van los ÍNDICES EFECTIVOS (los de la acción que
+                # realmente se ejecutó), emparejados con SU log_prob. El ratio de
+                # PPO compara así π_nuevo(a_ejecutada) / π_viejo(a_ejecutada).
+                pending_sample = {
+                    "batch": {k: v.cpu() for k, v in batch.items()},
+                    "action": {
+                        "type": torch.tensor([effective[0]]),
+                        "unit_slot": torch.tensor([effective[1]]),
+                        "cell_flat": (cell_t.detach().cpu() if torch.is_tensor(cell_t)
+                                      else torch.tensor([int(eff_c)])),
+                        "item_slot": torch.tensor([effective[2]]),
+                        "had_item": had_item.cpu(),
+                        # CONGELADOS: la referencia contra la que PPO mide el drift
+                        "log_prob": log_prob.detach().cpu(),
+                    },
+                    "reward": 0.0,
+                    "value_pred": out_value,
+                    "h_in": h_in.cpu(),
+                }
 
         # RL-vs-RL: frozen opponent acts from Multi0 fog view (not in traj).
         if (opponent_net is not None and can_decide and pending_cmd is not None
@@ -441,7 +501,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
             else:
                 consec_errors = 0
 
-        if can_decide:
+        if can_decide and pending_sample is not None:
             traj.append(pending_sample)
 
         # F6 (auditoría): contar interrupciones SIEMPRE — antes solo se

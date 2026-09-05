@@ -35,9 +35,11 @@ from rl.network import AlphaLiteNet
 from rl.rollout import (add_advantages, center_advantage_by_episode,
                         collect_one_episode, flatten_samples)
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
-from rl.best_ckpt import batch_is_dead, maybe_update_best
+from rl.best_ckpt import batch_is_dead, batch_is_wipe, maybe_update_best
 from rl.pfsp import BotPFSP, parse_pool
-from rl.imitation import EliteBuffer, balance_bc_samples, lambda_bc_at
+from rl.imitation import (
+    EliteBuffer, balance_bc_samples, lambda_bc_at, merge_teacher_wins,
+)
 from rl.scripted_teacher import ScriptedTeacher
 
 
@@ -116,9 +118,80 @@ def process_results(results, gamma, lam, verbose=True,
                                      if k == main_dims)
         samples = [s for s in samples if sample_dims(s) == main_dims]
         if dropped and verbose:
+            # Safety net: shell map should already be skipped in rollout.
             print(f"  [filtro] descartadas {dropped} muestras fuera de "
                   f"dims {main_dims}")
     return samples, outcomes
+
+
+async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
+    """N partidas ScriptedTeacher en paralelo sobre el pool de envs."""
+    n = max(1, int(getattr(args, "bc_games", 1) or 1))
+    t_kwargs = dict(reset_kwargs or {})
+    teacher_bot = getattr(args, "bc_teacher_bot", None)
+    if teacher_bot:
+        t_kwargs["bot_type"] = teacher_bot
+    envs = list(pool or [])
+    if not envs:
+        raise RuntimeError("collect_teacher_games: pool vacío")
+
+    async def _one(i, env):
+        t_macro = int(getattr(args, "bc_macro_ticks", 0) or 0) or args.macro_ticks
+        t_steps = int(getattr(args, "bc_max_steps", 0) or 0) or args.max_steps
+        try:
+            traj, outcome = await collect_one_episode(
+                env, net, vocab, device,
+                k_skip=args.k_skip,
+                temperature=args.temperature,
+                max_steps=t_steps,
+                macro_ticks=t_macro,
+                reset_kwargs=t_kwargs,
+                shaper_preset=args.shaper_preset,
+                auto_support=args.auto_support,
+                war_nudge=not args.no_war_nudge,
+                teacher=ScriptedTeacher())
+        except Exception as e:
+            print(f"  [bc] teacher game {i + 1}/{n} fail: {e}", flush=True)
+            return None
+        samples, _ = process_results(
+            [(traj, outcome)], args.gamma, args.lam,
+            adv_mode=args.adv_mode, verbose=False)
+        print(f"  [bc] teacher {i + 1}/{n} "
+              f"result={outcome.get('result')} ticks={outcome.get('ticks')}",
+              flush=True)
+        return samples, outcome
+
+    episodes = []
+    for start in range(0, n, len(envs)):
+        chunk = list(range(start, min(start + len(envs), n)))
+        parts = await asyncio.gather(*[
+            _one(i, envs[j % len(envs)]) for j, i in enumerate(chunk)
+        ])
+        for p in parts:
+            if p is not None:
+                episodes.append(p)
+    keep_inc = bool(
+        getattr(args, "bc_only", False)
+        or getattr(args, "bc_keep_incomplete", False))
+    kept, meta = merge_teacher_wins(
+        episodes,
+        keep_incomplete=keep_inc)
+    n_pre = len(kept)
+    kept = balance_bc_samples(kept)
+    for s in kept:
+        s["_ep"] = 10_000
+    meta["bc_n"] = len(kept)
+    meta["bc_n_raw"] = n_pre
+    if not kept:
+        print(f"  [bc] 0 samples (wins={meta.get('bc_n_win_eps', 0)} "
+              f"inc={meta.get('bc_n_incomplete_eps', 0)}/"
+              f"{meta.get('bc_n_eps', 0)}; no clonar derrotas)", flush=True)
+    else:
+        print(f"  [bc] keep wins={meta.get('bc_n_win_eps', 0)} "
+              f"inc={meta.get('bc_n_incomplete_eps', 0)}/"
+              f"{meta.get('bc_n_eps', 0)} steps {n_pre}->{len(kept)}",
+              flush=True)
+    return kept, meta
 
 
 async def amain(args):
@@ -215,7 +288,10 @@ async def amain(args):
     # Pool persistente de conexiones, repartido entre N servidores
     # (--url acepta lista separada por comas: un contenedor por URL)
     urls = [u.strip() for u in args.url.split(",") if u.strip()]
-    pool_size = max(1, min(args.concurrency, args.episodes))
+    teach_n = max(1, int(getattr(args, "bc_games", 1) or 1)) if (
+        getattr(args, "bc", False) or getattr(args, "bc_only", False)
+    ) else 0
+    pool_size = max(1, min(args.concurrency, max(args.episodes, teach_n)))
     pool = []
     # El timeout del WebSocket DEBE escalar con la duración del episodio.
     # Con max_steps fijo 160 fue el cuello: en partidas largas (max_steps alto
@@ -282,6 +358,13 @@ async def amain(args):
             print("AUTO-SUPPORT ON, WAR NUDGE OFF: PPO owns targeting.", flush=True)
         else:
             print("AUTO-SUPPORT ON, war nudge ON (raid/push/fog-scout).", flush=True)
+
+    bc_only = bool(getattr(args, "bc_only", False))
+    if bc_only:
+        args.bc = True
+        print("BC-ONLY: SFT del ScriptedTeacher, sin PPO.", flush=True)
+    if getattr(args, "onboard_phase", None):
+        print(f"Onboard phase {args.onboard_phase}", flush=True)
 
     def launch_collection(prev_task):
         """Lanza una tanda de episodios repartidos entre los workers."""
@@ -430,64 +513,87 @@ async def amain(args):
     t_start = time.time()
     elite = EliteBuffer(cap_steps=2000) if args.sil else None
     if args.bc or args.sil:
-        print(f"Capa 1: bc={args.bc} sil={args.sil} "
+        print(f"Capa 1: bc={args.bc} bc_only={bc_only} sil={args.sil} "
               f"warmup={args.bc_warmup} lambda_sil={args.lambda_sil} "
-              f"bc_start_iter={bc_start_iter}", flush=True)
+              f"bc_start_iter={bc_start_iter} "
+              f"bc_games={getattr(args, 'bc_games', 1)} "
+              f"bc_epochs={getattr(args, 'bc_epochs', 1)} "
+              f"teacher_bot={getattr(args, 'bc_teacher_bot', None)}",
+              flush=True)
 
-    for it in range(start_iter + 1, args.iters + 1):
+    # --iters = ultima iter INCLUSIVE (absoluto). Scratch --iters 100 => 1..100.
+    # El +1 del range es el stop exclusivo de Python, no una iter extra.
+    first_it = int(start_iter) + 1
+    last_it = int(args.iters)
+    if first_it > last_it:
+        print(f"Nada que entrenar: start_iter={start_iter} >= --iters {last_it}",
+              flush=True)
+        return
+    n_updates = last_it - first_it + 1
+    print(f"Entrenando iters {first_it}..{last_it} inclusive ({n_updates} updates)",
+          flush=True)
+    bc_epochs = max(1, int(getattr(args, "bc_epochs", 1) or 1))
+    for it in range(first_it, last_it + 1):
         t0 = time.time()
-        if pending is None:
-            pending = launch_collection(None)
-        results = await pending
-
-        # Sync infer <- train (última update). Después arranca collect k+1
-        # con esos pesos y el update k corre en un thread: el event loop
-        # puede avanzar OpenRA. No tocar infer_net hasta el próximo await.
-        infer_net.load_state_dict(net.state_dict())
-        samples, outcomes = process_results(results, args.gamma, args.lam,
-                                            adv_mode=args.adv_mode)
-        lmb_bc = (lambda_bc_at(it, bc_start_iter, args.bc_warmup)
-                  if args.bc else 0.0)
+        if bc_only:
+            infer_net.load_state_dict(net.state_dict())
+            results = []
+            samples, outcomes = [], []
+            eval_n = int(getattr(args, "eval_games", 0) or 0)
+            if eval_n > 0:
+                saved_ep = int(args.episodes)
+                args.episodes = eval_n
+                try:
+                    results = await launch_collection(None)
+                    samples, outcomes = process_results(
+                        results, args.gamma, args.lam,
+                        adv_mode=args.adv_mode)
+                    print(f"  [eval] student n={len(outcomes)} "
+                          f"{[o.get('result') for o in outcomes]}",
+                          flush=True)
+                finally:
+                    args.episodes = saved_ep
+        else:
+            if pending is None:
+                pending = launch_collection(None)
+            results = await pending
+            # Sync infer <- train (última update). Después arranca collect k+1
+            # con esos pesos y el update k corre en un thread: el event loop
+            # puede avanzar OpenRA. No tocar infer_net hasta el próximo await.
+            infer_net.load_state_dict(net.state_dict())
+            samples, outcomes = process_results(results, args.gamma, args.lam,
+                                                adv_mode=args.adv_mode)
+        lmb_bc = (1.0 if bc_only else
+                  (lambda_bc_at(it, bc_start_iter, args.bc_warmup,
+                                end=float(getattr(args, "bc_lambda_end", 0.0) or 0.0))
+                   if args.bc else 0.0))
         lmb_sil = args.lambda_sil if args.sil else 0.0
         bc_samples = []
         bc_meta = {}
         if args.bc and lmb_bc > 0.0:
             try:
-                t_traj, t_out = await collect_one_episode(
-                    pool[0], infer_net, vocab, device,
-                    k_skip=args.k_skip,
-                    temperature=args.temperature,
-                    max_steps=args.max_steps,
-                    macro_ticks=args.macro_ticks,
-                    reset_kwargs=reset_kwargs,
-                    shaper_preset=args.shaper_preset,
-                    auto_support=args.auto_support,
-                    war_nudge=not args.no_war_nudge,
-                    teacher=ScriptedTeacher())
-                bc_samples, _ = process_results(
-                    [(t_traj, t_out)], args.gamma, args.lam,
-                    adv_mode=args.adv_mode, verbose=False)
-                n_raw = len(bc_samples)
-                bc_samples = balance_bc_samples(bc_samples)
+                bc_samples, bc_meta = await collect_teacher_games(
+                    pool, infer_net, vocab, device, args, reset_kwargs)
                 for s in bc_samples:
                     s["_ep"] = 10_000 + it
-                bc_meta = {
-                    "bc_n": len(bc_samples),
-                    "bc_n_raw": n_raw,
-                    "bc_result": t_out.get("result"),
-                }
-                print(f"  [bc] teacher steps={n_raw}->{len(bc_samples)} "
-                      f"result={t_out.get('result')}", flush=True)
             except Exception as e:
                 print(f"  [bc] teacher fail: {e}", flush=True)
                 bc_samples = []
                 bc_meta = {"bc_n": 0, "bc_result": "fail"}
         elif args.bc:
             print(f"  [bc] skip teacher (lambda_bc=0)", flush=True)
-        pending = launch_collection(pending)
+        if not bc_only:
+            pending = launch_collection(pending)
 
         t1 = time.time()
-        skipped_update = batch_is_dead(outcomes)
+        wiped = ((not bc_only)
+                 and getattr(args, "onboard_phase", None) == "B"
+                 and batch_is_wipe(outcomes))
+        skipped_update = (not bc_only) and (batch_is_dead(outcomes) or wiped)
+        if skipped_update:
+            why = ("wipe all-lose <15k" if wiped else "batch >80% no_op")
+            print(f"  [collapse] skip PPO update — {why} "
+                  f"(n={len(samples)}); BC/SIL siguen", flush=True)
         if elite is not None and samples:
             by_ep = {}
             for s in samples:
@@ -495,23 +601,37 @@ async def amain(args):
             for ep_i, traj in by_ep.items():
                 oc = outcomes[ep_i] if ep_i < len(outcomes) else {}
                 elite.add_episode(traj, oc)
-        if skipped_update:
-            print(f"  [collapse] skip PPO update — batch >80% no_op "
-                  f"(n={len(samples)})", flush=True)
-            stats = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
-                     "clip_frac": 0.0, "kl": 0.0, "grad_norm": 0.0,
-                     "adv_mean": 0.0, "n": len(samples)}
-            dt_update = 0.0
+        if bc_only:
+            def _imitation_only():
+                st = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
+                      "clip_frac": 0.0, "kl": 0.0, "grad_norm": 0.0,
+                      "adv_mean": 0.0, "n": len(bc_samples)}
+                if lmb_bc > 0.0 and bc_samples:
+                    st["bc_nll"] = trainer.imitation_update(
+                        bc_samples, lmb_bc, epochs=bc_epochs,
+                        batch_size=args.batch_size)
+                    st["lambda_bc"] = round(lmb_bc, 4)
+                if device == "cuda":
+                    torch.cuda.empty_cache()
+                return st
+
+            stats = await asyncio.to_thread(_imitation_only)
+            dt_update = time.time() - t1
         else:
             # Even-pick per win, prefer ticks<40k (not the tail of 1–2 longs).
             sil_batch = (elite.sample_recent(512)
                          if (lmb_sil > 0.0 and elite is not None) else [])
 
             def _ppo_and_imitation():
-                st = trainer.update(samples, args.epochs, args.batch_size)
+                if skipped_update:
+                    st = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
+                          "clip_frac": 0.0, "kl": 0.0, "grad_norm": 0.0,
+                          "adv_mean": 0.0, "n": len(samples)}
+                else:
+                    st = trainer.update(samples, args.epochs, args.batch_size)
                 if lmb_bc > 0.0 and bc_samples:
                     st["bc_nll"] = trainer.imitation_update(
-                        bc_samples, lmb_bc, epochs=1,
+                        bc_samples, lmb_bc, epochs=bc_epochs,
                         batch_size=args.batch_size)
                     st["lambda_bc"] = round(lmb_bc, 4)
                 if lmb_sil > 0.0 and sil_batch:
@@ -532,7 +652,7 @@ async def amain(args):
             0.9 * ema_collect + 0.1 * collect_s
         ema_update = dt_update if ema_update is None else \
             0.9 * ema_update + 0.1 * dt_update
-        eta_s = (ema_collect + ema_update * 0.3) * (args.iters - it)
+        eta_s = (ema_collect + ema_update * 0.3) * max(0, last_it - it)
 
         if pfsp is not None:
             pfsp.record_many(outcomes)
@@ -649,6 +769,9 @@ async def amain(args):
             metrics_row = {
                     "iter": it,
                     "bot_type": (pfsp.anchor if pfsp is not None else args.bot_type),
+                    **({"onboard_phase": args.onboard_phase}
+                       if getattr(args, "onboard_phase", None) else {}),
+                    **({"bc_only": True} if bc_only else {}),
                     **({"pfsp": True,
                         "pfsp_pool": list(pfsp.pool),
                         "pfsp_stats": pfsp.summary(),
@@ -741,7 +864,8 @@ async def amain(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default="http://localhost:8000")
-    ap.add_argument("--iters", type=int, default=100)
+    ap.add_argument("--iters", type=int, default=100,
+                    help="Ultima iter inclusive (absoluto). Scratch: --iters 100 corre 1..100. Resume desde 1141: --iters 1161 corre 20 mas.")
     ap.add_argument("--episodes", type=int, default=4,
                     help="partidas por iteración (grupo)")
     ap.add_argument("--k-skip", type=int, default=8)
@@ -833,11 +957,38 @@ def main():
                          "política colapsada clavan la cabeza de tipo). Lo pasa "
                          "auto_train tras restaurar best.pt.")
     ap.add_argument("--bc", action="store_true",
-                    help="Capa 1: 1 episodio ScriptedTeacher por iter + NLL BC.")
+                    help="Capa 1: N episodios ScriptedTeacher por iter + NLL BC.")
+    ap.add_argument("--bc-only", action="store_true",
+                    help="SFT del teacher sin PPO (fase A del onboarding). "
+                         "Implica --bc; lambda_bc queda en 1.0.")
+    ap.add_argument("--bc-teacher-bot", default=None,
+                    choices=("beginner", "easy", "medium", "hard", "brutal",
+                             "dummy"),
+                    help="Rival del ScriptedTeacher (independiente de --bot-type).")
+    ap.add_argument("--bc-games", type=int, default=1,
+                    help="Partidas teacher por iter (default 1).")
+    ap.add_argument("--bc-epochs", type=int, default=1,
+                    help="Epochs de NLL BC por iter (default 1).")
+    ap.add_argument("--onboard-phase", default=None, choices=("A", "B", "C"),
+                    help="Marca la fase A/B/C en metrics.jsonl (lo setea auto_train).")
+    ap.add_argument("--eval-games", type=int, default=0,
+                    help="En --bc-only: partidas del ALUMNO por iter (wr, sin PPO). "
+                         "0 = no mide. Fase A usa 4.")
     ap.add_argument("--sil", action="store_true",
                     help="Capa 1: self-imitation de episodios win/raze>0.")
     ap.add_argument("--bc-warmup", type=int, default=80,
-                    help="Iters para bajar lambda_bc de 1.0 a 0.")
+                    help="Iters para bajar lambda_bc de 1.0 a --bc-lambda-end. "
+                         "Ignorado en --bc-only.")
+    ap.add_argument("--bc-lambda-end", type=float, default=0.0,
+                    help="Piso de lambda_bc tras el warmup (default 0). "
+                         "Fase B usa 0.25 para no apagar el teacher.")
+    ap.add_argument("--bc-keep-incomplete", action="store_true",
+                    help="Clonar incomplete largos del teacher (build order). "
+                         "Default en --bc-only; fase B lo pasa a mano.")
+    ap.add_argument("--bc-macro-ticks", type=int, default=0,
+                    help="Macro del teacher (0 = --macro-ticks del PPO).")
+    ap.add_argument("--bc-max-steps", type=int, default=0,
+                    help="max-steps del teacher (0 = --max-steps del PPO).")
     ap.add_argument("--bc-start-iter", type=int, default=0,
                     help="Origen del warmup BC. 0 = ckpt o start_iter. "
                          "No debe resetearse en cada --resume.")

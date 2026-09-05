@@ -85,6 +85,50 @@ def _even_pick(group: list, cap: int) -> list:
     return [group[round(i * (len(group) - 1) / (cap - 1))] for i in range(cap)]
 
 
+def merge_teacher_wins(episodes: list, keep_incomplete: bool = False,
+                       incomplete_min_ticks: int = 15000) -> tuple[list, dict]:
+    """Keep teacher tapes worth cloning.
+
+    Always: result startswith win.
+    Never: lose / engine_error (clonar palizas enseña a morir).
+    Optional (`keep_incomplete`, fase A): incomplete largo — el build order
+    sigue ahí aunque a_short no declare win.
+    """
+    kept: list = []
+    results: list[str] = []
+    n_raw = 0
+    n_win = 0
+    n_inc = 0
+    for samples, oc in episodes or []:
+        chunk = list(samples or [])
+        n_raw += len(chunk)
+        oc = oc or {}
+        r = str(oc.get("result") or "")
+        results.append(r)
+        try:
+            ticks = int(oc.get("ticks") or 0)
+        except (TypeError, ValueError):
+            ticks = 0
+        take = r.startswith("win")
+        if (not take and keep_incomplete and r == "incomplete"
+                and ticks >= int(incomplete_min_ticks)):
+            take = True
+            n_inc += 1
+        if take:
+            kept.extend(chunk)
+            if r.startswith("win"):
+                n_win += 1
+    return kept, {
+        "bc_n_raw": n_raw,
+        "bc_n": len(kept),
+        "bc_n_eps": len(episodes or []),
+        "bc_n_win_eps": n_win,
+        "bc_n_incomplete_eps": n_inc,
+        "bc_results": results,
+        "bc_result": results[-1] if results else "",
+    }
+
+
 def balance_bc_samples(samples: list, per_type_cap: int = 96,
                        combat_cap: int = 64) -> list:
     """Cap combat/no_op so a 600-step incomplete attack tape cannot drown TRAIN."""

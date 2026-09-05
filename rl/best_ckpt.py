@@ -266,6 +266,23 @@ def batch_is_dead(outcomes) -> bool:
     return hist.get("no_op", 0) / n > 0.80
 
 
+def batch_is_wipe(outcomes, tick_cap: int = 15000) -> bool:
+    """All-lose fast batch (own base gone ~8–12k). Not no_op-spam, so
+    batch_is_dead misses it; PPO on these tapes teaches dying."""
+    outs = [o for o in (outcomes or []) if isinstance(o, dict)]
+    if not outs:
+        return False
+    if not all(str(o.get("result") or "").startswith("lose") for o in outs):
+        return False
+    ticks = []
+    for o in outs:
+        try:
+            ticks.append(int(o.get("ticks") or 0))
+        except (TypeError, ValueError):
+            ticks.append(0)
+    return (sum(ticks) / len(ticks)) < float(tick_cap)
+
+
 def is_strictly_better(cand: dict, best: dict) -> tuple[bool, str]:
     """True only when cand beats best. Equal scores do not replace (no flap)."""
     wr_c, wr_b = iter_winrate(cand), iter_winrate(best)

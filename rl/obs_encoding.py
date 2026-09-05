@@ -17,6 +17,7 @@ import math
 import numpy as np
 
 from rl.roles import role_id_of
+from rl.force_estimate import aoa_features
 
 SPATIAL_CHANNELS = 9
 # Colas que terminan en PLACE (no Infantry/Vehicle). Defense = pbox/gun/ftur.
@@ -117,7 +118,7 @@ def apply_beacon(spatial, cx: int, cy: int, height: int, width: int,
     return spatial
 
 
-SCALAR_DIM = 21
+SCALAR_DIM = 25  # 21 + aoa rel_power/health/speed + strong
 
 
 def scalar_features(obs) -> np.ndarray:
@@ -175,6 +176,9 @@ def scalar_features(obs) -> np.ndarray:
         tier = 0
     tech_tier = tier / 4.0
 
+    # 4. AttackOrFlee proxies (cost/HP/speed; Strong ~= Rush 1.1)
+    aoa = aoa_features(obs)
+
     return np.array([
         cash_norm,
         ore_norm,
@@ -197,6 +201,10 @@ def scalar_features(obs) -> np.ndarray:
         garrison_ratio,
         military_ratio,
         tech_tier,
+        float(aoa["rel_power"]),
+        float(aoa["rel_health"]),
+        float(aoa["rel_speed"]),
+        float(aoa["strong"]),
     ], dtype=np.float32)
 
 

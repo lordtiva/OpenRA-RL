@@ -184,6 +184,13 @@ class AlphaLiteNet(nn.Module):
             xf_layer, num_layers=XF_LAYERS, enable_nested_tensor=False)
         self.unit_xf_out = nn.Linear(XF_DIM, 128)
         self.unit_xf_scale = nn.Parameter(torch.zeros(1))
+        # Arch v1.1: GRU unit_vec = proj(own_mean || own_max || ene_mean).
+        # Mean solo aplastaba emergencias; max + enemy pool las hacen visibles.
+        self.unit_pool_proj = nn.Sequential(
+            nn.Linear(128 * 3, 128),
+            nn.ReLU(),
+            nn.Linear(128, 128),
+        )
         # 0 = dense softmax (legacy). >0 = top-k sparse attn on entity XF
         # (Run46 inductive bias; state_dict unchanged — same MHA weights).
         self.xf_topk = 0
@@ -223,8 +230,14 @@ class AlphaLiteNet(nn.Module):
         self.unit_cond_proj = nn.Linear(128, UNIT_COND_DIM)
         nn.init.zeros_(self.unit_cond_proj.weight)
         nn.init.zeros_(self.unit_cond_proj.bias)
-        self.cell_head = nn.Conv2d(
-            ch + SCATTER_CH + 64 + 64 + UNIT_COND_DIM, 1, 1)
+        # Arch v1.1: cell head no lineal (AND accion x unidad x geometria local).
+        # 1x1 -> SiLU -> 3x3; ~19k params extra vs Conv(296,1,1).
+        _cell_in = ch + SCATTER_CH + 64 + 64 + UNIT_COND_DIM
+        self.cell_head = nn.Sequential(
+            nn.Conv2d(_cell_in, 64, kernel_size=1),
+            nn.SiLU(),
+            nn.Conv2d(64, 1, kernel_size=3, padding=1),
+        )
         # Proyección del estado global del GRU para broadcast espacial en la
         # cabeza de celda: la decisión (x,y) "ve" hacia dónde va el plan.
         self.hidden_proj = nn.Linear(HIDDEN_DIM, 64)
@@ -349,13 +362,41 @@ class AlphaLiteNet(nn.Module):
         out.scatter_add_(2, idx, paint.transpose(1, 2))
         return out.view(B, SCATTER_CH, H, W)
 
+
+    def _unit_vec_for_gru(self, tokens, unit_valid, unit_own_mask=None):
+        """Resumen estrategico para la GRU: mean+max propias + mean enemigas.
+
+        tokens [B,U,128] post-XF. Enemigos = valid & ~own. Sin propias/enemigas
+        el max/mean correspondiente es 0 (no -1e9).
+        """
+        own = unit_own_mask if unit_own_mask is not None else unit_valid
+        own_b = own.bool()
+        valid_b = unit_valid.bool()
+        ene_b = valid_b & ~own_b
+        own_f = own_b.float().unsqueeze(-1)
+        ene_f = ene_b.float().unsqueeze(-1)
+
+        mean_own = (tokens * own_f).sum(1) / own_f.sum(1).clamp(min=1.0)
+
+        neg = tokens.new_full(tokens.shape, -1e9)
+        tok_own = torch.where(own_b.unsqueeze(-1), tokens, neg)
+        max_own = tok_own.max(dim=1).values
+        has_own = own_b.any(dim=-1)
+        max_own = torch.where(has_own.unsqueeze(-1), max_own, torch.zeros_like(max_own))
+
+        mean_ene = (tokens * ene_f).sum(1) / ene_f.sum(1).clamp(min=1.0)
+        has_ene = ene_b.any(dim=-1)
+        mean_ene = torch.where(has_ene.unsqueeze(-1), mean_ene, torch.zeros_like(mean_ene))
+
+        return self.unit_pool_proj(torch.cat([mean_own, max_own, mean_ene], dim=-1))
+
     def encode(self, spatial, scalars, unit_feats, unit_valid, hidden,
                unit_role_ids=None, unit_own_mask=None):
         """spatial [B,9,H,W], scalars [B,S], units [B,U,F], valid [B,U] bool.
 
         Devuelve (fmap, feat_map_flat, new_hidden, tokens). tokens [B,U,128]
         alimentan dist_cell (Capa 2). feat_map_flat se conserva por firma.
-        GRU pool: solo propias (unit_own_mask). El xf ve own++ene.
+        GRU unit_vec: own_mean||own_max||ene_mean -> proj 128. El xf ve own++ene.
         """
         fmap = self._enc_spatial(self._coord_conv(spatial))
         feat_map_flat = fmap.flatten(1)
@@ -363,10 +404,7 @@ class AlphaLiteNet(nn.Module):
 
         u = self.unit_mlp(self._unit_in(unit_feats, unit_role_ids))
         tokens = self._entity_tokens(u, unit_valid)
-        pool_m = unit_own_mask if unit_own_mask is not None else unit_valid
-        own_f = pool_m.float().unsqueeze(-1)
-        denom = own_f.sum(1).clamp(min=1.0)
-        unit_vec = (tokens * own_f).sum(1) / denom
+        unit_vec = self._unit_vec_for_gru(tokens, unit_valid, unit_own_mask)
 
         s = self.scalar_mlp(scalars)
         fused = torch.cat([spatial_vec, s, unit_vec], dim=-1)
@@ -875,16 +913,38 @@ def _stack_steps(steps, device):
     return batch, actions
 
 
+
+def cell_head_weight_shape(cell_head) -> tuple:
+    """Shape del weight de salida del cell_head (Conv2d o Sequential)."""
+    if isinstance(cell_head, nn.Conv2d):
+        return tuple(cell_head.weight.shape)
+    if isinstance(cell_head, nn.Sequential):
+        last = None
+        for m in cell_head.modules():
+            if isinstance(m, nn.Conv2d):
+                last = m
+        if last is not None:
+            return tuple(last.weight.shape)
+    return ()
+
+
 def adapt_capa2_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
-    """Net2Net: pesos 922 (cell_head 224→1) → Capa 2 (scatter+unidad extra).
+    """Net2Net: pesos 922 (cell_head 224->1) -> Capa 2 (scatter+unidad extra).
 
     Copia fmap/tipo/GRU a las mismas rebanadas; scatter y unit_cond quedan 0
     (igual que scatter_proj / unit_cond_proj al init). GRU/U-Net/type-head
     cargan 1:1. Keys nuevas (transformer) las pone load_state_dict missing.
+
+    Arch v1.1: cell_head es Sequential — no hay Net2Net 1:1 desde Conv unico;
+    se dropean cell_head.weight/bias legacy (las capas nuevas nacen random).
     """
     out = dict(raw)
     key_w = "cell_head.weight"
     if key_w not in out:
+        return out
+    if isinstance(net.cell_head, nn.Sequential):
+        out.pop("cell_head.weight", None)
+        out.pop("cell_head.bias", None)
         return out
     old_w = out[key_w]
     new_w = net.cell_head.weight.detach().clone()
@@ -945,3 +1005,29 @@ def adapt_capa2c_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
         if padded.shape == want.shape:
             out[key] = padded
     return out
+
+def adapt_scalar_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
+    """Net2Net: pad scalar_mlp.0.weight when SCALAR_DIM grows (zero new cols).
+
+    Ckpts viejos (in=21) cargan en redes nuevas (in=25); las features AOA
+    nacen en 0 y el tronco economico/militar se conserva 1:1.
+    """
+    out = dict(raw)
+    key = "scalar_mlp.0.weight"
+    if key not in out:
+        return out
+    old_w = out[key]
+    want = net.state_dict()[key]
+    if old_w.shape == want.shape:
+        return out
+    if old_w.dim() != 2 or old_w.shape[0] != want.shape[0]:
+        return out
+    if old_w.shape[1] >= want.shape[1]:
+        # shrink: truncate (should not happen often)
+        out[key] = old_w[:, : want.shape[1]].contiguous()
+        return out
+    padded = old_w.new_zeros(want.shape)
+    padded[:, : old_w.shape[1]] = old_w
+    out[key] = padded
+    return out
+

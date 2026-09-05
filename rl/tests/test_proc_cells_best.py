@@ -40,6 +40,7 @@ from rl.best_ckpt import (
     DROUGHT_STREAK,
     DROUGHT_WR20,
     batch_is_dead,
+    batch_is_wipe,
     dead_policy_reason,
     is_attack_spam_collapse,
     is_dead_policy,
@@ -719,6 +720,18 @@ check("batch 80%+ no_op se salta", batch_is_dead([
 ]) is True)
 check("batch sano no se salta", batch_is_dead([
     {"action_hist": {"train": 40, "attack_move": 50, "no_op": 10}},
+]) is False)
+check("wipe 4 lose @8k", batch_is_wipe([
+    {"result": "lose", "ticks": 8000, "action_hist": {"build": 250, "no_op": 350}},
+    {"result": "lose", "ticks": 9000, "action_hist": {"build": 250, "no_op": 350}},
+    {"result": "lose", "ticks": 8500, "action_hist": {"build": 250, "no_op": 350}},
+    {"result": "lose", "ticks": 9100, "action_hist": {"build": 250, "no_op": 350}},
+]) is True)
+check("incomplete 53k no es wipe", batch_is_wipe([
+    {"result": "incomplete", "ticks": 53000},
+    {"result": "incomplete", "ticks": 53000},
+    {"result": "lose", "ticks": 8000},
+    {"result": "incomplete", "ticks": 53000},
 ]) is False)
 
 def _wr20_rows(pairs):
