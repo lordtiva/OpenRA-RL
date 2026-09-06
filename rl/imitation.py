@@ -34,7 +34,7 @@ _BC_COMBAT_CAP_TYPES = frozenset(_BC_LAST)
 # no clona combate: sin eco sana no hay army que empujar.
 _BC_COMBAT_READY_N = 8
 # Manifest de TeacherWinBuffer. Cintas viejas (solo TRAIN) no se hidratan.
-TAPE_SCHEMA = "eco_and_combat_v1"
+TAPE_SCHEMA = "eco_and_combat_mental_v3"
 
 
 def lambda_bc_at(it: int, start_iter: int, warmup: int = 80,
@@ -74,17 +74,96 @@ def pick_bc_command(commands) -> CommandModel:
     return enabled[0][1]
 
 
-def _combat_bc_command(commands):
-    """Un push clonable: army_attack_move > attack_move > attack."""
+# Chebyshev radius: combat BC label must sit near visible/ghost, not beacon.
+_BC_CONTACT_NEAR = 16
+
+
+def _cmd_xy(c):
+    try:
+        tx = getattr(c, "target_x", None)
+        ty = getattr(c, "target_y", None)
+        if tx is None or ty is None:
+            return None
+        return int(tx), int(ty)
+    except (TypeError, ValueError):
+        return None
+
+
+def _obs_contact_cells(obs, belief=None) -> list:
+    """Visible leftovers + optional belief ghosts (last_seen)."""
+    cells = []
+    if obs is None:
+        return cells
+    for b in list(getattr(obs, "visible_enemy_buildings", None) or []):
+        try:
+            cells.append((int(b.cell_x), int(b.cell_y)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    for u in list(getattr(obs, "visible_enemies", None) or []):
+        try:
+            cells.append((int(u.cell_x), int(u.cell_y)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    if belief is not None:
+        try:
+            slots = belief.select_enemies(obs)
+        except Exception:
+            slots = []
+        for u, vis, conf, _t in slots:
+            if float(vis) >= 0.5 or float(conf) < 0.05:
+                continue
+            try:
+                cells.append((int(u.cell_x), int(u.cell_y)))
+            except (TypeError, ValueError, AttributeError):
+                continue
+    return cells
+
+
+def _near_any(xy, cells, radius: int = _BC_CONTACT_NEAR) -> bool:
+    if xy is None or not cells:
+        return False
+    r = int(radius)
+    x, y = int(xy[0]), int(xy[1])
+    return any(max(abs(x - cx), abs(y - cy)) <= r for cx, cy in cells)
+
+
+def _retarget_combat(cmd, cells):
+    """Clone combat cmd aimed at first contact cell (reject beacon mill)."""
+    if cmd is None or not cells:
+        return cmd
+    tx, ty = int(cells[0][0]), int(cells[0][1])
+    return CommandModel(
+        action=getattr(cmd, "action", ActionType.NO_OP),
+        actor_id=getattr(cmd, "actor_id", None),
+        target_x=tx,
+        target_y=ty,
+        target_actor_id=getattr(cmd, "target_actor_id", None),
+        item_type=getattr(cmd, "item_type", None),
+    )
+
+
+def _combat_bc_command(commands, obs=None, belief=None):
+    """Un push clonable: army_attack_move > attack_move > attack.
+
+    Con leftover/ghosts visibles: preferí el cmd cuyo target está cerca;
+    si el teacher aún apunta al beacon, retarget al contacto.
+    """
     enabled = []
     for c in commands or []:
         name = _cmd_name(c)
         if name in ENABLED_TYPES:
             enabled.append((name, c))
+    contacts = _obs_contact_cells(obs, belief)
     for want in ("army_attack_move", "attack_move", "attack"):
-        for name, c in enabled:
-            if name == want:
-                return c
+        cands = [c for name, c in enabled if name == want]
+        if not cands:
+            continue
+        if contacts:
+            near = [c for c in cands if _near_any(_cmd_xy(c), contacts)]
+            if near:
+                return near[0]
+            return _retarget_combat(cands[0], contacts)
+        return cands[0]
     return None
 
 
@@ -102,20 +181,44 @@ def _bc_combat_ready(obs) -> bool:
     return leftover or n >= _BC_COMBAT_READY_N
 
 
-def pick_bc_commands(commands, obs=None) -> list:
+
+def student_combat_ready(obs, belief=None) -> bool:
+    """When True, student dual-emits eco + combat push same macro-tick.
+
+    Ready if BC combat gate fires, or belief has mental enemy_base / leftover
+    ghosts (last contact). Opening without army stays single-action.
+    """
+    if _bc_combat_ready(obs):
+        return True
+    if belief is None:
+        return False
+    if getattr(belief, "enemy_base_xy", None) is not None:
+        return True
+    # Leftover ghosts still in memory count as last contact.
+    mem = getattr(belief, "_mem", None) or {}
+    if mem:
+        return True
+    return False
+
+
+def pick_bc_commands(commands, obs=None, belief=None) -> list:
     """1–2 labels por tick. Opening = eco. Attack = eco + un push.
 
     Sin leftover y n_combat<8: igual que pick_bc_command (TRAIN gana).
     Con leftover o pack de rush: si hay combate distinto del primary, se
-    clonan los dos. El env sigue ejecutando todos los extras del teacher.
+    clonan los dos. Push BC prefiere celdas cerca de visibles/ghosts, no beacon.
     """
     primary = pick_bc_command(commands)
-    combat = _combat_bc_command(commands)
+    combat = _combat_bc_command(commands, obs=obs, belief=belief)
     if combat is None or combat is primary:
         return [primary]
     if not _bc_combat_ready(obs):
         return [primary]
     if _cmd_name(primary) in ("army_attack_move", "attack_move", "attack"):
+        # Primary is already combat: still retarget away from beacon if needed.
+        contacts = _obs_contact_cells(obs, belief)
+        if contacts and not _near_any(_cmd_xy(primary), contacts):
+            return [_retarget_combat(primary, contacts)]
         return [primary]
     return [primary, combat]
 
@@ -512,8 +615,8 @@ class TeacherWinBuffer:
             return 0
         schema = str(manifest.get("schema") or "")
         if schema != TAPE_SCHEMA:
-            # Cintas pre-v1 (solo TRAIN) no se hidratan: un --scratch las
-            # reusaría como miller. Recolectar de nuevo una vez.
+            # Schema mismatch (beacon tapes / solo TRAIN) no se hidrata: un
+            # --scratch las reusaría como miller. Recolectar de nuevo.
             return 0
         loaded: list[dict] = []
         max_id = -1

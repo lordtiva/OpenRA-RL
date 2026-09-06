@@ -22,8 +22,11 @@ from openra_env.client import OpenRAEnv
 from rl.peer_obs import peer_obs_from_metadata
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_command_effective
-from rl.imitation import command_to_indices, pick_bc_command, pick_bc_commands
-from rl.network import ACTION_TYPES, HIDDEN_DIM
+from rl.imitation import (
+    command_to_indices, pick_bc_command, pick_bc_commands,
+    student_combat_ready,
+)
+from rl.network import ACTION_TYPES, COMBAT_PUSH_TYPES, HIDDEN_DIM
 from rl.obs_encoding import (
     decode_spatial, scalar_features, unit_tokens, EnemyBeliefStore,
 )
@@ -53,7 +56,7 @@ def _batch_of(obs, vocab, device, belief: EnemyBeliefStore | None = None):
     apply_passability(aidx, spatial[3])
     return {
         "spatial": torch.from_numpy(spatial).unsqueeze(0).to(device),
-        "scalars": torch.from_numpy(scalar_features(obs)).unsqueeze(0).to(device),
+        "scalars": torch.from_numpy(scalar_features(obs, belief=belief)).unsqueeze(0).to(device),
         "unit_feats": torch.from_numpy(units_feats).unsqueeze(0).to(device),
         "unit_valid": torch.from_numpy(unit_valid).unsqueeze(0).to(device),
         "unit_role_ids": torch.from_numpy(role_ids).unsqueeze(0).to(device),
@@ -224,7 +227,9 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         hidden = hidden.detach()
                         value_t = net.value_head(hidden).squeeze(-1)
                     raw = teacher.decide(obs)
-                    picks = pick_bc_commands(raw.commands, obs)
+                    picks = pick_bc_commands(
+                        raw.commands, obs,
+                        belief=getattr(teacher, "belief", None))
                     primary = picks[0] if picks else pick_bc_command(raw.commands)
                     t0, u0, c0, i0 = command_to_indices(obs, primary, aidx)
                     action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
@@ -237,6 +242,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     out_item = i0
                     out_cell = c0
                     out_value = float(value_t.item())
+                    out_ctx = None
                     cell_t = torch.tensor([int(eff_c)], device=device)
                     with torch.no_grad():
                         log_prob, _, _ = net.evaluate_actions(
@@ -250,6 +256,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 else:
                     out = net.act(batch, hidden, temperature=temperature)
                     hidden = out["hidden"].detach()
+                    out_ctx = out.get("_ctx")
                     action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
                         obs, int(out["type"]), int(out["unit_slot"]),
                         int(out["cell_flat"]), int(out["item_slot"]), aidx,
@@ -317,17 +324,84 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         "n_units": len(obs.units),
                         "cash": obs.economy.cash,
                     })
-                # Clamp de coordenadas al mapa real (la obs puede ser del shell)
+                # K=2 eco+push (student, no teacher): second AR = combat push
+                # when combat-ready / belief enemy_base / leftover ghosts.
+                # Reuses encode ctx so GRU advances once per macro-tick.
+                if (teacher is None and out_ctx is not None
+                        and student_combat_ready(obs, belief)
+                        and ACTION_TYPES[int(eff_t)] not in COMBAT_PUSH_TYPES):
+                    out2 = net.act_combat(
+                        batch, hidden, temperature=temperature, ctx=out_ctx)
+                    if out2 is not None:
+                        push_action, (pt, pu, pi, pc) = index_to_command_effective(
+                            obs, int(out2["type"]), int(out2["unit_slot"]),
+                            int(out2["cell_flat"]), int(out2["item_slot"]), aidx,
+                        )
+                        if auto_support:
+                            new_pc, _ = apply_dest_credit(
+                                obs, push_action, ACTION_TYPES[pt], int(pc),
+                                aidx, last_push=last_push_cell)
+                            if int(new_pc) != int(pc):
+                                pc = int(new_pc)
+                                # Mutate issued cell if dest-credit remapped.
+                                for _c in push_action.commands:
+                                    if getattr(_c, "target_x", None) is not None:
+                                        _c.target_x = int(pc) % aidx.w
+                                        _c.target_y = int(pc) // aidx.w
+                        action.commands.extend(push_action.commands or [])
+                        ptype = ACTION_TYPES[int(pt)]
+                        action_counts[ptype] = action_counts.get(ptype, 0) + 1
+                        psampled = (int(out2["type"]), int(out2["unit_slot"]),
+                                    int(out2["item_slot"]), int(out2["cell_flat"]))
+                        peffective = (int(pt), int(pu), int(pi), int(pc))
+                        plp = out2["log_prob"]
+                        if psampled != peffective:
+                            with torch.no_grad():
+                                plp, _, _ = net.evaluate_actions(
+                                    batch, h_in, {
+                                        "type": torch.tensor([pt], device=device),
+                                        "unit_slot": torch.tensor(
+                                            [pu], device=device),
+                                        "cell_flat": torch.tensor(
+                                            [int(pc)], device=device),
+                                        "item_slot": torch.tensor(
+                                            [pi], device=device),
+                                        "had_item": had_item,
+                                    })
+                        # Stash for traj append with pending_bc_extra below.
+                        student_push_sample = {
+                            "batch": {k: v.cpu() for k, v in batch.items()},
+                            "action": {
+                                "type": torch.tensor([int(pt)]),
+                                "unit_slot": torch.tensor([int(pu)]),
+                                "cell_flat": torch.tensor([int(pc)]),
+                                "item_slot": torch.tensor([int(pi)]),
+                                "had_item": had_item.cpu(),
+                                "log_prob": plp.detach().cpu(),
+                            },
+                            "reward": 0.0,
+                            "value_pred": out_value,
+                            "h_in": h_in.cpu(),
+                        }
+                    else:
+                        student_push_sample = None
+                else:
+                    student_push_sample = None
+
+                # Clamp de coordenadas al mapa real (incl. push K=2)
                 for c in action.commands:
                     if c.target_x >= ep_dims[1] or c.target_y >= ep_dims[0]:
                         c.target_x = min(c.target_x, ep_dims[1] - 1)
                         c.target_y = min(c.target_y, ep_dims[0] - 1)
-                # Destino de push vivo: si esta decisión fue army/attack_move,
-                # los ociosos de los próximos bloques siguen hacia esa celda.
-                if atype in ("army_attack_move", "attack_move") and action.commands:
-                    c0 = action.commands[0]
-                    if getattr(c0, "target_x", None) is not None:
-                        last_push_cell = (int(c0.target_x), int(c0.target_y))
+                # Destino de push vivo: last combat cmd (eco may be commands[0]).
+                _push_names = ("army_attack_move", "attack_move",
+                               "infantry_attack_move", "vehicle_attack_move",
+                               "harvesters_move", "attack")
+                for c in action.commands:
+                    cname = getattr(getattr(c, "action", None), "value", None) or str(
+                        getattr(c, "action", ""))
+                    if cname in _push_names and getattr(c, "target_x", None) is not None:
+                        last_push_cell = (int(c.target_x), int(c.target_y))
                 # Pilar B: autonomía de soporte (0 decisiones, gratis para PPO)
                 if auto_support:
                     for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx, war_nudge=war_nudge):
@@ -353,6 +427,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     "h_in": h_in.cpu(),
                 }
                 pending_bc_extra = []
+                if student_push_sample is not None:
+                    pending_bc_extra.append(student_push_sample)
                 if teacher is not None:
                     for extra_cmd in picks[1:]:
                         xt, xu, xc, xi = command_to_indices(obs, extra_cmd, aidx)

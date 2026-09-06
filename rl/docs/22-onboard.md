@@ -9,6 +9,16 @@
 > **Fecha:** 2026-09-04.
 
 
+> **2026-09-06 — mental base v3:** beacon GPS sigue apagado (`beacon=None` en
+> encode/push). El teacher recuerda un **mental enemy-base** (centroide del
+> cluster denser de edificios enemigos vistos) y empuja ahí cuando no hay
+> leftover visible. Escalares nuevos: `has_enemy_base_belief`, rel dx/dy, conf
+> (`SCALAR_DIM=29`, Net2Net pad). Phase A `a_max_steps` **1800**; early fog
+> scout con ≥3 combate. Regenerar `teacher_wins/` (schema
+> `eco_and_combat_mental_v3` / `--onboard-fresh-tapes`). **K=2 eco+push** same macro-tick (student dual-emit + BC labels).
+
+
+
 
 ---
 
@@ -141,7 +151,7 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 | `--onboard-fresh-tapes` | — | Borra `teacher_wins/` y re-juega al teacher. |
 | `--onboard-collect` | — | Suma teacher games aunque ya haya tapes. |
 
-`--scratch --onboard` **reusa** `teacher_wins/` (schema `eco_and_combat_v1`). La recolección es la parte lenta; el SFT se itera encima. Cintas viejas (sin schema / solo TRAIN) se ignoran y se vuelven a recolectar **una vez**.
+`--scratch --onboard` **reusa** `teacher_wins/` solo si el schema coincide (`eco_and_combat_hunt_v2`). La recolección es la parte lenta; el SFT se itera encima. Cintas beacon (`eco_and_combat_v1` / sin schema / solo TRAIN) se ignoran y se vuelven a recolectar **una vez**.
 
 
 
@@ -175,19 +185,29 @@ Estado en `rl/ckpts/curriculum.json`. Cada salto mata el `rl.train` y lo relanza
 
   `attack_move` de todo el idle (legal sin pack). A 12, `army_attack_move`.
 
-  Leftover visible > beacon. Blob piled en beacon vacío (contacto visible = 0)
+  **Beacon GPS off** (no `resolve_beacon` / Ch7-8 GPS en encode ni en el
 
-  → hunt leftovers en niebla, aunque las unidades no estén `is_idle`. El
+  push del teacher; `BEACON_BY_MAP` queda solo como legacy lookup). Hunt
 
-  incomplete @64400 con `n_ene_visible=0` no es WinState roto: el espectador
+  map-agnostic: home raid → leftover visible (micro) → **mental enemy-base**
 
-  sigue viendo edificios.
+  (cluster denser de edificios vistos; no GPS de título de mapa) →
+
+  `last_seen` / belief ghosts → hunt/sweep cerca del último contacto → fog
+
+  scout. Early fog scout away from home con ≥3 combate antes del rush.
+
+  Blob piled lejos de casa sin contacto → remate hunt. Tras este cambio
+
+  regenerá `teacher_wins/` (schema `eco_and_combat_mental_v3`; cintas
+
+  hunt_v2 / beacon viejas no se auto-cargan).
 
 - Clona cintas **`win` only** (`--bc-only`). **No** clona `lose` ni `incomplete` (timeout turtle).
 
   Opening: TRAIN/BUILD. Attack (leftover o ≥8 combate): **también** un push
 
-  (`army_attack_move` / `attack_move`). Sin eco no hay army; sin push el SFT es miller.
+  (`army_attack_move` / `attack_move`). **K=2 eco+push** same macro-tick (BC labels + student dual-emit). Sin eco no hay army; sin push el SFT es miller.
 
 - **TeacherWinBuffer** persistente: acumula wins entre iters bajo `{ckpt_dir}/teacher_wins/`
 
@@ -205,7 +225,7 @@ Estado en `rl/ckpts/curriculum.json`. Cada salto mata el `rl.train` y lo relanza
 
   medir wr20 del clone. Sin eso A promocionaba a las 20 iters con un miller.
 
-- Macro **40** ticks / **1000** decisiones. **4** teacher + **4** eval. 6 epochs NLL. BC **wins-only** (no clona incompletes; rush teacher=8).
+- Macro **40** ticks / **1800** decisiones. **4** teacher + **4** eval. 6 epochs NLL. BC **wins-only** (no clona incompletes; rush teacher=8).
 
 - Collapse **off**. Hang 1200 s.
 

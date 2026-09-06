@@ -5,8 +5,11 @@ import torch
 
 from rl.obs_encoding import (
     UNIT_FEAT_DIM, EnemyBeliefStore, unit_tokens, GHOST_TTL, MAX_TOKENS,
+    SCALAR_DIM,
 )
 from rl.network import (
+    COMBAT_PUSH_TYPES,
+    build_combat_type_mask,
     AlphaLiteNet, ACTION_TYPES, HIDDEN_DIM, SPATIAL_CH, SPATIAL_MID,
     TYPE_TO_IDX, TYPES_USE_CELL, N_ACTION_TYPES,
 )
@@ -103,7 +106,7 @@ def test_net_forward_smoke():
     B, H, W = 2, 32, 32
     batch = {
         "spatial": torch.zeros(B, 9, H, W),
-        "scalars": torch.zeros(B, 25),
+        "scalars": torch.zeros(B, SCALAR_DIM),
         "unit_feats": torch.zeros(B, MAX_TOKENS, UNIT_FEAT_DIM),
         "unit_valid": torch.zeros(B, MAX_TOKENS, dtype=torch.bool),
         "unit_role_ids": torch.zeros(B, MAX_TOKENS, dtype=torch.long),
@@ -129,9 +132,45 @@ def test_net_forward_smoke():
     assert tokens.shape[-1] == 128
 
 
+
+def test_act_combat_mask():
+    """Student K=2: act_combat restricts type to COMBAT_PUSH_TYPES."""
+    net = AlphaLiteNet()
+    B, H, W = 1, 16, 16
+    batch = {
+        "spatial": torch.zeros(B, 9, H, W),
+        "scalars": torch.zeros(B, SCALAR_DIM),
+        "unit_feats": torch.zeros(B, MAX_TOKENS, UNIT_FEAT_DIM),
+        "unit_valid": torch.zeros(B, MAX_TOKENS, dtype=torch.bool),
+        "unit_role_ids": torch.zeros(B, MAX_TOKENS, dtype=torch.long),
+        "unit_own_mask": torch.zeros(B, MAX_TOKENS, dtype=torch.bool),
+        "type_mask": torch.ones(B, N_ACTION_TYPES, dtype=torch.bool),
+        "cell_mask": torch.ones(B, H * W, dtype=torch.bool),
+        "item_indices": torch.zeros(B, 8, dtype=torch.long),
+        "item_mask": torch.zeros(B, 8, dtype=torch.bool),
+    }
+    batch["unit_valid"][:, 0] = True
+    batch["unit_own_mask"][:, 0] = True
+    h = torch.zeros(B, HIDDEN_DIM)
+    out = net.act(batch, h, temperature=0.0)
+    assert "_ctx" in out
+    out2 = net.act_combat(batch, out["hidden"], temperature=0.0, ctx=out["_ctx"])
+    assert out2 is not None
+    tname = ACTION_TYPES[int(out2["type"].item())]
+    assert tname in COMBAT_PUSH_TYPES, tname
+    # Same hidden (no second GRU step when ctx reused)
+    assert torch.equal(out2["hidden"], out["hidden"])
+    # Illegal combat -> None
+    batch_off = dict(batch)
+    batch_off["type_mask"] = torch.zeros(B, N_ACTION_TYPES, dtype=torch.bool)
+    assert net.act_combat(batch_off, h) is None
+    assert build_combat_type_mask(batch_off["type_mask"]) is None
+
+
 if __name__ == "__main__":
     test_unit_feat_dim()
     test_belief_ghost_persists()
     test_group_helpers()
     test_net_forward_smoke()
+    test_act_combat_mask()
     print("OK all v2 smoke tests")

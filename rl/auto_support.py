@@ -413,6 +413,32 @@ def _hunt_cell(obs, beacon) -> tuple[int, int]:
     return int(x), int(y)
 
 
+# Offsets relative to last contact / army pile (map-agnostic; no Singles half).
+HUNT_NEAR_OFFSETS = (
+    (0, 12),
+    (-14, 4),
+    (12, 4),
+    (-10, -10),
+    (10, -8),
+    (-18, 10),
+    (16, 12),
+    (0, -14),
+)
+
+
+def hunt_near_cell(obs, anchor) -> tuple[int, int]:
+    """Sweep cell around last_seen / pile. Map-agnostic (no BEACON_BY_MAP)."""
+    info = getattr(obs, "map_info", None)
+    w = int(getattr(info, "width", 128) or 128)
+    h = int(getattr(info, "height", 64) or 64)
+    ax, ay = int(anchor[0]), int(anchor[1])
+    tick = int(getattr(obs, "tick", 0) or 0)
+    dx, dy = HUNT_NEAR_OFFSETS[(tick // HUNT_PERIOD_TICKS) % len(HUNT_NEAR_OFFSETS)]
+    x = min(max(ax + dx, 1), max(1, w - 2))
+    y = min(max(ay + dy, 1), max(1, h - 2))
+    return int(x), int(y)
+
+
 def _push_cell(obs, last_push):
     """Celda de asalto: edificio visible, unidad visible, hunt, beacon.
 

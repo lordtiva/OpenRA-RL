@@ -16,10 +16,10 @@ Este teacher:
   - rush: powr → proc → tent. Sin weap en el camino crítico
   - a 8 rifles: attack_move de TODO el idle (legal sin pack mask)
   - a PACK_ARMY (12): army_attack_move (lo que el alumno puede emitir)
-  - leftover visible > beacon; blob piled on empty beacon → hunt leftovers
-    (bench "n_ene=0 incomplete" is fog, not WinState: spectator still has
-    buildings. AttackMove mill at (95,11) never re-issued because units
-    were not is_idle).
+  - hunt map-agnostic: home raid > visible leftover > mental enemy-base
+    belief > last_seen ghosts > hunt/sweep cerca del último contacto >
+    fog scout. Beacon GPS off (no resolve_beacon; tapes eco_and_combat_mental_v3).
+  - early fog scout away from home once a few combat exist (relative fog).
   - peel de raid; TRAIN e1 durante el push; 2 harvs; 0 guards / 0 APC
 """
 from __future__ import annotations
@@ -33,12 +33,12 @@ from rl.auto_support import (
     ARRIVED_CELLS,
     DEFEND_CELLS,
     MIN_PILE_FOR_HUNT,
-    _hunt_cell,
     fog_scout_destinations,
     home_raid_targets,
+    hunt_near_cell,
     war_nudge_cell,
 )
-from rl.obs_encoding import resolve_beacon
+from rl.obs_encoding import EnemyBeliefStore
 
 
 def _xy(obj) -> Tuple[int, int]:
@@ -61,6 +61,7 @@ class ScriptedTeacher(ScriptedBot):
     # clonar army_attack_move (máscara PACK_ARMY).
     RUSH_ATTACK_MOVE = 8
     N_SCOUTS = 4
+    EARLY_SCOUT_COMBAT = 3  # fog scout away from home once a few rifles exist
     MIN_HARVS = 2
     GUARD_COUNT = 0
     _PROD = frozenset({
@@ -73,6 +74,22 @@ class ScriptedTeacher(ScriptedBot):
         super().__init__(verbose=verbose)
         if rush_attack_move is not None:
             self.RUSH_ATTACK_MOVE = int(rush_attack_move)
+        # Per-episode fog belief + last visible contact (map-agnostic hunt).
+        self.belief = EnemyBeliefStore()
+        self._last_contact: Optional[Tuple[int, int]] = None
+        self._last_tick: Optional[int] = None
+
+    def decide(self, obs: OpenRAObservation):
+        """Reset belief between episodes if the same instance is reused."""
+        try:
+            tick = int(getattr(obs, "tick", 0) or 0)
+        except (TypeError, ValueError):
+            tick = 0
+        if self._last_tick is not None and tick < self._last_tick:
+            self.belief.reset()
+            self._last_contact = None
+        self._last_tick = tick
+        return super().decide(obs)
 
     def _handle_guards(self, obs: OpenRAObservation) -> List[CommandModel]:
         return []
@@ -133,8 +150,43 @@ class ScriptedTeacher(ScriptedBot):
             self._log("Training e1 (sustain during attack)")
         return commands
 
+    def _refresh_contact(self, obs: OpenRAObservation) -> None:
+        """Update last_seen belief + last visible contact cell."""
+        self.belief.update(obs)
+        bldgs = list(obs.visible_enemy_buildings or [])
+        ene = list(obs.visible_enemies or [])
+        if bldgs or ene:
+            origin = self._own_fact(obs) or (12, 16)
+            prod = [b for b in bldgs if str(b.type or "").lower() in self._PROD]
+            pool = prod or bldgs or ene
+            try:
+                t = max(pool, key=lambda o: _cheb(origin, _xy(o)))
+                self._last_contact = _xy(t)
+            except (TypeError, ValueError):
+                pass
+
+    def _ghost_cell(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
+        """Best belief ghost cell (last_seen), if any still confident."""
+        slots = self.belief.select_enemies(obs)
+        ghosts = [
+            (u, conf) for (u, vis, conf, _t) in slots
+            if float(vis) < 0.5 and float(conf) > 0.05
+        ]
+        if not ghosts:
+            return None
+        ghosts.sort(key=lambda t: -float(t[1]))
+        try:
+            return _xy(ghosts[0][0])
+        except (TypeError, ValueError):
+            return None
+
     def _push_cell(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
-        """Raid en casa > prod visible > edificio/unidad > hunt si piled > beacon."""
+        """Raid > visible leftover > mental base > ghost > last contact > fog.
+
+        Beacon GPS (resolve_beacon / BEACON_BY_MAP) is intentionally unused.
+        Mental base: densest seen enemy-building cluster from belief store.
+        """
+        self._refresh_contact(obs)
         raids = home_raid_targets(obs)
         if raids:
             origin = self._own_fact(obs) or (12, 16)
@@ -153,15 +205,25 @@ class ScriptedTeacher(ScriptedBot):
             return _xy(bldgs[0])
         if obs.visible_enemies:
             return _xy(obs.visible_enemies[0])
-        beacon = resolve_beacon(obs)
-        if beacon is None:
-            return None
-        # Visible map empty: approach beacon, then sweep leftovers in fog.
+        # Strategic: remembered enemy base after leftovers cleared (not GPS).
+        base = getattr(self.belief, "enemy_base_xy", None)
+        if base is not None:
+            return int(base[0]), int(base[1])
+        ghost = self._ghost_cell(obs)
+        if ghost is not None:
+            return int(ghost[0]), int(ghost[1])
         combat = self._all_combat(obs)
-        n_at = self._piled_on(combat, beacon, ARRIVED_CELLS)
-        if n_at >= MIN_PILE_FOR_HUNT:
-            return _hunt_cell(obs, beacon)
-        return int(beacon[0]), int(beacon[1])
+        anchor = self._last_contact
+        if anchor is not None:
+            n_at = self._piled_on(combat, anchor, ARRIVED_CELLS)
+            if n_at >= MIN_PILE_FOR_HUNT:
+                return hunt_near_cell(obs, anchor)
+            return int(anchor[0]), int(anchor[1])
+        # No contact yet: open shroud (map-agnostic), never beacon.
+        fog = fog_scout_destinations(obs, 1)
+        if fog:
+            return int(fog[0][0]), int(fog[0][1])
+        return None
 
     def _own_fact(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
         for b in obs.buildings or []:
@@ -203,6 +265,28 @@ class ScriptedTeacher(ScriptedBot):
         except (TypeError, ValueError):
             return False
 
+    def _away_pile(self, obs: OpenRAObservation, combat) -> Optional[Tuple[int, int]]:
+        """Centroid of combat units far from home if they form a pile."""
+        origin = self._own_fact(obs) or (12, 16)
+        away = []
+        for u in combat or []:
+            try:
+                if _cheb(origin, _xy(u)) > DEFEND_CELLS:
+                    away.append(u)
+            except (TypeError, ValueError):
+                continue
+        if len(away) < MIN_PILE_FOR_HUNT:
+            return None
+        try:
+            cx = sum(int(u.cell_x) for u in away) // len(away)
+            cy = sum(int(u.cell_y) for u in away) // len(away)
+        except (TypeError, ValueError):
+            return None
+        pile = (cx, cy)
+        if self._piled_on(away, pile, ARRIVED_CELLS) < MIN_PILE_FOR_HUNT:
+            return None
+        return pile
+
     def _handle_combat(self, obs: OpenRAObservation) -> List[CommandModel]:
         commands: List[CommandModel] = []
         idle = self._idle_combat(obs)
@@ -211,11 +295,6 @@ class ScriptedTeacher(ScriptedBot):
         raids = home_raid_targets(obs)
         n_combat = n_combat_total(obs)
         leftover = bool(obs.visible_enemy_buildings or obs.visible_enemies)
-        beacon = resolve_beacon(obs)
-        piled_beacon = (
-            beacon is not None
-            and self._piled_on(combat, beacon, ARRIVED_CELLS) >= MIN_PILE_FOR_HUNT
-        )
 
         if raids:
             home_idle = [u for u in idle if self._near_home(obs, u)]
@@ -232,27 +311,29 @@ class ScriptedTeacher(ScriptedBot):
             self._log(f"Peel raid {len(commands)} idle -> ({rx},{ry})")
             return commands
 
-        # Visible contact is 0 but the spectator still has buildings (fog).
-        # AttackMove units sitting on the beacon are not is_idle, so the old
-        # idle-only scout never fired and the episode timed out at 64400.
-        if not leftover and dest is not None and piled_beacon:
+        # Visible contact is 0 but army is piled away from home (fog leftovers).
+        # AttackMove units are often not is_idle, so idle-only scout never fired.
+        pile = None if leftover else self._away_pile(obs, combat)
+        if pile is not None:
+            hunt_anchor = self._last_contact or pile
+            hunt = hunt_near_cell(obs, hunt_anchor)
             if n_combat >= PACK_ARMY:
                 commands.append(CommandModel(
                     action=ActionType.ARMY_ATTACK_MOVE,
-                    target_x=int(dest[0]),
-                    target_y=int(dest[1]),
+                    target_x=int(hunt[0]),
+                    target_y=int(hunt[1]),
                 ))
-                self._log(f"Remnant army AM {n_combat} toward {dest}")
+                self._log(f"Remnant army AM {n_combat} toward {hunt}")
                 return commands
             movers = list(idle)
             if not movers:
                 for u in combat:
                     try:
-                        if beacon is not None and _cheb(_xy(u), beacon) <= ARRIVED_CELLS:
+                        if _cheb(_xy(u), pile) <= ARRIVED_CELLS:
                             movers.append(u)
                     except (TypeError, ValueError):
                         continue
-            dests = self._remnant_dests(obs, dest, min(len(movers), 12))
+            dests = self._remnant_dests(obs, hunt, min(len(movers), 12))
             n_go = min(len(movers), len(dests), 12)
             for u, d in zip(movers[:n_go], dests):
                 commands.append(CommandModel(
@@ -267,6 +348,28 @@ class ScriptedTeacher(ScriptedBot):
 
         if not idle:
             return commands
+
+        # Early fog scout: once a few combat exist and we still lack a mental
+        # base / leftover, open relative fog away from home (no GPS coords).
+        has_base = getattr(self.belief, "enemy_base_xy", None) is not None
+        if (n_combat >= self.EARLY_SCOUT_COMBAT
+                and not leftover and not raids and not has_base
+                and n_combat < self.RUSH_ATTACK_MOVE):
+            n_scout = min(len(idle), self.N_SCOUTS)
+            fog = fog_scout_destinations(obs, n_scout)
+            for u, d in zip(idle[:n_scout], fog):
+                commands.append(CommandModel(
+                    action=ActionType.ATTACK_MOVE,
+                    actor_id=int(u.actor_id),
+                    target_x=int(d[0]),
+                    target_y=int(d[1]),
+                ))
+            if commands:
+                self._log(
+                    f"Early fog scout {len(commands)}/{n_combat} toward "
+                    f"{fog[:len(commands)]}"
+                )
+                return commands
 
         piled = 0
         if dest is not None:
@@ -322,13 +425,12 @@ class ScriptedTeacher(ScriptedBot):
     def _remnant_dests(
         self, obs: OpenRAObservation, dest: Optional[Tuple[int, int]], n: int,
     ) -> List[Tuple[int, int]]:
-        """Hunt + fog cells. Never pad with the mill beacon."""
+        """Hunt + fog cells. Never pad with map beacon GPS."""
         n = max(0, int(n))
         if n <= 0:
             return []
         dests: List[Tuple[int, int]] = []
-        beacon = resolve_beacon(obs)
-        if dest is not None and (beacon is None or dest != (int(beacon[0]), int(beacon[1]))):
+        if dest is not None:
             dests.append((int(dest[0]), int(dest[1])))
         fog = fog_scout_destinations(obs, max(0, n - len(dests)))
         dests.extend(fog)
@@ -338,9 +440,11 @@ class ScriptedTeacher(ScriptedBot):
         d = self._push_cell(obs)
         if d is not None:
             return d
-        beacon = resolve_beacon(obs)
-        if beacon is not None:
-            return int(beacon[0]), int(beacon[1])
+        if self._last_contact is not None:
+            return hunt_near_cell(obs, self._last_contact)
+        fog = fog_scout_destinations(obs, 1)
+        if fog:
+            return int(fog[0][0]), int(fog[0][1])
         fact = self._own_fact(obs)
         if fact is not None:
             return fact

@@ -39,14 +39,15 @@ from rl.action_adapter import Vocab
 from rl.network import AlphaLiteNet
 from rl.trainer import load_checkpoint
 from rl.live_server import LiveBroadcaster
-from rl.obs_encoding import BEACON_BY_MAP, decode_spatial
+from rl.obs_encoding import BEACON_BY_MAP, EnemyBeliefStore, decode_spatial
 from rl.rollout import _batch_of
 from rl.action_adapter import index_to_command_effective
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
-from rl.network import ACTION_TYPES, HIDDEN_DIM
+from rl.network import ACTION_TYPES, COMBAT_PUSH_TYPES, HIDDEN_DIM
 from rl.auto_support import apply_dest_credit, support_commands
+from rl.imitation import student_combat_ready
 
 
 def pick_device(req: str) -> str:
@@ -339,6 +340,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
     last_action_str = "—"
     macro_final = None
     last_push_cell = None
+    belief = EnemyBeliefStore()
     ep_id = (
         f"live_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         f"_ep{int(ep_index)}_ck{int(ckpt_iter)}"
@@ -363,11 +365,12 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
         atype_str = "no_op"
         step_meta = None
         if can_decide:
-            batch, aidx = _batch_of(obs, vocab, device)
+            batch, aidx = _batch_of(obs, vocab, device, belief=belief)
             h_in = hidden.detach().clone()
             with torch.no_grad():
                 out = net.act(batch, hidden, temperature=args.temperature)
             hidden = out["hidden"].detach()
+            out_ctx = out.get("_ctx")
             had_item = aidx.item_mask.any().view(1).to(device)
             action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
                 obs, int(out["type"]), int(out["unit_slot"]), int(out["cell_flat"]), int(out["item_slot"]), aidx)
@@ -386,12 +389,6 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
             atype_str = ACTION_TYPES[eff_t]
             hist[atype_str] = hist.get(atype_str, 0) + 1
             decs += 1
-            # clamp first so last_action shows the cell actually issued
-            ep_dims = (obs.map_info.height, obs.map_info.width)
-            for c in action.commands:
-                if c.target_x >= ep_dims[1] or c.target_y >= ep_dims[0]:
-                    c.target_x = min(c.target_x, ep_dims[1]-1)
-                    c.target_y = min(c.target_y, ep_dims[0]-1)
             # Mismo crédito que el train: army/attack_move muestra el dest
             # de soporte (visor: last_push ≈ support_dests, no mill en casa).
             if args.auto_support:
@@ -399,6 +396,30 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                     obs, action, atype_str, int(eff_c), aidx,
                     last_push=last_push_cell)
                 eff_c = int(new_c)
+            # K=2 eco+push: second combat AR when ready (same tick / same ctx).
+            if (out_ctx is not None and student_combat_ready(obs, belief)
+                    and atype_str not in COMBAT_PUSH_TYPES):
+                with torch.no_grad():
+                    out2 = net.act_combat(
+                        batch, hidden, temperature=args.temperature, ctx=out_ctx)
+                if out2 is not None:
+                    push_action, (pt, pu, pi, pc) = index_to_command_effective(
+                        obs, int(out2["type"]), int(out2["unit_slot"]),
+                        int(out2["cell_flat"]), int(out2["item_slot"]), aidx)
+                    ptype = ACTION_TYPES[int(pt)]
+                    if args.auto_support:
+                        new_pc, _ = apply_dest_credit(
+                            obs, push_action, ptype, int(pc), aidx,
+                            last_push=last_push_cell)
+                        pc = int(new_pc)
+                    action.commands.extend(push_action.commands or [])
+                    hist[ptype] = hist.get(ptype, 0) + 1
+            # clamp after dual-emit so last_action / last_push see issued cells
+            ep_dims = (obs.map_info.height, obs.map_info.width)
+            for c in action.commands:
+                if c.target_x >= ep_dims[1] or c.target_y >= ep_dims[0]:
+                    c.target_x = min(c.target_x, ep_dims[1]-1)
+                    c.target_y = min(c.target_y, ep_dims[0]-1)
             # texto acción: the cell ACTUALLY issued (after water/OOB remap).
             # TRAIN/BUILD ignore cell — show em-dash so live does not display south-water.
             # item = rol EFECTIVO (post-coerce). iss = item_type del comando C#.
@@ -419,10 +440,14 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
             if atype_str in ("army_attack_move", "infantry_attack_move", "vehicle_attack_move", "harvesters_move", "attack_move", "move", "attack") and action.commands:
                 pol_cell = _cmd_xy(action.commands[0])
             # Pilar B: auto-harvest/repair gratis (no roba decisión PPO)
-            if atype_str in ("army_attack_move", "infantry_attack_move", "vehicle_attack_move", "harvesters_move", "attack_move") and action.commands:
-                c0 = action.commands[0]
-                if getattr(c0, "target_x", None) is not None:
-                    last_push_cell = (int(c0.target_x), int(c0.target_y))
+            _push_names = ("army_attack_move", "infantry_attack_move",
+                           "vehicle_attack_move", "harvesters_move",
+                           "attack_move", "attack")
+            for c in action.commands:
+                cname = getattr(getattr(c, "action", None), "value", None) or str(
+                    getattr(c, "action", ""))
+                if cname in _push_names and getattr(c, "target_x", None) is not None:
+                    last_push_cell = (int(c.target_x), int(c.target_y))
                     _remember_cell(trace["policy_push_cells"], last_push_cell)
             sup_xy = None
             sup_kind = None

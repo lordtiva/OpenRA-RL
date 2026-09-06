@@ -118,11 +118,27 @@ def apply_beacon(spatial, cx: int, cy: int, height: int, width: int,
     return spatial
 
 
-SCALAR_DIM = 25  # 21 + aoa rel_power/health/speed + strong
+SCALAR_DIM = 29  # 25 + has_enemy_base_belief + rel_dx/dy + base_conf
+# Scalar layout (indices):
+#  0 cash, 1 ore, 2 silo_full, 3 power_ratio, 4 low_power, 5 harvs,
+#  6 n_units, 7 n_buildings, 8 n_enemies, 9 n_enemy_bldgs,
+# 10 units_killed, 11 units_lost, 12 army_value, 13 prod_active, 14 prod_progress,
+# 15 tick, 16 has_refinery, 17 can_afford_proc, 18 garrison, 19 military_ratio,
+# 20 tech_tier, 21 aoa_rel_power, 22 aoa_rel_health, 23 aoa_rel_speed, 24 aoa_strong,
+# 25 has_enemy_base_belief, 26 base_rel_dx (vs own CY / map), 27 base_rel_dy,
+# 28 base_conf (count/BASE_STRENGTH_NOM). Mental base from sightings — not GPS.
+# Mental enemy-base hypothesis from visible enemy buildings (map-agnostic).
+BASE_CLUSTER_RADIUS = 14   # chebyshev radius for local density
+BASE_STRENGTH_NOM = 6.0    # scalar conf = min(count / NOM, 1)
 
 
-def scalar_features(obs) -> np.ndarray:
-    """Vector de escalares económicos/militares normalizado (~[0,1])."""
+
+def scalar_features(obs, belief=None) -> np.ndarray:
+    """Vector de escalares económicos/militares normalizado (~[0,1]).
+
+    Optional `belief` (EnemyBeliefStore): exposes mental enemy-base beacon
+    scalars (has / rel dx-dy vs own CY / confidence). GPS BEACON_BY_MAP unused.
+    """
     eco = obs.economy
     mil = obs.military
     capacity = max(eco.resource_capacity, 1)
@@ -179,6 +195,34 @@ def scalar_features(obs) -> np.ndarray:
     # 4. AttackOrFlee proxies (cost/HP/speed; Strong ~= Rush 1.1)
     aoa = aoa_features(obs)
 
+    # 5. Mental enemy-base belief (map-agnostic; not BEACON_BY_MAP GPS)
+    has_base = 0.0
+    base_rel_dx = 0.0
+    base_rel_dy = 0.0
+    base_conf = 0.0
+    if belief is not None and getattr(belief, "enemy_base_xy", None) is not None:
+        has_base = 1.0
+        bx, by = belief.enemy_base_xy
+        ox, oy = None, None
+        for b in getattr(obs, "buildings", None) or []:
+            if str(getattr(b, "type", "") or "").lower() in ("fact", "afac"):
+                try:
+                    ox, oy = int(b.cell_x), int(b.cell_y)
+                    break
+                except (TypeError, ValueError):
+                    continue
+        info = getattr(obs, "map_info", None)
+        mw = max(int(getattr(info, "width", 128) or 128), 1)
+        mh = max(int(getattr(info, "height", 64) or 64), 1)
+        if ox is None:
+            ox, oy = mw // 2, mh // 2
+        base_rel_dx = max(-1.0, min(1.0, (float(bx) - float(ox)) / float(mw)))
+        base_rel_dy = max(-1.0, min(1.0, (float(by) - float(oy)) / float(mh)))
+        base_conf = min(
+            float(getattr(belief, "enemy_base_count", 0) or 0) / float(BASE_STRENGTH_NOM),
+            1.0,
+        )
+
     return np.array([
         cash_norm,
         ore_norm,
@@ -205,6 +249,10 @@ def scalar_features(obs) -> np.ndarray:
         float(aoa["rel_health"]),
         float(aoa["rel_speed"]),
         float(aoa["strong"]),
+        has_base,
+        base_rel_dx,
+        base_rel_dy,
+        base_conf,
     ], dtype=np.float32)
 
 
@@ -345,20 +393,28 @@ class _GhostUnit:
 
 
 class EnemyBeliefStore:
-    """Belief ghosts por episodio: last_seen de enemigos que salieron de fog.
+    """Belief ghosts + mental enemy-base per episode.
 
-    Visible -> refresh conf=1, t=0. Invisible recordado -> conf decay, t++.
-    Drop tras GHOST_TTL o conf < GHOST_CONF_FLOOR. No inventa campos OpenRA:
-    solo cachea lo que ya expone visible_enemies (hp/pos/type/...).
+    Units: last_seen ghosts (visible -> conf=1; fog -> decay; drop TTL).
+    Buildings: when any enemy building is seen, remember densest local cluster
+    centroid as `enemy_base_xy` + strength (count in BASE_CLUSTER_RADIUS).
+    Update only on strictly denser / higher-count sightings; keep until better
+    evidence. Never uses map-title GPS / BEACON_BY_MAP.
     """
 
-    __slots__ = ("_mem",)
+    __slots__ = ("_mem", "enemy_base_xy", "enemy_base_count", "enemy_base_strength")
 
     def __init__(self):
         self._mem: dict[int, dict] = {}
+        self.enemy_base_xy: tuple[int, int] | None = None
+        self.enemy_base_count: int = 0
+        self.enemy_base_strength: float = 0.0
 
     def reset(self):
         self._mem.clear()
+        self.enemy_base_xy = None
+        self.enemy_base_count = 0
+        self.enemy_base_strength = 0.0
 
     def _snapshot(self, u) -> dict:
         return {
@@ -377,6 +433,53 @@ class EnemyBeliefStore:
             "time_since_seen": 0,
             "confidence": 1.0,
         }
+
+    @staticmethod
+    def _densest_building_cluster(bldgs, radius: int = BASE_CLUSTER_RADIUS):
+        """Centroid + count of the densest local cluster of enemy buildings."""
+        pts = []
+        for b in bldgs or []:
+            try:
+                pts.append((int(b.cell_x), int(b.cell_y)))
+            except (TypeError, ValueError):
+                continue
+        if not pts:
+            return None, 0, 0.0
+        best_members = [pts[0]]
+        best_count = 1
+        r = int(radius)
+        for x, y in pts:
+            members = [
+                (px, py) for px, py in pts
+                if max(abs(px - x), abs(py - y)) <= r
+            ]
+            c = len(members)
+            if c > best_count:
+                best_count = c
+                best_members = members
+        cx = sum(p[0] for p in best_members) // len(best_members)
+        cy = sum(p[1] for p in best_members) // len(best_members)
+        # strength = count (density proxy within fixed radius)
+        return (cx, cy), best_count, float(best_count)
+
+    def _update_base_belief(self, obs) -> None:
+        bldgs = list(getattr(obs, "visible_enemy_buildings", None) or [])
+        if not bldgs:
+            # Keep hypothesis until better evidence (no map GPS fallback).
+            return
+        xy, count, strength = self._densest_building_cluster(bldgs)
+        if xy is None:
+            return
+        better = (
+            self.enemy_base_xy is None
+            or count > int(self.enemy_base_count)
+            or (count >= int(self.enemy_base_count)
+                and strength > float(self.enemy_base_strength))
+        )
+        if better:
+            self.enemy_base_xy = (int(xy[0]), int(xy[1]))
+            self.enemy_base_count = int(count)
+            self.enemy_base_strength = float(strength)
 
     def update(self, obs) -> None:
         visible = list(getattr(obs, "visible_enemies", None) or [])
@@ -400,6 +503,7 @@ class EnemyBeliefStore:
                 drop.append(aid)
         for aid in drop:
             self._mem.pop(aid, None)
+        self._update_base_belief(obs)
 
     def select_enemies(self, obs, max_enemies: int = MAX_ENEMIES):
         """Visibles primero (conf=1), luego ghosts por conf desc. Cap max_enemies."""

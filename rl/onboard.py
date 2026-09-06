@@ -28,7 +28,7 @@ DEFAULTS = {
     "bc_games": 4,
     "bc_epochs": 6,
     "a_macro_ticks": 40,
-    "a_max_steps": 1000,
+    "a_max_steps": 1800,
     "a_k_skip": 4,
     "a_eval_games": 4,
     "a_rush": 8,

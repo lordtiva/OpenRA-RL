@@ -68,6 +68,7 @@ check("A prefer-ticks 20000", fa[fa.index("--bc-win-prefer-ticks") + 1] == "2000
 check("A iters largo (wr gate, no sft_iters)",
       fa[fa.index("--iters") + 1] == "10000")
 check("A macro 40", fa[fa.index("--macro-ticks") + 1] == "40")
+check("A max-steps 1800", fa[fa.index("--max-steps") + 1] == "1800")
 check("A no sil", "--sil" not in fa)
 fb = phase_flags("B", cfg)
 check("B sil beginner", "--sil" in fb and fb[fb.index("--bot-type") + 1] == "beginner")
@@ -78,7 +79,7 @@ check("B bc-warmup 80", fb[fb.index("--bc-warmup") + 1] == "80")
 check("B wins-only (no keep incomplete)", "--bc-keep-incomplete" not in fb)
 check("B lambda piso 0.25", fb[fb.index("--bc-lambda-end") + 1] == "0.25")
 check("B teacher macro 40", fb[fb.index("--bc-macro-ticks") + 1] == "40")
-check("B teacher max-steps 1000", fb[fb.index("--bc-max-steps") + 1] == "1000")
+check("B teacher max-steps 1800", fb[fb.index("--bc-max-steps") + 1] == "1800")
 check("B rush 8", fb[fb.index("--bc-rush") + 1] == "8")
 cfg_b_start = dict(cfg)
 cfg_b_start["phase"] = "B"

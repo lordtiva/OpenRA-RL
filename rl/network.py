@@ -75,7 +75,28 @@ TYPES_USE_CELL = {"move", "attack_move", "attack", "place_building",
 # Role-group macros: cell only (no unit head); adapter multi-commands.
 TYPES_GROUP_MACRO = {"army_attack_move", "infantry_attack_move",
                      "vehicle_attack_move", "harvesters_move"}
+# Student dual-emit (K=2 eco+push): second AR sample restricted to these.
+COMBAT_PUSH_TYPES = frozenset({
+    "army_attack_move", "attack_move", "attack",
+    "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
+})
 TYPES_USE_ITEM = {"train", "build", "place_building", "cancel_production"}
+
+
+def build_combat_type_mask(base_mask: torch.Tensor) -> torch.Tensor | None:
+    """AND legality mask with combat-push types. None if nothing legal."""
+    if base_mask is None:
+        return None
+    m = torch.zeros_like(base_mask, dtype=torch.bool)
+    for name in COMBAT_PUSH_TYPES:
+        idx = TYPE_TO_IDX.get(name)
+        if idx is None:
+            continue
+        m[..., idx] = True
+    out = base_mask.bool() & m
+    if not bool(out.any().item()):
+        return None
+    return out
 
 # Tablas [N_ACTION_TYPES] — indexar t_idx en GPU, sin .item() por step
 # (el loop Python + sync CUDA era parte de los ~210s de update).
@@ -632,27 +653,20 @@ class AlphaLiteNet(nn.Module):
         have = cat.any(dim=-1, keepdim=True)
         return torch.where(have, base & cat, base)
 
-    @torch.no_grad()
-    def act(self, batch, hidden, temperature: float = 1.0):
-        """Muestrea UNA acción completa para cada elemento del batch.
-
-        F4 (auditoría 2026-08-24): temperature divide los logits de TODAS las
-        cabezas. Antes solo T<=0 hacia argmax en tipo y cualquier otro valor
-        era T=1.0 disfrazado (el diagnóstico a 0.35 muestreaba igual).
-        T=0 -> argmax total (greedy verdadero en las 4 cabezas).
-
-        El log_prob devuelto es el de la POLÍTICA (T=1) sobre lo muestreado:
-        es la referencia contra la que PPO mide el drift.
-        """
-        feats, valid, role_ids, own = self._unit_ctx(batch)
-        fmap, _, new_hidden, tokens = self.encode(
-            batch["spatial"], batch["scalars"],
-            feats, valid, hidden,
-            unit_role_ids=role_ids, unit_own_mask=own,
-        )
+    def _sample_ar(self, batch, fmap, new_hidden, tokens, feats, valid,
+                   role_ids, own, temperature: float = 1.0, type_mask=None):
+        """Sample AR heads from an already-encoded state (no GRU step)."""
         greedy = temperature <= 0.0
+        base_tm = batch["type_mask"]
+        if type_mask is None:
+            tm = base_tm
+        else:
+            tm = base_tm.bool() & type_mask.to(device=base_tm.device).bool()
+            # If combat mask wiped everything, keep base legality.
+            if not bool(tm.any().item()):
+                tm = base_tm
 
-        lt = self._logits_type(new_hidden, batch["type_mask"])
+        lt = self._logits_type(new_hidden, tm)
         dist_t = self._categorical(lt)
         t_idx = lt.argmax(dim=-1) if greedy else \
             self._categorical(lt / temperature).sample()
@@ -695,11 +709,61 @@ class AlphaLiteNet(nn.Module):
 
         value = self.value_head(new_hidden).squeeze(-1)
         return {
-            "hidden": new_hidden,
             "type": t_idx, "unit_slot": u_idx, "cell_flat": c_idx,
             "item_slot": i_idx,
             "log_prob": lp, "value": value,
         }
+
+    @torch.no_grad()
+    def act(self, batch, hidden, temperature: float = 1.0, type_mask=None):
+        """Muestrea UNA acción completa para cada elemento del batch.
+
+        F4 (auditoría 2026-08-24): temperature divide los logits de TODAS las
+        cabezas. Antes solo T<=0 hacia argmax en tipo y cualquier otro valor
+        era T=1.0 disfrazado (el diagnóstico a 0.35 muestreaba igual).
+        T=0 -> argmax total (greedy verdadero en las 4 cabezas).
+
+        El log_prob devuelto es el de la POLÍTICA (T=1) sobre lo muestreado:
+        es la referencia contra la que PPO mide el drift.
+
+        type_mask: optional extra bool mask AND-ed with batch["type_mask"]
+        (used by act_combat / student K=2 push). Also returns "_ctx" so a
+        same-tick second sample can reuse encode without advancing GRU twice.
+        """
+        feats, valid, role_ids, own = self._unit_ctx(batch)
+        fmap, _, new_hidden, tokens = self.encode(
+            batch["spatial"], batch["scalars"],
+            feats, valid, hidden,
+            unit_role_ids=role_ids, unit_own_mask=own,
+        )
+        out = self._sample_ar(
+            batch, fmap, new_hidden, tokens, feats, valid, role_ids, own,
+            temperature=temperature, type_mask=type_mask)
+        out["hidden"] = new_hidden
+        out["_ctx"] = (fmap, tokens, feats, valid, role_ids, own)
+        return out
+
+    @torch.no_grad()
+    def act_combat(self, batch, hidden, temperature: float = 1.0, *, ctx=None):
+        """Sample a combat-push action (type logits masked to COMBAT_PUSH_TYPES).
+
+        Pass ctx=out["_ctx"] from a prior act() on the same obs to skip
+        re-encode (K=2 eco+push same macro-tick; GRU advances once).
+        Returns None if no combat type is legal under the batch mask.
+        """
+        combat_tm = build_combat_type_mask(batch["type_mask"])
+        if combat_tm is None:
+            return None
+        if ctx is not None:
+            fmap, tokens, feats, valid, role_ids, own = ctx
+            out = self._sample_ar(
+                batch, fmap, hidden, tokens, feats, valid, role_ids, own,
+                temperature=temperature, type_mask=combat_tm)
+            out["hidden"] = hidden
+            out["_ctx"] = ctx
+            return out
+        return self.act(batch, hidden, temperature=temperature,
+                        type_mask=combat_tm)
 
     def evaluate_actions(self, batch, hidden, actions):
         """Recalcula log_prob/valor/entropía para PPO (misma semilla de hidden).
@@ -1146,8 +1210,8 @@ def adapt_capa2c_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
 def adapt_scalar_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
     """Net2Net: pad scalar_mlp.0.weight when SCALAR_DIM grows (zero new cols).
 
-    Ckpts viejos (in=21) cargan en redes nuevas (in=25); las features AOA
-    nacen en 0 y el tronco economico/militar se conserva 1:1.
+    Ckpts viejos (in=21/25) cargan en redes nuevas (in=29); AOA + mental-base
+    cols nacen en 0 y el tronco economico/militar se conserva 1:1.
     """
     out = dict(raw)
     key = "scalar_mlp.0.weight"

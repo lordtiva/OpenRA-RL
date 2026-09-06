@@ -22,7 +22,10 @@ from rl.imitation import (
     pick_bc_command,
     pick_bc_commands,
     sample_type_name,
+    student_combat_ready,
 )
+from rl.network import COMBAT_PUSH_TYPES, TYPE_TO_IDX as NET_TYPE_TO_IDX, build_combat_type_mask
+from rl.obs_encoding import EnemyBeliefStore
 from rl.scripted_teacher import ScriptedTeacher
 
 
@@ -48,7 +51,7 @@ def _obs(*, cash=5000, harv=0, bldgs=("fact",), units=None, prod=(),
         economy=NS(cash=cash, ore=0, harvester_count=harv,
                    power_provided=100, power_drained=60, resource_capacity=5000),
         military=NS(kills_cost=0, deaths_cost=0, assets_value=2000,
-                    units_killed=0, units_dead=0, army_value=0),
+                    units_killed=0, units_dead=0, units_lost=0, army_value=0),
         buildings=[_b(t, 100 + i) for i, t in enumerate(bldgs)],
         units=list(units),
         production=list(prod),
@@ -114,6 +117,27 @@ rush_picks = pick_bc_commands(both_cmds, obs_rush)
 check("rush 8 sin leftover: TRAIN + army",
       len(rush_picks) == 2
       and rush_picks[1].action == ActionType.ARMY_ATTACK_MOVE)
+
+# student dual-emit readiness + combat type mask
+check("student not ready opening", not student_combat_ready(obs_open))
+check("student ready leftover", student_combat_ready(obs_atk))
+check("student ready rush pack", student_combat_ready(obs_rush))
+bel = EnemyBeliefStore()
+bel.enemy_base_xy = (70, 22)
+bel.enemy_base_count = 3
+check("student ready via belief base", student_combat_ready(obs_open, bel))
+import torch as _torch
+_base = _torch.ones(1, len(NET_TYPE_TO_IDX), dtype=_torch.bool)
+# disable non-combat to mirror a sparse mask — keep combat on
+_cm = build_combat_type_mask(_base)
+check("combat mask not None", _cm is not None)
+check("combat mask only push types",
+      all(bool(_cm[0, NET_TYPE_TO_IDX[n]]) for n in COMBAT_PUSH_TYPES
+          if n in NET_TYPE_TO_IDX)
+      and sum(int(x) for x in _cm[0].tolist()) == len(
+          [n for n in COMBAT_PUSH_TYPES if n in NET_TYPE_TO_IDX]))
+_empty = _torch.zeros(1, len(NET_TYPE_TO_IDX), dtype=_torch.bool)
+check("combat mask None if illegal", build_combat_type_mask(_empty) is None)
 
 obs = _obs(harv=1, bldgs=("fact", "proc", "barr"),
            avail=("e1", "harv", "proc", "powr", "barr"),
@@ -255,7 +279,8 @@ check("rush 8 no army_attack_move",
 check("rush 8 mueve el blob",
       sum(1 for c in rush if c.action == ActionType.ATTACK_MOVE) >= 8)
 dest = th._find_attack_target(obs_fog)
-check("dest es beacon no centro", dest == (95, 11))
+check("dest no es beacon GPS", dest != (95, 11))
+check("dest no es el yard", dest != (12, 16))
 
 obs_pack = _obs(
     cash=5000, harv=1,
@@ -267,7 +292,106 @@ push = th._handle_combat(obs_pack)
 check("con pack emite army_attack_move",
       any(c.action == ActionType.ARMY_ATTACK_MOVE for c in push))
 am = next(c for c in push if c.action == ActionType.ARMY_ATTACK_MOVE)
-check("army va al beacon", (am.target_x, am.target_y) == (95, 11))
+check("army no va al beacon GPS", (am.target_x, am.target_y) != (95, 11))
+
+# Visible leftover beats beacon GPS even if map_name has a beacon entry.
+obs_vis = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 14)],
+    enemy_bldgs=[_b("proc", 200, 70, 22)],
+)
+th2 = ScriptedTeacher()
+th2.phase = "attack"
+cell = th2._push_cell(obs_vis)
+check("push_cell prefiere visible enemigo sobre beacon",
+      cell == (70, 22))
+check("push_cell visible != beacon", cell != (95, 11))
+
+# Ghost last_seen: after seeing an enemy then fog, hunt the ghost cell.
+th3 = ScriptedTeacher()
+obs_see = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 10)],
+    enemies=[_u(99, "e1", 80, 18)],
+)
+th3._push_cell(obs_see)
+obs_fog2 = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 10)],
+)
+cell_g = th3._push_cell(obs_fog2)
+check("push_cell usa last_seen ghost tras fog", cell_g == (80, 18))
+
+# Mental enemy-base: first building sets belief; denser cluster updates;
+# push uses mental base after leftovers clear; GPS beacon unused.
+from rl.obs_encoding import EnemyBeliefStore, scalar_features, SCALAR_DIM
+bel = EnemyBeliefStore()
+obs_b1 = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 10)],
+    enemy_bldgs=[_b("powr", 201, 60, 20)],
+)
+bel.update(obs_b1)
+check("first enemy building sets mental base", bel.enemy_base_xy == (60, 20))
+check("first building count=1", bel.enemy_base_count == 1)
+obs_sparse = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 10)],
+    enemy_bldgs=[_b("powr", 202, 90, 40)],
+)
+bel.update(obs_sparse)
+check("sparser/equal count does not move base", bel.enemy_base_xy == (60, 20))
+obs_dense = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 10)],
+    enemy_bldgs=[
+        _b("proc", 210, 88, 18),
+        _b("tent", 211, 90, 18),
+        _b("powr", 212, 89, 20),
+    ],
+)
+bel.update(obs_dense)
+check("denser cluster updates mental base", bel.enemy_base_count == 3)
+check("denser cluster near (88-90,18-20)",
+      bel.enemy_base_xy is not None
+      and 86 <= bel.enemy_base_xy[0] <= 92
+      and 16 <= bel.enemy_base_xy[1] <= 22)
+
+th4 = ScriptedTeacher()
+th4.phase = "attack"
+# Seed belief via visible buildings then fog — push should use mental base.
+obs_see_b = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 14)],
+    enemy_bldgs=[
+        _b("proc", 220, 70, 22),
+        _b("tent", 221, 72, 22),
+        _b("powr", 222, 71, 24),
+    ],
+)
+cell_vis = th4._push_cell(obs_see_b)
+check("push prefers visible leftover over mental", cell_vis is not None)
+obs_fog_base = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 14)],
+)
+cell_mb = th4._push_cell(obs_fog_base)
+check("push uses mental base after leftovers cleared",
+      cell_mb == th4.belief.enemy_base_xy)
+check("mental base push != GPS beacon", cell_mb != (95, 11))
+
+sc = scalar_features(obs_fog_base, belief=th4.belief)
+check("SCALAR_DIM is 29", SCALAR_DIM == 29 and sc.shape == (29,))
+check("has_enemy_base_belief scalar on", float(sc[25]) == 1.0)
+check("base_conf > 0", float(sc[28]) > 0.0)
 
 obs_mill = _obs(
     cash=5000, harv=1,
@@ -275,10 +399,11 @@ obs_mill = _obs(
     units=[_u(i, "e1", 95, 11, idle=False) for i in range(1, 14)],
 )
 th.phase = "attack"
+th._last_contact = (95, 11)
 mill = th._handle_combat(obs_mill)
 mill_am = [c for c in mill if c.action == ActionType.ARMY_ATTACK_MOVE]
-check("mill beacon (no idle) reemite army", bool(mill_am))
-check("mill no re-beacon",
+check("mill pile lejos (no idle) reemite army", bool(mill_am))
+check("mill hunt no se queda en la pila",
       mill_am and (mill_am[0].target_x, mill_am[0].target_y) != (95, 11))
 
 obs_rush_mill = _obs(
@@ -287,12 +412,24 @@ obs_rush_mill = _obs(
     units=[_u(i, "e1", 95, 11, idle=False) for i in range(1, 9)],
 )
 th.phase = "attack"
+th._last_contact = (95, 11)
 rmill = th._handle_combat(obs_rush_mill)
 check("rush mill no idle emite AM",
       any(c.action == ActionType.ATTACK_MOVE for c in rmill))
-check("rush mill no todos al beacon",
+check("rush mill hunt no todos en la pila",
       any((c.target_x, c.target_y) != (95, 11)
           for c in rmill if c.action == ActionType.ATTACK_MOVE))
+
+# BC label: beacon-aimed army retargets to visible leftover.
+from rl.obs_encoding import resolve_beacon
+beacon_cmd = CommandModel(
+    action=ActionType.ARMY_ATTACK_MOVE, target_x=95, target_y=11)
+train_cmd = CommandModel(action=ActionType.TRAIN, item_type="e1")
+bc_ret = pick_bc_commands([beacon_cmd, train_cmd], obs_vis)
+check("BC attack retargetea lejos del beacon",
+      len(bc_ret) == 2
+      and bc_ret[1].action == ActionType.ARMY_ATTACK_MOVE
+      and (bc_ret[1].target_x, bc_ret[1].target_y) == (70, 22))
 
 obs_raid = _obs(
     cash=5000, harv=1,
@@ -388,7 +525,8 @@ try:
     check("TW prefer 20k echa win 33k antes que rush 12k",
           tw20.n_episodes == 1 and all(s["tag"][0] == "S" for s in tw20.snapshot()))
     man = json.loads((tw_dir / "manifest.json").read_text(encoding="utf-8"))
-    check("TW schema v1", man.get("schema") == TAPE_SCHEMA)
+    check("TW schema hunt_v2", man.get("schema") == TAPE_SCHEMA)
+    check("TW schema string", TAPE_SCHEMA == "eco_and_combat_mental_v3")
     stale = Path(tempfile.mkdtemp(prefix="twstale_"))
     try:
         (stale / "manifest.json").write_text(
@@ -397,6 +535,15 @@ try:
         check("TW schema viejo no hidrata", tw_stale.n_episodes == 0)
     finally:
         shutil.rmtree(stale, ignore_errors=True)
+    stale_v1 = Path(tempfile.mkdtemp(prefix="twv1_"))
+    try:
+        (stale_v1 / "manifest.json").write_text(
+            json.dumps({"schema": "eco_and_combat_v1", "cap": 50,
+                        "episodes": []}), encoding="utf-8")
+        tw_v1 = TeacherWinBuffer(cap_steps=50, path=stale_v1)
+        check("TW schema beacon v1 no hidrata", tw_v1.n_episodes == 0)
+    finally:
+        shutil.rmtree(stale_v1, ignore_errors=True)
 finally:
     shutil.rmtree(tw_dir, ignore_errors=True)
 
