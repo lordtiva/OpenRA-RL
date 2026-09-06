@@ -21,6 +21,8 @@ documents/
 # RL — pesos y métricas locales (no subir: 30-200 MB por ckpt)
 rl/ckpts/
 ckpts/
+rl/ckpts_v2/
+ckpts_v2/
 *.pt
 *.pth
 *.onnx

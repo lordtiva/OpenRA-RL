@@ -135,6 +135,13 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 | `--onboard-min-iters` | 20 | Mínimo de iters en B y en C (un 4/4 suelto no promociona) |
 
 | `--onboard-rewind N` | — | **Una vez**: `latest` ← `best`/`iterN`, trunca metrics/race. N≤`sft_iters` vuelve a A (`iter0020.pt`). N>sft en B pinnea BC. |
+| `--onboard-rush` | 8 | `ScriptedTeacher.RUSH_ATTACK_MOVE`. Bench n=20 eligió 8; 6/5 suben lose_rate. |
+| `--onboard-bc-games` | 4 | Partidas teacher / iter en A. |
+| `--onboard-eval-games` | 4 | Partidas eval del alumno / iter en A. |
+| `--onboard-fresh-tapes` | — | Borra `teacher_wins/` y re-juega al teacher. |
+| `--onboard-collect` | — | Suma teacher games aunque ya haya tapes. |
+
+`--scratch --onboard` **reusa** `teacher_wins/` (schema `eco_and_combat_v1`). La recolección es la parte lenta; el SFT se itera encima. Cintas viejas (sin schema / solo TRAIN) se ignoran y se vuelven a recolectar **una vez**.
 
 
 
@@ -168,23 +175,37 @@ Estado en `rl/ckpts/curriculum.json`. Cada salto mata el `rl.train` y lo relanza
 
   `attack_move` de todo el idle (legal sin pack). A 12, `army_attack_move`.
 
-  Leftover visible > beacon; peel de raid; TRAIN e1 en el push.
+  Leftover visible > beacon. Blob piled en beacon vacío (contacto visible = 0)
+
+  → hunt leftovers en niebla, aunque las unidades no estén `is_idle`. El
+
+  incomplete @64400 con `n_ene_visible=0` no es WinState roto: el espectador
+
+  sigue viendo edificios.
 
 - Clona cintas **`win` only** (`--bc-only`). **No** clona `lose` ni `incomplete` (timeout turtle).
+
+  Opening: TRAIN/BUILD. Attack (leftover o ≥8 combate): **también** un push
+
+  (`army_attack_move` / `attack_move`). Sin eco no hay army; sin push el SFT es miller.
 
 - **TeacherWinBuffer** persistente: acumula wins entre iters bajo `{ckpt_dir}/teacher_wins/`
 
   (`manifest.json` + `ep_XXXX.pt`). Cada update BC samplea el ring completo (un iter
 
-  con 0 wins nuevos sigue entrenando). Cap default `--bc-win-cap 4000`; override
+  con 0 wins nuevos sigue entrenando). Cap default `--bc-win-cap 16000`
 
-  con `--bc-win-dir`. Prefiere wins cortos (`prefer_ticks=40000`, como SIL).
+  (~30–40 rushes de ~12k ticks). Wins ≥`--bc-win-prefer-ticks` 20000 se recortan
+
+  primero (un 33k miller-win no come el dataset). SIL sigue en 40k. Override
+
+  con `--bc-win-dir`.
 
 - Además, 4 partidas del **alumno** por iter (`--eval-games 4`, sin PPO) para
 
   medir wr20 del clone. Sin eso A promocionaba a las 20 iters con un miller.
 
-- Macro **40** ticks / **1000** decisiones. **2** teacher + **2** eval. 6 epochs NLL. BC **wins-only** (no clona incompletes; rush teacher=8).
+- Macro **40** ticks / **1000** decisiones. **4** teacher + **4** eval. 6 epochs NLL. BC **wins-only** (no clona incompletes; rush teacher=8).
 
 - Collapse **off**. Hang 1200 s.
 

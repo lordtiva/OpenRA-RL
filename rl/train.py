@@ -39,6 +39,7 @@ from rl.best_ckpt import batch_is_dead, batch_is_wipe, maybe_update_best
 from rl.pfsp import BotPFSP, parse_pool
 from rl.imitation import (
     EliteBuffer, TeacherWinBuffer, SIL_PREFER_TICKS,
+    BC_WIN_CAP, BC_WIN_PREFER_TICKS,
     balance_bc_samples, lambda_bc_at, merge_teacher_wins,
 )
 from rl.scripted_teacher import ScriptedTeacher
@@ -150,7 +151,8 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
                 shaper_preset=args.shaper_preset,
                 auto_support=args.auto_support,
                 war_nudge=not args.no_war_nudge,
-                teacher=ScriptedTeacher())
+                teacher=ScriptedTeacher(
+                    rush_attack_move=int(getattr(args, "bc_rush", 0) or 0) or None))
         except Exception as e:
             print(f"  [bc] teacher game {i + 1}/{n} fail: {e}", flush=True)
             return None
@@ -519,17 +521,20 @@ async def amain(args):
     elite = EliteBuffer(cap_steps=2000) if args.sil else None
     teacher_wins = None
     if args.bc or bc_only:
-        win_cap = int(getattr(args, "bc_win_cap", 4000) or 4000)
+        win_cap = int(getattr(args, "bc_win_cap", 0) or BC_WIN_CAP)
+        win_prefer = int(getattr(args, "bc_win_prefer_ticks", 0)
+                         or BC_WIN_PREFER_TICKS)
         win_dir = getattr(args, "bc_win_dir", None) or os.path.join(
             args.ckpt_dir, "teacher_wins")
         teacher_wins = TeacherWinBuffer(
             cap_steps=win_cap,
-            prefer_ticks=SIL_PREFER_TICKS,
+            prefer_ticks=win_prefer,
             path=win_dir,
             keep_incomplete=bool(getattr(args, "bc_keep_incomplete", False)),
         )
-        print(f"  [bc] TeacherWinBuffer cap={win_cap} dir={win_dir} "
-              f"loaded eps={teacher_wins.n_episodes} steps={len(teacher_wins)}",
+        print(f"  [bc] TeacherWinBuffer cap={win_cap} prefer_ticks={win_prefer} "
+              f"dir={win_dir} loaded eps={teacher_wins.n_episodes} "
+              f"steps={len(teacher_wins)}",
               flush=True)
     if args.bc or args.sil:
         print(
@@ -590,35 +595,60 @@ async def amain(args):
         bc_meta = {}
         if args.bc and lmb_bc > 0.0:
             try:
-                new_eps, bc_meta = await collect_teacher_games(
-                    pool, infer_net, vocab, device, args, reset_kwargs)
-                new_wins = 0
-                if teacher_wins is not None:
-                    for ep in new_eps or []:
-                        n_add = teacher_wins.add_episode(
-                            ep.get("steps") or [],
-                            {"result": ep.get("result"),
-                             "ticks": ep.get("ticks")})
-                        if n_add > 0:
-                            new_wins += 1
-                    if new_wins:
-                        teacher_wins.save()
+                replay = (
+                    bool(getattr(args, "bc_replay", False))
+                    and bc_only
+                    and teacher_wins is not None
+                    and teacher_wins.n_episodes > 0
+                )
+                if replay:
                     raw = teacher_wins.sample(max_steps=teacher_wins.cap)
                     bc_samples = balance_bc_samples(raw)
-                    print(f"  [bc] buffer eps={teacher_wins.n_episodes} "
-                          f"steps={len(teacher_wins)} (+new_wins={new_wins}) "
-                          f"sample={len(bc_samples)}", flush=True)
-                    bc_meta["bc_n"] = len(bc_samples)
-                    bc_meta["bc_buffer_eps"] = teacher_wins.n_episodes
-                    bc_meta["bc_buffer_steps"] = len(teacher_wins)
-                    bc_meta["bc_new_wins"] = new_wins
+                    bc_meta = {
+                        "bc_n": len(bc_samples),
+                        "bc_n_raw": len(raw),
+                        "bc_buffer_eps": teacher_wins.n_episodes,
+                        "bc_buffer_steps": len(teacher_wins),
+                        "bc_new_wins": 0,
+                        "bc_replay": True,
+                        "bc_n_win_eps": 0,
+                        "bc_n_eps": 0,
+                        "bc_results": [],
+                    }
+                    print(f"  [bc] replay tapes eps={teacher_wins.n_episodes} "
+                          f"steps={len(teacher_wins)} sample={len(bc_samples)} "
+                          f"(no collect)",
+                          flush=True)
                 else:
-                    # Fallback: flatten this-iter wins (no persistent buffer).
-                    flat = []
-                    for ep in new_eps or []:
-                        flat.extend(ep.get("steps") or [])
-                    bc_samples = balance_bc_samples(flat)
-                    bc_meta["bc_n"] = len(bc_samples)
+                    new_eps, bc_meta = await collect_teacher_games(
+                        pool, infer_net, vocab, device, args, reset_kwargs)
+                    new_wins = 0
+                    if teacher_wins is not None:
+                        for ep in new_eps or []:
+                            n_add = teacher_wins.add_episode(
+                                ep.get("steps") or [],
+                                {"result": ep.get("result"),
+                                 "ticks": ep.get("ticks")})
+                            if n_add > 0:
+                                new_wins += 1
+                        if new_wins:
+                            teacher_wins.save()
+                        raw = teacher_wins.sample(max_steps=teacher_wins.cap)
+                        bc_samples = balance_bc_samples(raw)
+                        print(f"  [bc] buffer eps={teacher_wins.n_episodes} "
+                              f"steps={len(teacher_wins)} (+new_wins={new_wins}) "
+                              f"sample={len(bc_samples)}", flush=True)
+                        bc_meta["bc_n"] = len(bc_samples)
+                        bc_meta["bc_buffer_eps"] = teacher_wins.n_episodes
+                        bc_meta["bc_buffer_steps"] = len(teacher_wins)
+                        bc_meta["bc_new_wins"] = new_wins
+                    else:
+                        # Fallback: flatten this-iter wins (no persistent buffer).
+                        flat = []
+                        for ep in new_eps or []:
+                            flat.extend(ep.get("steps") or [])
+                        bc_samples = balance_bc_samples(flat)
+                        bc_meta["bc_n"] = len(bc_samples)
                 for s in bc_samples:
                     s["_ep"] = 10_000 + it
             except Exception as e:
@@ -1021,6 +1051,9 @@ def main():
                     help="Rival del ScriptedTeacher (independiente de --bot-type).")
     ap.add_argument("--bc-games", type=int, default=1,
                     help="Partidas teacher por iter (default 1).")
+    ap.add_argument("--bc-rush", type=int, default=0,
+                    help="ScriptedTeacher.RUSH_ATTACK_MOVE override (0 = class "
+                         "default 8). Fase A lo setea via curriculum a_rush.")
     ap.add_argument("--bc-epochs", type=int, default=1,
                     help="Epochs de NLL BC por iter (default 1).")
     ap.add_argument("--onboard-phase", default=None, choices=("A", "B", "C"),
@@ -1046,12 +1079,20 @@ def main():
     ap.add_argument("--bc-start-iter", type=int, default=0,
                     help="Origen del warmup BC. 0 = ckpt o start_iter. "
                          "No debe resetearse en cada --resume.")
-    ap.add_argument("--bc-win-cap", type=int, default=4000,
-                    help="Cap de steps del TeacherWinBuffer persistente "
-                         "(default 4000).")
+    ap.add_argument("--bc-win-cap", type=int, default=BC_WIN_CAP,
+                    help="Cap de steps del TeacherWinBuffer (default 16000, "
+                         "~30–40 rushes cortos).")
+    ap.add_argument("--bc-win-prefer-ticks", type=int,
+                    default=BC_WIN_PREFER_TICKS,
+                    help="Wins con ticks>=este se recortan primero y no se "
+                         "samplean si hay cortos (default 20000).")
     ap.add_argument("--bc-win-dir", default=None,
                     help="Dir del TeacherWinBuffer (default "
                          "{ckpt_dir}/teacher_wins).")
+    ap.add_argument("--bc-replay", action="store_true",
+                    help="Fase A: no jugar teacher games; SFT del ring "
+                         "teacher_wins/. auto_train lo pasa en --scratch "
+                         "cuando las cintas ya existen.")
     ap.add_argument("--lambda-sil", type=float, default=0.5,
                     help="Peso SIL cuando --sil (default 0.5).")
     args = ap.parse_args()

@@ -22,7 +22,7 @@ from openra_env.client import OpenRAEnv
 from rl.peer_obs import peer_obs_from_metadata
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_command_effective
-from rl.imitation import command_to_indices, pick_bc_command
+from rl.imitation import command_to_indices, pick_bc_command, pick_bc_commands
 from rl.network import ACTION_TYPES, HIDDEN_DIM
 from rl.obs_encoding import (
     decode_spatial, scalar_features, unit_tokens, EnemyBeliefStore,
@@ -152,6 +152,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     t0 = time.time()
     pending_cmd = None   # comando re-aplicado durante el frame-skip
     pending_sample = None
+    pending_bc_extra = []  # labels BC extra (eco+push) del mismo tick teacher
     ep_dims = None       # dims locked del mapa de juego (no shell)
     dims_hist = {}       # histograma de dims vistos
     dims_seen_order = [] # orden de primera aparicion (shell suele ser 1ro)
@@ -223,7 +224,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         hidden = hidden.detach()
                         value_t = net.value_head(hidden).squeeze(-1)
                     raw = teacher.decide(obs)
-                    primary = pick_bc_command(raw.commands)
+                    picks = pick_bc_commands(raw.commands, obs)
+                    primary = picks[0] if picks else pick_bc_command(raw.commands)
                     t0, u0, c0, i0 = command_to_indices(obs, primary, aidx)
                     action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
                         obs, t0, u0, c0, i0, aidx)
@@ -350,6 +352,37 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     "value_pred": out_value,
                     "h_in": h_in.cpu(),
                 }
+                pending_bc_extra = []
+                if teacher is not None:
+                    for extra_cmd in picks[1:]:
+                        xt, xu, xc, xi = command_to_indices(obs, extra_cmd, aidx)
+                        x_action, (xet, xeu, xei, xec) = index_to_command_effective(
+                            obs, xt, xu, xc, xi, aidx)
+                        xcell = torch.tensor([int(xec)])
+                        with torch.no_grad():
+                            xlp, _, _ = net.evaluate_actions(
+                                batch, h_in, {
+                                    "type": torch.tensor([xet], device=device),
+                                    "unit_slot": torch.tensor([xeu], device=device),
+                                    "cell_flat": torch.tensor(
+                                        [int(xec)], device=device),
+                                    "item_slot": torch.tensor([xei], device=device),
+                                    "had_item": had_item,
+                                })
+                        pending_bc_extra.append({
+                            "batch": {k: v.cpu() for k, v in batch.items()},
+                            "action": {
+                                "type": torch.tensor([xet]),
+                                "unit_slot": torch.tensor([xeu]),
+                                "cell_flat": xcell,
+                                "item_slot": torch.tensor([xei]),
+                                "had_item": had_item.cpu(),
+                                "log_prob": xlp.detach().cpu(),
+                            },
+                            "reward": 0.0,
+                            "value_pred": out_value,
+                            "h_in": h_in.cpu(),
+                        })
 
         # RL-vs-RL: frozen opponent acts from Multi0 fog view (not in traj).
         if (opponent_net is not None and can_decide and pending_cmd is not None
@@ -509,6 +542,9 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
 
         if can_decide and pending_sample is not None:
             traj.append(pending_sample)
+            if pending_bc_extra:
+                traj.extend(pending_bc_extra)
+                pending_bc_extra = []
 
         # F6 (auditoría): contar interrupciones SIEMPRE — antes solo se
         # registraban cuando pasaba telemetry (que train nunca pasa) y

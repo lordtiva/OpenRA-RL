@@ -17,18 +17,24 @@ from pathlib import Path
 
 import torch
 
-from rl.action_adapter import ENABLED_TYPES, TYPE_TO_IDX
+from rl.action_adapter import ENABLED_TYPES, TYPE_TO_IDX, n_combat_total
 from rl.network import ACTION_TYPES
 from rl.roles import role_of
 from openra_env.models import ActionType, CommandModel
 
-# Eco / producción primero: si el teacher emite TRAIN y ARMY en el mismo
-# tick, clonar TRAIN. El asalto ya lo sostiene auto_support.
+# Eco / producción primero en el opening. En attack (leftover o n_combat>=8)
+# pick_bc_commands clona TAMBIÉN un push: sin eso SFT es miller (TRAIN) y el
+# asalto no lo sostiene auto_support (A lleva --no-war-nudge).
 _BC_PRIORITY = (
     "train", "build", "place_building", "harvest", "deploy",
 )
 _BC_LAST = {"army_attack_move", "attack_move", "attack", "no_op"}
 _BC_COMBAT_CAP_TYPES = frozenset(_BC_LAST)
+# Alineado a ScriptedTeacher.RUSH_ATTACK_MOVE. Opening (<8, sin leftover)
+# no clona combate: sin eco sana no hay army que empujar.
+_BC_COMBAT_READY_N = 8
+# Manifest de TeacherWinBuffer. Cintas viejas (solo TRAIN) no se hidratan.
+TAPE_SCHEMA = "eco_and_combat_v1"
 
 
 def lambda_bc_at(it: int, start_iter: int, warmup: int = 80,
@@ -47,7 +53,10 @@ def _cmd_name(c) -> str:
 
 
 def pick_bc_command(commands) -> CommandModel:
-    """Orden clonable: TRAIN/BUILD/PLACE ganan a army_attack_move/no_op."""
+    """Opening: TRAIN/BUILD/PLACE ganan a army_attack_move/no_op.
+
+    El push en attack va por pick_bc_commands (segunda label), no acá.
+    """
     enabled = []
     for c in commands or []:
         name = _cmd_name(c)
@@ -63,6 +72,52 @@ def pick_bc_command(commands) -> CommandModel:
         if name not in _BC_LAST:
             return c
     return enabled[0][1]
+
+
+def _combat_bc_command(commands):
+    """Un push clonable: army_attack_move > attack_move > attack."""
+    enabled = []
+    for c in commands or []:
+        name = _cmd_name(c)
+        if name in ENABLED_TYPES:
+            enabled.append((name, c))
+    for want in ("army_attack_move", "attack_move", "attack"):
+        for name, c in enabled:
+            if name == want:
+                return c
+    return None
+
+
+def _bc_combat_ready(obs) -> bool:
+    if obs is None:
+        return False
+    leftover = bool(
+        getattr(obs, "visible_enemy_buildings", None)
+        or getattr(obs, "visible_enemies", None)
+    )
+    try:
+        n = int(n_combat_total(obs))
+    except (TypeError, ValueError):
+        n = 0
+    return leftover or n >= _BC_COMBAT_READY_N
+
+
+def pick_bc_commands(commands, obs=None) -> list:
+    """1–2 labels por tick. Opening = eco. Attack = eco + un push.
+
+    Sin leftover y n_combat<8: igual que pick_bc_command (TRAIN gana).
+    Con leftover o pack de rush: si hay combate distinto del primary, se
+    clonan los dos. El env sigue ejecutando todos los extras del teacher.
+    """
+    primary = pick_bc_command(commands)
+    combat = _combat_bc_command(commands)
+    if combat is None or combat is primary:
+        return [primary]
+    if not _bc_combat_ready(obs):
+        return [primary]
+    if _cmd_name(primary) in ("army_attack_move", "attack_move", "attack"):
+        return [primary]
+    return [primary, combat]
 
 
 def sample_type_name(s: dict) -> str:
@@ -139,8 +194,10 @@ def merge_teacher_wins(episodes: list, keep_incomplete: bool = False,
 
 
 def balance_bc_samples(samples: list, per_type_cap: int = 96,
-                       combat_cap: int = 64) -> list:
-    """Cap combat/no_op so a 600-step incomplete attack tape cannot drown TRAIN."""
+                       combat_cap: int = 96) -> list:
+    """Cap por tipo. Combate y TRAIN al mismo techo: sin eco no hay army,
+    sin combate el SFT es miller. Un incomplete 600-step ya no ahoga TRAIN
+    (even-pick); no recortes el push por debajo del eco."""
     if not samples:
         return []
     buckets: dict[str, list] = {}
@@ -207,6 +264,11 @@ def _cpu_clone_step(s: dict) -> dict:
 # 1141 closed in 17–30k. A 50k win dumps ~1k late train-spam into the ring;
 # sample_recent(512) used to clone that tail (Run 33 plateau).
 SIL_PREFER_TICKS = 40000
+# Teacher tapes for reuse: keep ~30–40 short rushes, not 9 mixed with 33k miller-wins.
+# Cap is STEPS not episodes. A 12k-tick win is ~280 steps → 16000 ≈ 40 rushes.
+# Long = ticks >= prefer; trim drops those first. 20k corta el timeout-adjacent.
+BC_WIN_CAP = 16000
+BC_WIN_PREFER_TICKS = 20000
 
 
 class EliteBuffer:
@@ -301,8 +363,8 @@ class TeacherWinBuffer:
     past wins when the current iter collects 0.
     """
 
-    def __init__(self, cap_steps: int = 4000,
-                 prefer_ticks: int = SIL_PREFER_TICKS,
+    def __init__(self, cap_steps: int = BC_WIN_CAP,
+                 prefer_ticks: int = BC_WIN_PREFER_TICKS,
                  path: str | os.PathLike | None = None,
                  keep_incomplete: bool = False,
                  incomplete_min_ticks: int = 15000):
@@ -413,6 +475,7 @@ class TeacherWinBuffer:
             except OSError:
                 pass
         manifest = {
+            "schema": TAPE_SCHEMA,
             "cap": self.cap,
             "prefer_ticks": self.prefer_ticks,
             "episodes": [],
@@ -446,6 +509,11 @@ class TeacherWinBuffer:
         try:
             manifest = json.loads(man_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            return 0
+        schema = str(manifest.get("schema") or "")
+        if schema != TAPE_SCHEMA:
+            # Cintas pre-v1 (solo TRAIN) no se hidratan: un --scratch las
+            # reusaría como miller. Recolectar de nuevo una vez.
             return 0
         loaded: list[dict] = []
         max_id = -1

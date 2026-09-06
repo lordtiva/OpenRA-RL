@@ -47,6 +47,8 @@ def main() -> int:
         "best.json",
         "best.pt",
         "latest.pt",
+        "curriculum.json",
+        "pfsp_stats.json",
     ):
         p = src / name
         if p.exists() and p.is_file():
@@ -63,6 +65,10 @@ def main() -> int:
         shutil.copy2(p, dest / p.name)
         p.unlink()
         moved.append(p.name)
+    tw = src / "teacher_wins"
+    if tw.is_dir():
+        shutil.copytree(tw, dest / "teacher_wins")
+        copied.append("teacher_wins/")
 
     # New era: do not hydrate beginner wins into easy wr.
     note = (

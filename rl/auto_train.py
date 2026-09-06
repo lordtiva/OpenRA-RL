@@ -31,6 +31,7 @@ Cuelgues — DOS orígenes distintos (no confundirlos):
 Uso:  .venv/Scripts/python.exe rl/auto_train.py
       .venv/Scripts/python.exe rl/auto_train.py --scratch
       .venv/Scripts/python.exe rl/auto_train.py --scratch --onboard
+      .venv/Scripts/python.exe rl/auto_train.py --scratch --onboard --onboard-rush 8
       .venv/Scripts/python.exe rl/auto_train.py --onboard --onboard-rewind 24
       .venv/Scripts/python.exe rl/auto_train.py --no-collapse
 Ctrl+C para parar todo.
@@ -62,6 +63,7 @@ METRICS = CKPT_DIR / "metrics.jsonl"
 CURRICULUM = CKPT_DIR / "curriculum.json"
 # Filled in main() when --onboard. launch_train / recover lo leen.
 _onboard = None
+_replay_tapes = False
 # Seed de emergencia si ckpts_v2 no tiene latest/iter (sigue en el árbol v1.1).
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
 
@@ -523,6 +525,9 @@ def launch_train(extra_args=None) -> subprocess.Popen:
     urls = live_game_urls()
     n_srv = urls.count("http")
     extra_args = list(extra_args or [])
+    if (_replay_tapes and _onboard is not None
+            and _onboard.get("phase") == "A"):
+        extra_args.append("--bc-replay")
     if _onboard is not None:
         args = ob.build_train_argv(list(TRAIN_ARGS), _onboard["phase"], _onboard)
     else:
@@ -576,6 +581,20 @@ def parse_auto_args(argv=None):
                     help="Iters consecutivos con wr20 sobre el umbral.")
     ap.add_argument("--onboard-min-iters", type=int, default=20,
                     help="Iters minimos en B/C antes de promover.")
+    ap.add_argument("--onboard-rush", type=int, default=8,
+                    help="ScriptedTeacher RUSH_ATTACK_MOVE (default 8; bench n=20).")
+    ap.add_argument("--onboard-bc-games", type=int, default=4,
+                    help="Partidas teacher por iter en fase A (default 4).")
+    ap.add_argument("--onboard-eval-games", type=int, default=4,
+                    help="Partidas eval del alumno por iter en fase A (default 4).")
+    ap.add_argument(
+        "--onboard-fresh-tapes", action="store_true",
+        help="Borra teacher_wins/ y vuelve a recolectar. Default: --scratch "
+             "reusa las cintas (la parte lenta). Cintas viejas (schema "
+             "distinto) se ignoran solas.")
+    ap.add_argument(
+        "--onboard-collect", action="store_true",
+        help="Fuerza teacher games aunque ya haya tapes (no pasa --bc-replay).")
     ap.add_argument(
         "--onboard-rewind", type=int, default=None, metavar="N",
         help="Fase B: copia best/iterN -> latest, trunca metrics y "
@@ -593,16 +612,21 @@ def parse_auto_args(argv=None):
 
 def _init_onboard(args) -> None:
     """Carga o crea curriculum.json. --scratch --onboard reinicia en A."""
-    global _onboard
+    global _onboard, _replay_tapes
     if not args.onboard:
         _onboard = None
+        _replay_tapes = False
         return
+    _replay_tapes = False
     overrides = {
         "sft_iters": int(args.onboard_sft_iters),
         "promote_wr20": float(args.onboard_promote_wr20),
         "done_wr20": float(args.onboard_done_wr20),
         "streak": int(args.onboard_streak),
         "min_iters": int(args.onboard_min_iters),
+        "a_rush": int(args.onboard_rush),
+        "bc_games": int(args.onboard_bc_games),
+        "a_eval_games": int(args.onboard_eval_games),
     }
     existing = ob.load_curriculum(CURRICULUM)
     if existing and not args.scratch:
@@ -611,9 +635,9 @@ def _init_onboard(args) -> None:
             _onboard[k] = v
         # Speed knobs: take current defaults so a resume picks up
         # parallel teacher / B mixed-BC without --scratch.
-        for k in ("bc_games", "a_macro_ticks", "a_max_steps", "a_k_skip",
-                  "a_eval_games",
-                  "b_bc_games", "b_bc_epochs", "b_bc_warmup"):
+        for k in ("a_macro_ticks", "a_max_steps", "a_k_skip",
+                  "b_bc_games", "b_bc_epochs", "b_bc_warmup",
+                  "bc_win_cap", "bc_win_prefer_ticks"):
             _onboard[k] = ob.DEFAULTS[k]
         if args.onboard_rewind is not None:
             keep = int(args.onboard_rewind)
@@ -639,6 +663,26 @@ def _init_onboard(args) -> None:
         sys.exit(2)
     if existing and args.scratch:
         log("onboard --scratch: reinicia curriculum en fase A")
+    tw = CKPT_DIR / "teacher_wins"
+    if args.onboard_fresh_tapes and tw.is_dir():
+        shutil.rmtree(tw, ignore_errors=True)
+        log("  wiped teacher_wins/ (--onboard-fresh-tapes)")
+    elif tw.is_dir() and (tw / "manifest.json").is_file():
+        try:
+            man = json.loads((tw / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            man = {}
+        from rl.imitation import TAPE_SCHEMA
+        n_eps = len(man.get("episodes") or [])
+        if str(man.get("schema") or "") == TAPE_SCHEMA and n_eps > 0:
+            if getattr(args, "onboard_collect", False):
+                log(f"  teacher_wins/ {n_eps} eps — --onboard-collect suma más")
+            else:
+                _replay_tapes = True
+                log(f"  reusando teacher_wins/ ({n_eps} eps, schema {TAPE_SCHEMA}; "
+                    f"SFT scratch no re-juega al teacher)")
+        else:
+            log("  teacher_wins/ schema viejo o vacío — se re-recolecta")
     elif (CKPT_DIR / "latest.pt").exists() and not args.scratch:
         log("FAIL: --onboard sin curriculum.json y con latest.pt. "
             "Para arrancar de 0: --scratch --onboard "
@@ -662,6 +706,9 @@ def main():
     if args.scratch and not args.onboard:
         os.environ["FORCE_SCRATCH"] = "1"
     collapse_watch = bool(args.collapse)
+    # A/B: restoring best@lucky-2/4 freezes SFT (docs/22-onboard.md).
+    if _onboard and _onboard.get("phase") in ("A", "B"):
+        collapse_watch = False
     _cw = "ON" if collapse_watch else "OFF"
     _sc = "yes" if args.scratch else "no"
     _ob = _onboard.get("phase") if _onboard else "off"

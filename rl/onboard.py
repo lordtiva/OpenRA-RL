@@ -15,6 +15,8 @@ import os
 import shutil
 from pathlib import Path
 
+from rl.imitation import BC_WIN_CAP, BC_WIN_PREFER_TICKS
+
 PHASES = ("A", "B", "C", "done")
 
 DEFAULTS = {
@@ -23,31 +25,36 @@ DEFAULTS = {
     "done_wr20": 0.45,
     "streak": 10,
     "min_iters": 20,
-    "bc_games": 2,
+    "bc_games": 4,
     "bc_epochs": 6,
     "a_macro_ticks": 40,
     "a_max_steps": 1000,
     "a_k_skip": 4,
-    "a_eval_games": 2,
+    "a_eval_games": 4,
+    "a_rush": 8,
     "bc_iters": 10000,
     # Phase B mixed BC (not A's 4 games / 6 epochs — that is SFT).
     "b_bc_games": 2,
     "b_bc_epochs": 2,
     "b_bc_warmup": 80,
     "b_bc_start_iter": 0,  # 0 = use phase_started_iter
+    "bc_win_cap": BC_WIN_CAP,
+    "bc_win_prefer_ticks": BC_WIN_PREFER_TICKS,
 }
 
 # Flags that TRAIN_ARGS may set and that a phase must replace or drop.
 # store_true flags have no value; the rest consume the next argv token.
 _STORE_TRUE = {
     "--pfsp", "--pfsp-rl", "--bc", "--bc-only", "--sil",
-    "--reset-opt", "--bc-keep-incomplete",
+    "--reset-opt", "--bc-keep-incomplete", "--bc-replay",
 }
 _STRIP = {
     "--bot-type", "--pfsp", "--pfsp-rl", "--pfsp-pool", "--pfsp-anchor-prob",
     "--bc", "--bc-only", "--bc-warmup", "--bc-start-iter", "--bc-teacher-bot",
     "--bc-games", "--bc-epochs", "--bc-keep-incomplete",
     "--bc-macro-ticks", "--bc-max-steps", "--bc-lambda-end",
+    "--bc-rush", "--bc-replay",
+    "--bc-win-cap", "--bc-win-prefer-ticks",
     "--eval-games",
     "--sil", "--lambda-sil",
     "--iters", "--reset-opt", "--onboard-phase",
@@ -122,11 +129,15 @@ def save_curriculum(path: str | Path, cfg: dict) -> None:
         "a_max_steps": int(cfg.get("a_max_steps", DEFAULTS["a_max_steps"])),
         "a_k_skip": int(cfg.get("a_k_skip", DEFAULTS["a_k_skip"])),
         "a_eval_games": int(cfg.get("a_eval_games", DEFAULTS["a_eval_games"])),
+        "a_rush": int(cfg.get("a_rush", DEFAULTS["a_rush"])),
         "bc_iters": int(cfg.get("bc_iters", DEFAULTS["bc_iters"])),
         "b_bc_games": int(cfg.get("b_bc_games", DEFAULTS["b_bc_games"])),
         "b_bc_epochs": int(cfg.get("b_bc_epochs", DEFAULTS["b_bc_epochs"])),
         "b_bc_warmup": int(cfg.get("b_bc_warmup", DEFAULTS["b_bc_warmup"])),
         "b_bc_start_iter": int(cfg.get("b_bc_start_iter") or 0),
+        "bc_win_cap": int(cfg.get("bc_win_cap", DEFAULTS["bc_win_cap"])),
+        "bc_win_prefer_ticks": int(
+            cfg.get("bc_win_prefer_ticks", DEFAULTS["bc_win_prefer_ticks"])),
         "a_launched": bool(cfg.get("a_launched")),
         "c_reset_opt_done": bool(cfg.get("c_reset_opt_done")),
         "phase_started_iter": int(cfg.get("phase_started_iter") or 0),
@@ -155,12 +166,16 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--bc-teacher-bot", "beginner",
             "--bc-games", str(int(cfg["bc_games"])),
             "--bc-epochs", str(int(cfg["bc_epochs"])),
+            "--bc-rush", str(int(cfg.get("a_rush") or DEFAULTS["a_rush"])),
             "--bc-start-iter", "1",
             "--bc-warmup", "1",
             "--macro-ticks", str(int(cfg["a_macro_ticks"])),
             "--max-steps", str(int(cfg["a_max_steps"])),
             "--k-skip", str(int(cfg["a_k_skip"])),
             "--eval-games", str(int(cfg.get("a_eval_games") or DEFAULTS["a_eval_games"])),
+            "--bc-win-cap", str(int(cfg.get("bc_win_cap") or DEFAULTS["bc_win_cap"])),
+            "--bc-win-prefer-ticks", str(int(
+                cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
             "--iters", str(int(cfg["bc_iters"])),
             "--onboard-phase", "A",
         ]
@@ -175,11 +190,15 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             # wins-only BC (no --bc-keep-incomplete): incompletes = timeout turtle
             "--bc-games", str(int(cfg.get("b_bc_games") or DEFAULTS["b_bc_games"])),
             "--bc-epochs", str(int(cfg.get("b_bc_epochs") or DEFAULTS["b_bc_epochs"])),
+            "--bc-rush", str(int(cfg.get("a_rush") or DEFAULTS["a_rush"])),
             "--bc-warmup", str(int(cfg.get("b_bc_warmup") or DEFAULTS["b_bc_warmup"])),
             "--bc-lambda-end", "0.25",
             "--bc-start-iter", str(bc_start),
             "--bc-macro-ticks", str(int(cfg.get("a_macro_ticks") or DEFAULTS["a_macro_ticks"])),
             "--bc-max-steps", str(int(cfg.get("a_max_steps") or DEFAULTS["a_max_steps"])),
+            "--bc-win-cap", str(int(cfg.get("bc_win_cap") or DEFAULTS["bc_win_cap"])),
+            "--bc-win-prefer-ticks", str(int(
+                cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
             "--sil", "--lambda-sil", "0.5",
             "--iters", str(int(cfg["bc_iters"])),
             "--onboard-phase", "B",

@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -13,11 +14,13 @@ from rl.imitation import (
     EliteBuffer,
     TeacherWinBuffer,
     SIL_PREFER_TICKS,
+    TAPE_SCHEMA,
     balance_bc_samples,
     command_to_indices,
     lambda_bc_at,
     merge_teacher_wins,
     pick_bc_command,
+    pick_bc_commands,
     sample_type_name,
 )
 from rl.scripted_teacher import ScriptedTeacher
@@ -81,6 +84,36 @@ picked = pick_bc_command([
     CommandModel(action=ActionType.TRAIN, item_type="e1"),
 ])
 check("pick TRAIN gana a ARMY_ATTACK_MOVE", picked.action == ActionType.TRAIN)
+
+obs_open = _obs(harv=1, bldgs=("fact", "proc"),
+                units=[_u(1, "e1", 12, 16)])
+both_cmds = [
+    CommandModel(action=ActionType.ARMY_ATTACK_MOVE, target_x=90, target_y=10),
+    CommandModel(action=ActionType.TRAIN, item_type="e1"),
+]
+open_picks = pick_bc_commands(both_cmds, obs_open)
+check("opening: solo TRAIN (sin leftover, 1 rifle)",
+      len(open_picks) == 1 and open_picks[0].action == ActionType.TRAIN)
+
+obs_atk = _obs(
+    harv=1, bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 9)],
+    enemy_bldgs=[_b("proc", 200, 80, 20)],
+)
+atk_picks = pick_bc_commands(both_cmds, obs_atk)
+check("attack leftover: TRAIN + army",
+      len(atk_picks) == 2
+      and atk_picks[0].action == ActionType.TRAIN
+      and atk_picks[1].action == ActionType.ARMY_ATTACK_MOVE)
+
+obs_rush = _obs(
+    harv=1, bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 9)],
+)
+rush_picks = pick_bc_commands(both_cmds, obs_rush)
+check("rush 8 sin leftover: TRAIN + army",
+      len(rush_picks) == 2
+      and rush_picks[1].action == ActionType.ARMY_ATTACK_MOVE)
 
 obs = _obs(harv=1, bldgs=("fact", "proc", "barr"),
            avail=("e1", "harv", "proc", "powr", "barr"),
@@ -236,6 +269,31 @@ check("con pack emite army_attack_move",
 am = next(c for c in push if c.action == ActionType.ARMY_ATTACK_MOVE)
 check("army va al beacon", (am.target_x, am.target_y) == (95, 11))
 
+obs_mill = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 95, 11, idle=False) for i in range(1, 14)],
+)
+th.phase = "attack"
+mill = th._handle_combat(obs_mill)
+mill_am = [c for c in mill if c.action == ActionType.ARMY_ATTACK_MOVE]
+check("mill beacon (no idle) reemite army", bool(mill_am))
+check("mill no re-beacon",
+      mill_am and (mill_am[0].target_x, mill_am[0].target_y) != (95, 11))
+
+obs_rush_mill = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 95, 11, idle=False) for i in range(1, 9)],
+)
+th.phase = "attack"
+rmill = th._handle_combat(obs_rush_mill)
+check("rush mill no idle emite AM",
+      any(c.action == ActionType.ATTACK_MOVE for c in rmill))
+check("rush mill no todos al beacon",
+      any((c.target_x, c.target_y) != (95, 11)
+          for c in rmill if c.action == ActionType.ATTACK_MOVE))
+
 obs_raid = _obs(
     cash=5000, harv=1,
     bldgs=("fact", "proc", "barr"),
@@ -322,6 +380,23 @@ try:
                     {"result": "win", "ticks": 18000})
     check("TW trim echa largo",
           tw3.n_episodes == 1 and all(s["tag"][0] == "S" for s in tw3.snapshot()))
+    tw20 = TeacherWinBuffer(cap_steps=25, prefer_ticks=20000)
+    tw20.add_episode([{"tag": ("L", i)} for i in range(20)],
+                     {"result": "win", "ticks": 33456})
+    tw20.add_episode([{"tag": ("S", i)} for i in range(20)],
+                     {"result": "win", "ticks": 12000})
+    check("TW prefer 20k echa win 33k antes que rush 12k",
+          tw20.n_episodes == 1 and all(s["tag"][0] == "S" for s in tw20.snapshot()))
+    man = json.loads((tw_dir / "manifest.json").read_text(encoding="utf-8"))
+    check("TW schema v1", man.get("schema") == TAPE_SCHEMA)
+    stale = Path(tempfile.mkdtemp(prefix="twstale_"))
+    try:
+        (stale / "manifest.json").write_text(
+            json.dumps({"cap": 50, "episodes": []}), encoding="utf-8")
+        tw_stale = TeacherWinBuffer(cap_steps=50, path=stale)
+        check("TW schema viejo no hidrata", tw_stale.n_episodes == 0)
+    finally:
+        shutil.rmtree(stale, ignore_errors=True)
 finally:
     shutil.rmtree(tw_dir, ignore_errors=True)
 

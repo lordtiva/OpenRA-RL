@@ -16,7 +16,10 @@ Este teacher:
   - rush: powr → proc → tent. Sin weap en el camino crítico
   - a 8 rifles: attack_move de TODO el idle (legal sin pack mask)
   - a PACK_ARMY (12): army_attack_move (lo que el alumno puede emitir)
-  - leftover visible > beacon; si el blob ya está en el dest vacío, scout
+  - leftover visible > beacon; blob piled on empty beacon → hunt leftovers
+    (bench "n_ene=0 incomplete" is fog, not WinState: spectator still has
+    buildings. AttackMove mill at (95,11) never re-issued because units
+    were not is_idle).
   - peel de raid; TRAIN e1 durante el push; 2 harvs; 0 guards / 0 APC
 """
 from __future__ import annotations
@@ -27,7 +30,10 @@ from examples.scripted_bot import ScriptedBot
 from openra_env.models import ActionType, CommandModel, OpenRAObservation
 from rl.action_adapter import PACK_ARMY, n_combat_total
 from rl.auto_support import (
+    ARRIVED_CELLS,
     DEFEND_CELLS,
+    MIN_PILE_FOR_HUNT,
+    _hunt_cell,
     fog_scout_destinations,
     home_raid_targets,
     war_nudge_cell,
@@ -128,7 +134,7 @@ class ScriptedTeacher(ScriptedBot):
         return commands
 
     def _push_cell(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
-        """Raid en casa > prod visible > edificio/unidad > beacon. Nunca centro."""
+        """Raid en casa > prod visible > edificio/unidad > hunt si piled > beacon."""
         raids = home_raid_targets(obs)
         if raids:
             origin = self._own_fact(obs) or (12, 16)
@@ -148,9 +154,14 @@ class ScriptedTeacher(ScriptedBot):
         if obs.visible_enemies:
             return _xy(obs.visible_enemies[0])
         beacon = resolve_beacon(obs)
-        if beacon is not None:
-            return int(beacon[0]), int(beacon[1])
-        return None
+        if beacon is None:
+            return None
+        # Visible map empty: approach beacon, then sweep leftovers in fog.
+        combat = self._all_combat(obs)
+        n_at = self._piled_on(combat, beacon, ARRIVED_CELLS)
+        if n_at >= MIN_PILE_FOR_HUNT:
+            return _hunt_cell(obs, beacon)
+        return int(beacon[0]), int(beacon[1])
 
     def _own_fact(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
         for b in obs.buildings or []:
@@ -161,13 +172,27 @@ class ScriptedTeacher(ScriptedBot):
                     continue
         return None
 
-    def _idle_combat(self, obs: OpenRAObservation) -> list:
+    def _all_combat(self, obs: OpenRAObservation) -> list:
         return [
             u for u in obs.units
             if (u.type in self.COMBAT_UNIT_TYPES
-                and u.is_idle
                 and "harv" not in str(u.type or "").lower())
         ]
+
+    def _idle_combat(self, obs: OpenRAObservation) -> list:
+        return [u for u in self._all_combat(obs) if u.is_idle]
+
+    def _piled_on(self, units, dest, radius: int) -> int:
+        if dest is None:
+            return 0
+        n = 0
+        for u in units or []:
+            try:
+                if _cheb(_xy(u), dest) <= int(radius):
+                    n += 1
+            except (TypeError, ValueError):
+                continue
+        return n
 
     def _near_home(self, obs: OpenRAObservation, u) -> bool:
         origin = self._own_fact(obs)
@@ -181,15 +206,21 @@ class ScriptedTeacher(ScriptedBot):
     def _handle_combat(self, obs: OpenRAObservation) -> List[CommandModel]:
         commands: List[CommandModel] = []
         idle = self._idle_combat(obs)
-        if not idle:
-            return commands
+        combat = self._all_combat(obs)
         dest = self._push_cell(obs)
         raids = home_raid_targets(obs)
         n_combat = n_combat_total(obs)
-        home_idle = [u for u in idle if self._near_home(obs, u)]
         leftover = bool(obs.visible_enemy_buildings or obs.visible_enemies)
+        beacon = resolve_beacon(obs)
+        piled_beacon = (
+            beacon is not None
+            and self._piled_on(combat, beacon, ARRIVED_CELLS) >= MIN_PILE_FOR_HUNT
+        )
 
         if raids:
+            home_idle = [u for u in idle if self._near_home(obs, u)]
+            if not home_idle:
+                return commands
             rx, ry = dest if dest is not None else _xy(raids[0])
             for u in home_idle[:8]:
                 commands.append(CommandModel(
@@ -199,6 +230,42 @@ class ScriptedTeacher(ScriptedBot):
                     target_y=int(ry),
                 ))
             self._log(f"Peel raid {len(commands)} idle -> ({rx},{ry})")
+            return commands
+
+        # Visible contact is 0 but the spectator still has buildings (fog).
+        # AttackMove units sitting on the beacon are not is_idle, so the old
+        # idle-only scout never fired and the episode timed out at 64400.
+        if not leftover and dest is not None and piled_beacon:
+            if n_combat >= PACK_ARMY:
+                commands.append(CommandModel(
+                    action=ActionType.ARMY_ATTACK_MOVE,
+                    target_x=int(dest[0]),
+                    target_y=int(dest[1]),
+                ))
+                self._log(f"Remnant army AM {n_combat} toward {dest}")
+                return commands
+            movers = list(idle)
+            if not movers:
+                for u in combat:
+                    try:
+                        if beacon is not None and _cheb(_xy(u), beacon) <= ARRIVED_CELLS:
+                            movers.append(u)
+                    except (TypeError, ValueError):
+                        continue
+            dests = self._remnant_dests(obs, dest, min(len(movers), 12))
+            n_go = min(len(movers), len(dests), 12)
+            for u, d in zip(movers[:n_go], dests):
+                commands.append(CommandModel(
+                    action=ActionType.ATTACK_MOVE,
+                    actor_id=int(u.actor_id),
+                    target_x=int(d[0]),
+                    target_y=int(d[1]),
+                ))
+            if commands:
+                self._log(f"Remnant sweep {len(commands)} toward {dests[:n_go]}")
+            return commands
+
+        if not idle:
             return commands
 
         piled = 0
@@ -217,7 +284,6 @@ class ScriptedTeacher(ScriptedBot):
                     f"Army attack-move {len(idle)}/{n_combat} toward {dest}"
                 )
                 return commands
-            # Blob already on an empty dest (beacon mill): scout leftovers.
 
         # Rush: walk the whole idle blob. attack_move is legal without pack 12.
         # If already piled on an empty dest, fall through to fog scout.
@@ -235,11 +301,13 @@ class ScriptedTeacher(ScriptedBot):
             return commands
 
         n_scout = self.N_SCOUTS
-        dests: List[Tuple[int, int]] = []
-        if dest is not None:
-            dests.append(dest)
-        fog = fog_scout_destinations(obs, max(0, n_scout - len(dests)))
-        dests.extend(fog)
+        dests = self._remnant_dests(obs, dest, n_scout) if not leftover else []
+        if leftover or not dests:
+            dests = []
+            if dest is not None:
+                dests.append(dest)
+            fog = fog_scout_destinations(obs, max(0, n_scout - len(dests)))
+            dests.extend(fog)
         for u, d in zip(idle[:n_scout], dests):
             commands.append(CommandModel(
                 action=ActionType.ATTACK_MOVE,
@@ -250,6 +318,21 @@ class ScriptedTeacher(ScriptedBot):
         if commands:
             self._log(f"Scout {len(commands)} toward {dests[:len(commands)]}")
         return commands
+
+    def _remnant_dests(
+        self, obs: OpenRAObservation, dest: Optional[Tuple[int, int]], n: int,
+    ) -> List[Tuple[int, int]]:
+        """Hunt + fog cells. Never pad with the mill beacon."""
+        n = max(0, int(n))
+        if n <= 0:
+            return []
+        dests: List[Tuple[int, int]] = []
+        beacon = resolve_beacon(obs)
+        if dest is not None and (beacon is None or dest != (int(beacon[0]), int(beacon[1]))):
+            dests.append((int(dest[0]), int(dest[1])))
+        fog = fog_scout_destinations(obs, max(0, n - len(dests)))
+        dests.extend(fog)
+        return dests[:n]
 
     def _find_attack_target(self, obs: OpenRAObservation) -> Tuple[int, int]:
         d = self._push_cell(obs)
