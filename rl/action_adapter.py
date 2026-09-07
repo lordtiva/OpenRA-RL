@@ -373,22 +373,96 @@ def stage_army_attack_cell(obs, aidx, cx: int, cy: int):
     """If army→target crosses a lake, stage via the wider N/S flank first."""
     grid = getattr(aidx, "pass_grid", None)
     h, w = aidx.h, aidx.w
-    cen = _army_centroid(obs)
+    # Combat list (same filters as _army_centroid). n_advanced exists because a
+    # split army / base spawn pulls the mean centroid west — enough units past
+    # the choke must not remap the attack cell backward to the south flank.
+    combat = []
+    for u in getattr(obs, "units", None) or []:
+        ut = str(getattr(u, "type", "") or "").lower()
+        if "harv" in ut or "mcv" in ut:
+            continue
+        if not bool(getattr(u, "can_attack", True)):
+            continue
+        try:
+            combat.append((int(u.cell_x), int(u.cell_y)))
+        except (TypeError, ValueError):
+            continue
+    n_advanced = sum(1 for c in combat if c[0] > 35)
+    if n_advanced >= 8:
+        return cx, cy
+    cen = None
+    if combat:
+        sx = sum(c[0] for c in combat) / len(combat)
+        sy = sum(c[1] for c in combat) / len(combat)
+        cen = (sx, sy)
     if cen is None or grid is None:
+        return cx, cy
+    # Already past home choke on east-facing maps — keep the attack cell.
+    if cen[0] > 35:
         return cx, cy
     if not _midline_blocked(cen[0], cen[1], cx, cy, grid, h, w):
         return cx, cy
     flank = _wider_flank_passable(int((cen[0] + cx) / 2), int((cen[1] + cy) / 2), grid, h, w)
     if flank is None:
         return cx, cy
+    # Map-agnostic attractor guard: army already standing on/near the flank
+    # waypoint — do not re-stage onto the same cell they occupy.
+    if (flank[0] - cen[0]) ** 2 + (flank[1] - cen[1]) ** 2 < 36:
+        return cx, cy
     # Only stage if flank is meaningfully different from final target.
     if (flank[0] - cx) ** 2 + (flank[1] - cy) ** 2 < 36:
         return cx, cy
     return int(flank[0]), int(flank[1])
 
-def remap_move_cell(obs, aidx, cx: int, cy: int, actor_id: int = 0):
-    """If (cx,cy) is water/OOB/unpathable, retarget: wider flank, enemy, beacon, else near unit.
 
+def should_emit_army_push(prev, cx, cy, eps=8) -> bool:
+    """True if army push cell moved enough to warrant re-emitting.
+
+    Hysteresis for executed OpenRA commands only (rollout / live). Keep BC
+    labels as the intended attack cell — call this when building final
+    OpenRAAction.commands, not inside index_to_command.
+    """
+    if prev is None:
+        return True
+    try:
+        dx = int(cx) - int(prev[0])
+        dy = int(cy) - int(prev[1])
+    except (TypeError, ValueError, IndexError):
+        return True
+    return dx * dx + dy * dy >= int(eps) * int(eps)
+
+
+def filter_army_push_hysteresis(commands, last_army_push, eps=8):
+    """Drop near-duplicate army_attack_move from a final command list.
+
+    Returns (kept_commands, new_last_army_push). Falls back to [no_op] if empty.
+    """
+    if not commands:
+        return list(commands or []), last_army_push
+    kept = []
+    new_last = last_army_push
+    for c in commands:
+        cname = getattr(getattr(c, "action", None), "value", None) or str(
+            getattr(c, "action", ""))
+        if cname == "army_attack_move" and getattr(c, "target_x", None) is not None:
+            tx, ty = int(c.target_x), int(c.target_y)
+            if not should_emit_army_push(new_last, tx, ty, eps=eps):
+                continue
+            new_last = (tx, ty)
+        kept.append(c)
+    if not kept:
+        from openra_env.models import ActionType, CommandModel
+        kept = [CommandModel(action=ActionType.NO_OP)]
+    return kept, new_last
+
+def remap_move_cell(obs, aidx, cx: int, cy: int, actor_id: int = 0):
+    """If (cx,cy) is water/OOB/unpathable, retarget near the click — not south flank.
+
+    Order: legal keep; else nearest_passable(cx,cy); else nearest enemy;
+    else resolve_beacon + nearest_passable; else near unit.
+    Does NOT use _wider_flank_passable (that snap sent illegal mid-map water
+    clicks to the south ore corridor y~38-40). Flank staging stays only in
+    stage_army_attack_cell (opening choke).
     Does NOT use a hardcoded y<40 water line — passability comes from obs/spatial.
     If there is no passability grid, only OOB is illegal.
     """
@@ -405,10 +479,11 @@ def remap_move_cell(obs, aidx, cx: int, cy: int, actor_id: int = 0):
     if legal(cx, cy):
         return cx, cy
 
-    # Informe-3 lake choke: snap to the wider N/S land corridor first.
-    flank = _wider_flank_passable(cx, cy, grid, h, w)
-    if flank is not None and legal(flank[0], flank[1]):
-        return int(flank[0]), int(flank[1])
+    # Prefer land near the illegal click (not Informe-3 N/S ore flank).
+    if grid is not None:
+        px, py = nearest_passable(cx, cy, grid, h, w)
+        if legal(px, py):
+            return int(px), int(py)
 
     enemies = list(getattr(obs, "visible_enemies", None) or []) + list(
         getattr(obs, "visible_enemy_buildings", None) or [])
@@ -437,6 +512,107 @@ def remap_move_cell(obs, aidx, cx: int, cy: int, actor_id: int = 0):
             if blds:
                 ux, uy = int(blds[0].cell_x), int(blds[0].cell_y)
     return nearest_passable(ux, uy, grid, h, w)
+
+
+def _combat_xy_list(obs):
+    """Own combat cell positions (skip harv/mcv / non-attackers)."""
+    out = []
+    for u in getattr(obs, "units", None) or []:
+        ut = str(getattr(u, "type", "") or "").lower()
+        if "harv" in ut or "mcv" in ut:
+            continue
+        if not bool(getattr(u, "can_attack", True)):
+            continue
+        try:
+            out.append((int(u.cell_x), int(u.cell_y)))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _east_push_objective(obs, aidx, cx: int, cy: int, front_xs):
+    """Beacon / visible contact / mental base / clamp to front — never hardcode GPS."""
+    grid = getattr(aidx, "pass_grid", None)
+    h, w = aidx.h, aidx.w
+    contacts = list(getattr(obs, "visible_enemy_buildings", None) or []) + list(
+        getattr(obs, "visible_enemies", None) or [])
+    if contacts:
+        e = max(contacts, key=lambda o: int(getattr(o, "cell_x", 0) or 0))
+        return nearest_passable(int(e.cell_x), int(e.cell_y), grid, h, w)
+    mental = getattr(obs, "enemy_base_xy", None)
+    if mental is None:
+        bel = getattr(obs, "belief", None)
+        if bel is not None:
+            mental = getattr(bel, "enemy_base_xy", None)
+    if mental is not None:
+        try:
+            return nearest_passable(int(mental[0]), int(mental[1]), grid, h, w)
+        except (TypeError, ValueError, IndexError):
+            pass
+    beacon = resolve_beacon(obs)
+    if beacon is not None:
+        return nearest_passable(int(beacon[0]), int(beacon[1]), grid, h, w)
+    # Map-agnostic: keep at least the forward blob x (75th percentile).
+    if front_xs:
+        xs = sorted(int(x) for x in front_xs)
+        px = xs[int(0.75 * (len(xs) - 1))]
+        return nearest_passable(max(int(cx), int(px)), int(cy), grid, h, w)
+    return int(cx), int(cy)
+
+
+def guard_army_push_cell(obs, aidx, cx: int, cy: int):
+    """Don't yank an eastern vanguard west to ore; fog-push east when blind.
+
+    Cause 2 — advanced contingent: if >=~8 combat with cell_x>70 and no base
+    threat (no visible enemies/buildings with x<40), refuse targets far behind
+    the front (cx < 50, or cx < min_front_x - 15). Retarget via
+    _east_push_objective (visible / mental / resolve_beacon / front clamp).
+
+    Cause 3 — fog penetration: when the front is deep east (>=8 with x>75 or
+    army front/centroid x>75) and no visible_enemy_buildings, ensure the push
+    goes toward the enemy quadrant (beacon/fog-east), not mid-map ore.
+    Light: only retarget when the issued cell is behind/west of the front.
+    """
+    combat = _combat_xy_list(obs)
+    if not combat:
+        return int(cx), int(cy)
+    xs = [c[0] for c in combat]
+    n70 = sum(1 for x in xs if x > 70)
+    n75 = sum(1 for x in xs if x > 75)
+    front70 = [x for x in xs if x > 70]
+    front75 = [x for x in xs if x > 75]
+    cen_x = sum(xs) / len(xs)
+    max_x = max(xs)
+
+    def _base_threat() -> bool:
+        for e in list(getattr(obs, "visible_enemies", None) or []) + list(
+                getattr(obs, "visible_enemy_buildings", None) or []):
+            try:
+                if int(e.cell_x) < 40:
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
+    behind = False
+    if n70 >= 8 and not _base_threat():
+        if int(cx) < 50:
+            behind = True
+        elif front70 and int(cx) < (min(front70) - 15):
+            behind = True
+
+    n_enemy_bldgs = len(getattr(obs, "visible_enemy_buildings", None) or [])
+    fog_east = False
+    if n_enemy_bldgs == 0 and (n75 >= 8 or max_x > 75 or cen_x > 75):
+        ref = min(front75) if front75 else (max_x if max_x > 75 else None)
+        if ref is not None and int(cx) < int(ref) - 10:
+            fog_east = True
+        elif int(cx) < 70 and (n75 >= 8 or cen_x > 75):
+            fog_east = True
+
+    if behind or fog_east:
+        return _east_push_objective(obs, aidx, cx, cy, front70 or front75 or xs)
+    return int(cx), int(cy)
 
 
 def _split_production(obs):
@@ -734,6 +910,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         if t_name in ("army_attack_move", "infantry_attack_move",
                       "vehicle_attack_move"):
             cx, cy = stage_army_attack_cell(obs, aidx, cx, cy)
+            # After stage/remap: block west ore yank + fog-east retarget.
+            cx, cy = guard_army_push_cell(obs, aidx, cx, cy)
     eff_cell_flat = int(cy) * aidx.w + int(cx)
     if t_name in ("train", "build", "place_building", "cancel_production"):
         # PLACE/cancel dejan item_type concreto (proc/gun/tent); aidx.items

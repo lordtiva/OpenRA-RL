@@ -21,7 +21,7 @@ import torch
 from openra_env.client import OpenRAEnv
 from rl.peer_obs import peer_obs_from_metadata
 from openra_env.models import ActionType, CommandModel, OpenRAAction
-from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_command_effective
+from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_command_effective, filter_army_push_hysteresis
 from rl.imitation import (
     command_to_indices, pick_bc_command, pick_bc_commands,
     student_combat_ready,
@@ -186,6 +186,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     own_n_buildings = 0
     ene_n_buildings = 0
     last_push_cell = None  # (x, y) del último army/attack_move
+    last_army_push_cell = None  # hysteresis for executed army_attack_move
     atype = "no_op"  # ultimo tipo efectivo; NO_OP en shell / pre-lock
 
     for step in range(max_steps):
@@ -406,6 +407,11 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 if auto_support:
                     for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx, war_nudge=war_nudge):
                         action.commands.append(cmd)
+                # Executed-command hysteresis: suppress near-duplicate army pushes
+                # so pathfinding is not re-spammed. BC labels stay intended cells.
+                filtered, last_army_push_cell = filter_army_push_hysteresis(
+                    action.commands, last_army_push_cell)
+                action.commands[:] = filtered
                 pending_cmd = action
                 # F1: al buffer van los ÍNDICES EFECTIVOS (los de la acción que
                 # realmente se ejecutó), emparejados con SU log_prob. El ratio de

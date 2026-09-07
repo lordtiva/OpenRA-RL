@@ -41,7 +41,7 @@ from rl.trainer import load_checkpoint
 from rl.live_server import LiveBroadcaster
 from rl.obs_encoding import BEACON_BY_MAP, EnemyBeliefStore, decode_spatial
 from rl.rollout import _batch_of
-from rl.action_adapter import index_to_command_effective
+from rl.action_adapter import index_to_command_effective, filter_army_push_hysteresis
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
@@ -340,6 +340,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
     last_action_str = "—"
     macro_final = None
     last_push_cell = None
+    last_army_push_cell = None  # hysteresis for executed army_attack_move
     belief = EnemyBeliefStore()
     ep_id = (
         f"live_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -467,6 +468,10 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                                 sup_kind = "am"
                         sup_xy = dest
                         _remember_cell(trace["support_dests"], dest)
+            # Executed-command hysteresis: suppress near-duplicate army pushes.
+            filtered, last_army_push_cell = filter_army_push_hysteresis(
+                action.commands, last_army_push_cell)
+            action.commands[:] = filtered
             step_meta = {
                 "pol": atype_str,
                 "cell": pol_cell,

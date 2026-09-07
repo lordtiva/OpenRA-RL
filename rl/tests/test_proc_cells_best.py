@@ -658,8 +658,10 @@ obs_b = _obs(h=h, w=w, enemies=())
 aidx_b = ActionIndex(obs_b, Vocab())
 apply_passability(aidx_b, grid)
 bx, by = remap_move_cell(obs_b, aidx_b, 0, 53, actor_id=1)
-check("remap agua sin enemigo -> beacon a_short (95,11)",
-      (bx, by) == BEACON_BY_MAP["fase2_a_short.oramap"])
+# Cause 1: illegal cell snaps to nearest_passable near click (not flank/beacon).
+check("remap agua sin enemigo -> nearest_passable cerca del click",
+      bool(aidx_b.pass_grid[by, bx]) and abs(bx - 0) <= 8 and abs(by - 53) <= 16
+      and by < 40)
 
 obs_m = _obs(h=h, w=w, bldgs=("fact", "proc"), units=[_u(1, "e1", 12, 16)])
 aidx_m = ActionIndex(obs_m, Vocab())

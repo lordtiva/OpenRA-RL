@@ -16,6 +16,13 @@
 > (`SCALAR_DIM=29`, Net2Net pad). Phase A `a_max_steps` **1800**; early fog
 > scout con ≥3 combate. Regenerar `teacher_wins/` (schema
 > `eco_and_combat_mental_v4` / `--onboard-fresh-tapes`). **K=2 eco+push** same macro-tick (student dual-emit + BC labels).
+- **Army push (runtime adapter, 2026-09-07):** pipeline en `index_to_command_effective` + hysteresis en live/rollout. Live/eval lo toma al **reiniciar el proceso** (sin `--scratch`). Un live WIN (~40k ticks a base NE) valida el remate; Phase A promotion sigue necesitando wr20 en metrics.
+  1. `stage_army_attack_cell`: `n_advanced>=8` / `cen.x>35` / attractor guard — flank N/S **solo** en opening choke.
+  2. `remap_move_cell`: `nearest_passable` cerca del click — **sin** funnel south-flank/ore.
+  3. hysteresis (`should_emit_army_push` / `filter_army_push_hysteresis`, eps=8): no spamea el mismo `army_attack_move`.
+  4. `guard_army_push_cell`: no tira al oeste una vanguardia `x>70`; fog-east retarget (beacon/mental/front) si no hay edificios enemigos visibles.
+
+
 
 > **2026-09-06 — Phase A inactivity fixes:** Phase A / `--onboard` forces
 > `--qsa-topk 0` and `--xf-topk 0` (dense; sparse topk was masking enemy push
