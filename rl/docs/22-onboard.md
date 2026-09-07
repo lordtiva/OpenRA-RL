@@ -15,7 +15,16 @@
 > leftover visible. Escalares nuevos: `has_enemy_base_belief`, rel dx/dy, conf
 > (`SCALAR_DIM=29`, Net2Net pad). Phase A `a_max_steps` **1800**; early fog
 > scout con ≥3 combate. Regenerar `teacher_wins/` (schema
-> `eco_and_combat_mental_v3` / `--onboard-fresh-tapes`). **K=2 eco+push** same macro-tick (student dual-emit + BC labels).
+> `eco_and_combat_mental_v4` / `--onboard-fresh-tapes`). **K=2 eco+push** same macro-tick (student dual-emit + BC labels).
+
+> **2026-09-06 — Phase A inactivity fixes:** Phase A / `--onboard` forces
+> `--qsa-topk 0` and `--xf-topk 0` (dense; sparse topk was masking enemy push
+> cells and dropping attack BC). `balance_bc_samples` defaults **512/512**
+> (was ~96). Teacher `_push_cell`: visible/leftover/ghost/mental-base first;
+> only when belief empty, `resolve_beacon` is the opening-SFT prior, else fog
+> scout. `bc_only` eval uses **temperature=0.0**. Schema
+> `eco_and_combat_mental_v4` — regenerate tapes (`--onboard-fresh-tapes`).
+> Keep `latest.pt` (no arch/SCALAR change).
 
 
 
@@ -150,8 +159,9 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 | `--onboard-eval-games` | 4 | Partidas eval del alumno / iter en A. |
 | `--onboard-fresh-tapes` | — | Borra `teacher_wins/` y re-juega al teacher. |
 | `--onboard-collect` | — | Suma teacher games aunque ya haya tapes. |
+| `--onboard-collect-only` | — | Solo acumula `teacher_wins` hasta `--onboard-collect-target` (default 40); sin SFT/eval; no borra `latest.pt`; no requiere `--scratch`. |
 
-`--scratch --onboard` **reusa** `teacher_wins/` solo si el schema coincide (`eco_and_combat_hunt_v2`). La recolección es la parte lenta; el SFT se itera encima. Cintas beacon (`eco_and_combat_v1` / sin schema / solo TRAIN) se ignoran y se vuelven a recolectar **una vez**.
+`--scratch --onboard` y el **resume** `--onboard` (sin `--scratch`) **reusan** `teacher_wins/` si el schema coincide (`eco_and_combat_mental_v4`) y hay eps; `launch_train` pasa `--bc-replay` (fase A). Log: `reusando teacher_wins/ … resume SFT no re-juega al teacher`. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas viejas (`eco_and_combat_v1` / hunt_v2 / sin schema) se ignoran y se vuelven a recolectar **una vez**.
 
 
 
@@ -185,23 +195,18 @@ Estado en `rl/ckpts/curriculum.json`. Cada salto mata el `rl.train` y lo relanza
 
   `attack_move` de todo el idle (legal sin pack). A 12, `army_attack_move`.
 
-  **Beacon GPS off** (no `resolve_beacon` / Ch7-8 GPS en encode ni en el
+  Hunt map-agnostic: home raid → leftover visible (micro) → **mental
+  enemy-base** (cluster denser de edificios vistos) → `last_seen` / belief
+  ghosts → hunt/sweep cerca del ultimo contacto → **`resolve_beacon` as
+  opening-SFT prior when belief empty** → fog scout. Encode Ch7-8 GPS still
+  off (`beacon=None`); beacon only labels teacher push when there is no
+  belief. Early fog scout away from home con >=3 combate antes del rush.
+  Blob piled lejos de casa sin contacto → remate hunt.
 
-  push del teacher; `BEACON_BY_MAP` queda solo como legacy lookup). Hunt
-
-  map-agnostic: home raid → leftover visible (micro) → **mental enemy-base**
-
-  (cluster denser de edificios vistos; no GPS de título de mapa) →
-
-  `last_seen` / belief ghosts → hunt/sweep cerca del último contacto → fog
-
-  scout. Early fog scout away from home con ≥3 combate antes del rush.
-
-  Blob piled lejos de casa sin contacto → remate hunt. Tras este cambio
-
-  regenerá `teacher_wins/` (schema `eco_and_combat_mental_v3`; cintas
-
-  hunt_v2 / beacon viejas no se auto-cargan).
+  Phase A also: dense QSA/XF (`--qsa-topk 0 --xf-topk 0`), BC caps 512/512,
+  greedy student eval (`temperature=0.0`). Regenera `teacher_wins/` (schema
+  `eco_and_combat_mental_v4` / `--onboard-fresh-tapes`; cintas v3/hunt_v2 no
+  se auto-cargan).
 
 - Clona cintas **`win` only** (`--bc-only`). **No** clona `lose` ni `incomplete` (timeout turtle).
 
@@ -213,9 +218,9 @@ Estado en `rl/ckpts/curriculum.json`. Cada salto mata el `rl.train` y lo relanza
 
   (`manifest.json` + `ep_XXXX.pt`). Cada update BC samplea el ring completo (un iter
 
-  con 0 wins nuevos sigue entrenando). Cap default `--bc-win-cap 16000`
+  con 0 wins nuevos sigue entrenando). Cap default `--bc-win-cap 64000`
 
-  (~30–40 rushes de ~12k ticks). Wins ≥`--bc-win-prefer-ticks` 20000 se recortan
+  (~40-60 short rushes before trim; eco+push K=2 ~1.0-1.5k steps). Wins ≥`--bc-win-prefer-ticks` 20000 se recortan
 
   primero (un 33k miller-win no come el dataset). SIL sigue en 40k. Override
 

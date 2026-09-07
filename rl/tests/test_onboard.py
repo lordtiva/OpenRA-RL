@@ -63,13 +63,24 @@ check("A teacher beginner", fa[fa.index("--bc-teacher-bot") + 1] == "beginner")
 check("A 4 games paralelo", fa[fa.index("--bc-games") + 1] == "4")
 check("A eval alumno 4", fa[fa.index("--eval-games") + 1] == "4")
 check("A rush 8", fa[fa.index("--bc-rush") + 1] == "8")
-check("A win-cap 16000", fa[fa.index("--bc-win-cap") + 1] == "16000")
+check("A win-cap 64000", fa[fa.index("--bc-win-cap") + 1] == "64000")
 check("A prefer-ticks 20000", fa[fa.index("--bc-win-prefer-ticks") + 1] == "20000")
 check("A iters largo (wr gate, no sft_iters)",
       fa[fa.index("--iters") + 1] == "10000")
 check("A macro 40", fa[fa.index("--macro-ticks") + 1] == "40")
 check("A max-steps 1800", fa[fa.index("--max-steps") + 1] == "1800")
 check("A no sil", "--sil" not in fa)
+check("A qsa-topk dense/off", fa[fa.index("--qsa-topk") + 1] == "0")
+check("A xf-topk dense/off", fa[fa.index("--xf-topk") + 1] == "0")
+# Last flag wins over TRAIN_ARGS sparse defaults when building argv.
+cmd_a_dense = build_train_argv(
+    base + ["--qsa-topk", "8", "--xf-topk", "16"], "A", new_curriculum())
+_qsa_idxs = [i for i, a in enumerate(cmd_a_dense) if a == "--qsa-topk"]
+_xf_idxs = [i for i, a in enumerate(cmd_a_dense) if a == "--xf-topk"]
+check("argv A last qsa-topk 0",
+      cmd_a_dense[_qsa_idxs[-1] + 1] == "0")
+check("argv A last xf-topk 0",
+      cmd_a_dense[_xf_idxs[-1] + 1] == "0")
 fb = phase_flags("B", cfg)
 check("B sil beginner", "--sil" in fb and fb[fb.index("--bot-type") + 1] == "beginner")
 check("B bc mezclado no bc-only", "--bc" in fb and "--bc-only" not in fb)
@@ -223,6 +234,130 @@ check("rewind 20 vuelve a A", out20["phase"] == "A")
 check("rewind 20 latest = iter0020",
       (td / "latest.pt").read_bytes() == b"SFT20")
 check("rewind 20 src decade", inf20["src"] == "iter0020.pt")
+
+
+print("=== collect-only wiring ===")
+from rl import auto_train as at
+
+pa = at.parse_auto_args([
+    "--onboard", "--onboard-collect-only", "--onboard-collect-target", "40",
+])
+check("parse collect-only flag", pa.onboard_collect_only is True)
+check("parse collect target 40", int(pa.onboard_collect_target) == 40)
+check("parse still onboard", pa.onboard is True)
+
+extras = at.collect_only_train_extras(40)
+check("extras has --bc-collect-only", "--bc-collect-only" in extras)
+check("extras has target 40",
+      extras[extras.index("--bc-collect-target") + 1] == "40")
+check("extras NO --bc-replay", "--bc-replay" not in extras)
+
+check("would_pass_bc_replay False when collect-only",
+      at.would_pass_bc_replay(
+          replay_tapes=True,
+          onboard={"phase": "A"},
+          collect_only=True) is False)
+check("would_pass_bc_replay True when replay+A without collect-only",
+      at.would_pass_bc_replay(
+          replay_tapes=True,
+          onboard={"phase": "A"},
+          collect_only=False) is True)
+check("would_pass_bc_replay False when no tapes",
+      at.would_pass_bc_replay(
+          replay_tapes=False,
+          onboard={"phase": "A"},
+          collect_only=False) is False)
+
+check("would_pass_bc_replay False when phase B even with tapes",
+      at.would_pass_bc_replay(
+          replay_tapes=True,
+          onboard={"phase": "B"},
+          collect_only=False) is False)
+
+print("=== resume replay wiring ===")
+import json
+import tempfile
+from unittest import mock
+
+td = Path(tempfile.mkdtemp())
+(td / "teacher_wins").mkdir()
+man = {
+    "schema": "eco_and_combat_mental_v4",
+    "episodes": [{"file": "ep_0000.pt"} for _ in range(40)],
+}
+(td / "teacher_wins" / "manifest.json").write_text(
+    json.dumps(man), encoding="utf-8")
+(td / "curriculum.json").write_text(
+    json.dumps({
+        "phase": "A", "sft_iters": 20, "promote_wr20": 0.5,
+        "done_wr20": 0.45, "streak": 10, "min_iters": 20,
+        "bc_games": 4, "a_eval_games": 4, "a_rush": 8,
+        "a_launched": True, "c_reset_opt_done": False,
+        "phase_started_iter": 0,
+    }), encoding="utf-8")
+
+orig_ckpt = at.CKPT_DIR
+orig_cur = at.CURRICULUM
+orig_met = at.METRICS
+orig_rel = at.CKPT_DIR_REL
+try:
+    at.CKPT_DIR = td
+    at.CURRICULUM = td / "curriculum.json"
+    at.METRICS = td / "metrics.jsonl"
+    args = at.parse_auto_args(["--onboard", "--no-collapse"])
+    at._replay_tapes = False
+    at._collect_only = False
+    at._onboard = None
+    with mock.patch.object(at.ob, "save_curriculum"):
+        at._init_onboard(args)
+    check("resume phase A sets _replay_tapes", at._replay_tapes is True)
+    check("resume would_pass_bc_replay True",
+          at.would_pass_bc_replay() is True)
+
+    # --onboard-collect must NOT set replay
+    at._replay_tapes = False
+    at._collect_only = False
+    at._onboard = None
+    args_c = at.parse_auto_args(["--onboard", "--onboard-collect"])
+    with mock.patch.object(at.ob, "save_curriculum"):
+        at._init_onboard(args_c)
+    check("resume+collect keeps _replay_tapes False",
+          at._replay_tapes is False)
+    check("resume+collect would_pass False",
+          at.would_pass_bc_replay() is False)
+
+    # Phase B resume: do not force bc-replay
+    (td / "curriculum.json").write_text(
+        json.dumps({
+            "phase": "B", "sft_iters": 20, "promote_wr20": 0.5,
+            "done_wr20": 0.45, "streak": 10, "min_iters": 20,
+            "bc_games": 4, "a_eval_games": 4, "a_rush": 8,
+            "a_launched": True, "c_reset_opt_done": False,
+            "phase_started_iter": 20,
+        }), encoding="utf-8")
+    at._replay_tapes = False
+    at._collect_only = False
+    at._onboard = None
+    args_b = at.parse_auto_args(["--onboard"])
+    with mock.patch.object(at.ob, "save_curriculum"):
+        at._init_onboard(args_b)
+    check("resume phase B leaves _replay_tapes False",
+          at._replay_tapes is False)
+    check("resume phase B would_pass False",
+          at.would_pass_bc_replay() is False)
+finally:
+    at.CKPT_DIR = orig_ckpt
+    at.CURRICULUM = orig_cur
+    at.METRICS = orig_met
+    at.CKPT_DIR_REL = orig_rel
+
+
+# strip keeps phase A clean if collect flags leaked into base
+base_co = base + ["--bc-collect-only", "--bc-collect-target", "40"]
+stripped_co = strip_flags(base_co)
+check("strip saca --bc-collect-only", "--bc-collect-only" not in stripped_co)
+check("strip saca --bc-collect-target", "--bc-collect-target" not in stripped_co)
+
 
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS"))
 sys.exit(0 if ok else 1)

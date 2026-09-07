@@ -33,6 +33,7 @@ Uso:  .venv/Scripts/python.exe rl/auto_train.py
       .venv/Scripts/python.exe rl/auto_train.py --scratch --onboard
       .venv/Scripts/python.exe rl/auto_train.py --scratch --onboard --onboard-rush 8
       .venv/Scripts/python.exe rl/auto_train.py --onboard --onboard-rewind 24
+      .venv/Scripts/python.exe rl/auto_train.py --onboard --onboard-collect-only
       .venv/Scripts/python.exe rl/auto_train.py --no-collapse
 Ctrl+C para parar todo.
 
@@ -64,6 +65,8 @@ CURRICULUM = CKPT_DIR / "curriculum.json"
 # Filled in main() when --onboard. launch_train / recover lo leen.
 _onboard = None
 _replay_tapes = False
+_collect_only = False
+_collect_target = 40
 # Seed de emergencia si ckpts_v2 no tiene latest/iter (sigue en el árbol v1.1).
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
 
@@ -521,12 +524,30 @@ def try_promote(last_iter: int) -> str | None:
     return nxt
 
 
+def collect_only_train_extras(target: int | None = None) -> list[str]:
+    """Argv fragment for rl.train --bc-collect-only (never --bc-replay)."""
+    n = int(_collect_target if target is None else target)
+    return ["--bc-collect-only", "--bc-collect-target", str(max(1, n))]
+
+
+def would_pass_bc_replay(replay_tapes: bool = None, onboard=None,
+                         collect_only: bool = None) -> bool:
+    """True iff launch_train would append --bc-replay."""
+    rt = _replay_tapes if replay_tapes is None else bool(replay_tapes)
+    ob_cfg = _onboard if onboard is None else onboard
+    co = _collect_only if collect_only is None else bool(collect_only)
+    if co:
+        return False
+    return bool(rt and ob_cfg is not None and ob_cfg.get("phase") == "A")
+
+
 def launch_train(extra_args=None) -> subprocess.Popen:
     urls = live_game_urls()
     n_srv = urls.count("http")
     extra_args = list(extra_args or [])
-    if (_replay_tapes and _onboard is not None
-            and _onboard.get("phase") == "A"):
+    if _collect_only:
+        extra_args.extend(collect_only_train_extras())
+    elif would_pass_bc_replay():
         extra_args.append("--bc-replay")
     if _onboard is not None:
         args = ob.build_train_argv(list(TRAIN_ARGS), _onboard["phase"], _onboard)
@@ -596,6 +617,15 @@ def parse_auto_args(argv=None):
         "--onboard-collect", action="store_true",
         help="Fuerza teacher games aunque ya haya tapes (no pasa --bc-replay).")
     ap.add_argument(
+        "--onboard-collect-only", action="store_true",
+        help="Solo acumula teacher_wins hasta --onboard-collect-target "
+             "(sin SFT/eval). Implica --onboard. No borra latest.pt; "
+             "no requiere --scratch. No pasa --bc-replay.")
+    ap.add_argument(
+        "--onboard-collect-target", type=int, default=40, metavar="N",
+        help="Con --onboard-collect-only: exit 0 al llegar a N wins "
+             "en teacher_wins/ (default 40, ~bc_win_cap con rushes cortos).")
+    ap.add_argument(
         "--onboard-rewind", type=int, default=None, metavar="N",
         help="Fase B: copia best/iterN -> latest, trunca metrics y "
              "economy_race a iter<=N, pinnea --bc-start-iter=N. Una vez.")
@@ -610,9 +640,55 @@ def parse_auto_args(argv=None):
     return ap.parse_args(argv)
 
 
+
+def _maybe_set_replay_tapes(args, *, resume: bool = False) -> None:
+    """Reuse teacher_wins/ when schema matches (sets _replay_tapes).
+
+    On resume, only phase A wires replay (matches would_pass_bc_replay).
+    Collect flags keep live teacher collection (no --bc-replay).
+    """
+    global _replay_tapes
+    tw = CKPT_DIR / "teacher_wins"
+    man_p = tw / "manifest.json"
+    if not (tw.is_dir() and man_p.is_file()):
+        return
+    try:
+        man = json.loads(man_p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        man = {}
+    from rl.imitation import TAPE_SCHEMA
+    n_eps = len(man.get("episodes") or [])
+    if str(man.get("schema") or "") != TAPE_SCHEMA or n_eps <= 0:
+        if not resume:
+            log("  teacher_wins/ schema viejo o vacío — se re-recolecta")
+        return
+    if _collect_only or getattr(args, "onboard_collect", False):
+        why = ("--onboard-collect-only" if _collect_only
+               else "--onboard-collect")
+        log(f"  teacher_wins/ {n_eps} eps — {why} suma más "
+            f"(no --bc-replay)")
+        return
+    if resume and (_onboard is None or _onboard.get("phase") != "A"):
+        return
+    _replay_tapes = True
+    if resume:
+        log(f"  reusando teacher_wins/ ({n_eps} eps, schema {TAPE_SCHEMA}; "
+            f"resume SFT no re-juega al teacher)")
+    else:
+        log(f"  reusando teacher_wins/ ({n_eps} eps, schema {TAPE_SCHEMA}; "
+            f"SFT scratch no re-juega al teacher)")
+
+
 def _init_onboard(args) -> None:
     """Carga o crea curriculum.json. --scratch --onboard reinicia en A."""
-    global _onboard, _replay_tapes
+    global _onboard, _replay_tapes, _collect_only, _collect_target
+    if getattr(args, "onboard_collect_only", False):
+        args.onboard = True
+        _collect_only = True
+        _collect_target = max(1, int(getattr(args, "onboard_collect_target", 40) or 40))
+    else:
+        _collect_only = False
+        _collect_target = max(1, int(getattr(args, "onboard_collect_target", 40) or 40))
     if not args.onboard:
         _onboard = None
         _replay_tapes = False
@@ -652,6 +728,28 @@ def _init_onboard(args) -> None:
                 f"b_bc_start_iter={_onboard.get('b_bc_start_iter')}")
         else:
             ob.save_curriculum(CURRICULUM, _onboard)
+        # --onboard-fresh-tapes also applies on resume (not only --scratch).
+        tw = CKPT_DIR / "teacher_wins"
+        if args.onboard_fresh_tapes and tw.is_dir():
+            shutil.rmtree(tw, ignore_errors=True)
+            log("  wiped teacher_wins/ (--onboard-fresh-tapes)")
+        if _collect_only:
+            _replay_tapes = False
+            n_eps = 0
+            man_p = CKPT_DIR / "teacher_wins" / "manifest.json"
+            if man_p.is_file():
+                try:
+                    man = json.loads(man_p.read_text(encoding="utf-8"))
+                    n_eps = len(man.get("episodes") or [])
+                except (OSError, json.JSONDecodeError):
+                    n_eps = 0
+            log(f"onboard COLLECT-ONLY target={_collect_target} "
+                f"wins_so_far={n_eps} (no SFT, keep latest.pt)")
+        else:
+            # Phase A offline SFT: reuse tapes like --scratch --onboard.
+            # would_pass_bc_replay still gates on phase==A (B/C never get
+            # --bc-replay from this flag alone).
+            _maybe_set_replay_tapes(args, resume=True)
         log(f"onboard resume phase={_onboard['phase']} "
             f"(sft_iters={_onboard['sft_iters']} "
             f"promote={_onboard['promote_wr20']} "
@@ -668,21 +766,7 @@ def _init_onboard(args) -> None:
         shutil.rmtree(tw, ignore_errors=True)
         log("  wiped teacher_wins/ (--onboard-fresh-tapes)")
     elif tw.is_dir() and (tw / "manifest.json").is_file():
-        try:
-            man = json.loads((tw / "manifest.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            man = {}
-        from rl.imitation import TAPE_SCHEMA
-        n_eps = len(man.get("episodes") or [])
-        if str(man.get("schema") or "") == TAPE_SCHEMA and n_eps > 0:
-            if getattr(args, "onboard_collect", False):
-                log(f"  teacher_wins/ {n_eps} eps — --onboard-collect suma más")
-            else:
-                _replay_tapes = True
-                log(f"  reusando teacher_wins/ ({n_eps} eps, schema {TAPE_SCHEMA}; "
-                    f"SFT scratch no re-juega al teacher)")
-        else:
-            log("  teacher_wins/ schema viejo o vacío — se re-recolecta")
+        _maybe_set_replay_tapes(args, resume=False)
     elif (CKPT_DIR / "latest.pt").exists() and not args.scratch:
         log("FAIL: --onboard sin curriculum.json y con latest.pt. "
             "Para arrancar de 0: --scratch --onboard "
@@ -691,8 +775,12 @@ def _init_onboard(args) -> None:
     _onboard = ob.new_curriculum(overrides)
     ob.save_curriculum(CURRICULUM, _onboard)
     ob.append_era_reset(METRICS, "onboard phase A (SFT teacher)", "beginner")
-    log(f"onboard START phase A — SFT ScriptedTeacher vs beginner, "
-        f"{_onboard['sft_iters']} iters, sin PPO")
+    if _collect_only:
+        log(f"onboard START COLLECT-ONLY target={_collect_target} "
+            f"(no SFT; curriculum A)")
+    else:
+        log(f"onboard START phase A — SFT ScriptedTeacher vs beginner, "
+            f"{_onboard['sft_iters']} iters, sin PPO")
 
 
 def main():
@@ -713,7 +801,8 @@ def main():
     _sc = "yes" if args.scratch else "no"
     _ob = _onboard.get("phase") if _onboard else "off"
     _dk = "docker" if docker_available() else "no-docker"
-    log(f"auto_train ckpt={CKPT_DIR_REL} onboard={_ob} collapse={_cw} "
+    _co = f" collect-only@{_collect_target}" if _collect_only else ""
+    log(f"auto_train ckpt={CKPT_DIR_REL} onboard={_ob}{_co} collapse={_cw} "
         f"scratch={_sc} hang={hang_threshold()}s {_dk}")
     proc: subprocess.Popen | None = None
     last_mtime = metrics_mtime()
@@ -732,6 +821,33 @@ def main():
             poll = proc.poll() if proc else None
             if poll is not None:
                 last_iter = last_iter_from_metrics()
+                if _collect_only:
+                    n_eps = 0
+                    man_p = CKPT_DIR / "teacher_wins" / "manifest.json"
+                    if man_p.is_file():
+                        try:
+                            man = json.loads(man_p.read_text(encoding="utf-8"))
+                            n_eps = len(man.get("episodes") or [])
+                        except (OSError, json.JSONDecodeError):
+                            n_eps = 0
+                    if poll == 0 and n_eps >= _collect_target:
+                        log(f"COLLECT-ONLY DONE — "
+                            f"teacher_wins {n_eps}/{_collect_target}. "
+                            f"No SFT. Cerrá esta ventana.")
+                        sys.exit(0)
+                    if poll == 0:
+                        log(f"collect-only train exit 0 pero wins "
+                            f"{n_eps}/{_collect_target} (¿Ctrl+C?) — "
+                            f"relanzando en 5s")
+                    else:
+                        log(f"collect-only train exit {poll} "
+                            f"(wins {n_eps}/{_collect_target}) — "
+                            f"relanzando en 5s")
+                    time.sleep(5)
+                    proc = launch_train()
+                    last_mtime = metrics_mtime()
+                    last_progress = time.time()
+                    continue
                 if _onboard:
                     nxt = try_promote(last_iter)
                     if nxt == "done":

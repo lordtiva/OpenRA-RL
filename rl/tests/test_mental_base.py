@@ -115,6 +115,25 @@ def test_gps_beacon_not_used_for_belief_or_scalars():
     assert float(sc2[28]) > 0.0
 
 
+def test_push_beacon_when_belief_empty():
+    """Opening-SFT prior: beacon only when visible/ghost/mental absent."""
+    th = ScriptedTeacher()
+    obs = _obs(enemy_bldgs=(), enemies=())
+    assert th.belief.enemy_base_xy is None
+    assert resolve_beacon(obs) == (95, 11)
+    cell = th._push_cell(obs)
+    assert cell == (95, 11)
+
+
+def test_push_fog_when_no_beacon_map():
+    th = ScriptedTeacher()
+    obs = _obs(enemy_bldgs=(), enemies=(), map_name="unknown_map.oramap")
+    assert resolve_beacon(obs) is None
+    cell = th._push_cell(obs)
+    # Falls through to fog scout (may be None on tiny synthetic obs).
+    assert cell != (95, 11)
+
+
 def test_keep_until_better_evidence():
     bel = EnemyBeliefStore()
     bel.update(_obs(enemy_bldgs=[
@@ -135,6 +154,8 @@ if __name__ == "__main__":
     test_denser_cluster_updates()
     test_push_prefers_denser_update_not_gps()
     test_gps_beacon_not_used_for_belief_or_scalars()
+    test_push_beacon_when_belief_empty()
+    test_push_fog_when_no_beacon_map()
     test_keep_until_better_evidence()
     print("test_mental_base: OK")
     print(f"BASE_CLUSTER_RADIUS={BASE_CLUSTER_RADIUS} SCALAR_DIM={SCALAR_DIM}")

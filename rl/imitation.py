@@ -34,7 +34,7 @@ _BC_COMBAT_CAP_TYPES = frozenset(_BC_LAST)
 # no clona combate: sin eco sana no hay army que empujar.
 _BC_COMBAT_READY_N = 8
 # Manifest de TeacherWinBuffer. Cintas viejas (solo TRAIN) no se hidratan.
-TAPE_SCHEMA = "eco_and_combat_mental_v3"
+TAPE_SCHEMA = "eco_and_combat_mental_v4"
 
 
 def lambda_bc_at(it: int, start_iter: int, warmup: int = 80,
@@ -296,11 +296,11 @@ def merge_teacher_wins(episodes: list, keep_incomplete: bool = False,
     }, kept_eps
 
 
-def balance_bc_samples(samples: list, per_type_cap: int = 96,
-                       combat_cap: int = 96) -> list:
+def balance_bc_samples(samples: list, per_type_cap: int = 512,
+                       combat_cap: int = 512) -> list:
     """Cap por tipo. Combate y TRAIN al mismo techo: sin eco no hay army,
-    sin combate el SFT es miller. Un incomplete 600-step ya no ahoga TRAIN
-    (even-pick); no recortes el push por debajo del eco."""
+    sin combate el SFT es miller. Phase A needs ~512 (was 96) so attack BC
+    is not starved after QSA-dense + beacon opening. Even-pick keeps mix."""
     if not samples:
         return []
     buckets: dict[str, list] = {}
@@ -367,10 +367,11 @@ def _cpu_clone_step(s: dict) -> dict:
 # 1141 closed in 17–30k. A 50k win dumps ~1k late train-spam into the ring;
 # sample_recent(512) used to clone that tail (Run 33 plateau).
 SIL_PREFER_TICKS = 40000
-# Teacher tapes for reuse: keep ~30–40 short rushes, not 9 mixed with 33k miller-wins.
-# Cap is STEPS not episodes. A 12k-tick win is ~280 steps → 16000 ≈ 40 rushes.
-# Long = ticks >= prefer; trim drops those first. 20k corta el timeout-adjacent.
-BC_WIN_CAP = 16000
+# Teacher tapes for reuse: Phase A "Bien" ~35–50 short rushes; with eco+push K=2
+# short wins ~1.0–1.5k steps → 64000 ≈ 40–60 before trim.
+# Cap is STEPS not episodes. Long = ticks >= prefer; trim drops those first.
+# 20k corta el timeout-adjacent.
+BC_WIN_CAP = 64000
 BC_WIN_PREFER_TICKS = 20000
 
 

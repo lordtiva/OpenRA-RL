@@ -47,13 +47,14 @@ DEFAULTS = {
 _STORE_TRUE = {
     "--pfsp", "--pfsp-rl", "--bc", "--bc-only", "--sil",
     "--reset-opt", "--bc-keep-incomplete", "--bc-replay",
+    "--bc-collect-only",
 }
 _STRIP = {
     "--bot-type", "--pfsp", "--pfsp-rl", "--pfsp-pool", "--pfsp-anchor-prob",
     "--bc", "--bc-only", "--bc-warmup", "--bc-start-iter", "--bc-teacher-bot",
     "--bc-games", "--bc-epochs", "--bc-keep-incomplete",
     "--bc-macro-ticks", "--bc-max-steps", "--bc-lambda-end",
-    "--bc-rush", "--bc-replay",
+    "--bc-rush", "--bc-replay", "--bc-collect-only", "--bc-collect-target",
     "--bc-win-cap", "--bc-win-prefer-ticks",
     "--eval-games",
     "--sil", "--lambda-sil",
@@ -176,6 +177,10 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--bc-win-cap", str(int(cfg.get("bc_win_cap") or DEFAULTS["bc_win_cap"])),
             "--bc-win-prefer-ticks", str(int(
                 cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
+            # Phase A: dense QSA/XF (topk=0 = off). Sparse topk masks enemy
+            # push cells and starves attack BC (nll>=18). B/C keep TRAIN_ARGS.
+            "--qsa-topk", "0",
+            "--xf-topk", "0",
             "--iters", str(int(cfg["bc_iters"])),
             "--onboard-phase", "A",
         ]

@@ -273,9 +273,14 @@ async def amain(args):
             return None
 
     _bc_only = bool(getattr(args, "bc_only", False))
+    _bc_collect_only = bool(getattr(args, "bc_collect_only", False))
+    if _bc_collect_only:
+        args.bc = True
     n_params = sum(p.numel() for p in net.parameters()) / 1e6
     mode = []
-    if _bc_only:
+    if _bc_collect_only:
+        mode.append("BC-COLLECT-ONLY")
+    elif _bc_only:
         mode.append("BC-ONLY/SFT")
     else:
         mode.append("PPO")
@@ -536,6 +541,90 @@ async def amain(args):
               f"dir={win_dir} loaded eps={teacher_wins.n_episodes} "
               f"steps={len(teacher_wins)}",
               flush=True)
+
+    # --bc-collect-only: accumulate teacher_wins then exit (no SFT/eval/ckpt).
+    # auto_train --onboard-collect-only passes this; keeps latest.pt untouched.
+    if bool(getattr(args, "bc_collect_only", False)):
+        if teacher_wins is None:
+            raise SystemExit("--bc-collect-only necesita --bc / --bc-only")
+        target = max(1, int(getattr(args, "bc_collect_target", 40) or 40))
+        print(
+            f"[bc-collect-only] target={target} wins={teacher_wins.n_episodes} "
+            f"steps={len(teacher_wins)} (no SFT, no eval, no ckpt write)",
+            flush=True,
+        )
+
+        def _heartbeat(new_wins: int = 0) -> None:
+            if not args.metrics:
+                return
+            os.makedirs(os.path.dirname(args.metrics) or ".", exist_ok=True)
+            row = {
+                "note": "bc_collect_only",
+                "bc_collect_only": True,
+                "bc_buffer_eps": teacher_wins.n_episodes,
+                "bc_buffer_steps": len(teacher_wins),
+                "bc_collect_target": target,
+                "bc_new_wins": int(new_wins),
+            }
+            with open(args.metrics, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row) + "\n")
+
+        if teacher_wins.n_episodes >= target:
+            print(
+                f"[bc-collect-only] DONE already "
+                f"{teacher_wins.n_episodes}/{target} wins "
+                f"steps={len(teacher_wins)} — exit 0",
+                flush=True,
+            )
+            _heartbeat(0)
+            await asyncio.gather(*(env.close() for env in pool),
+                                 return_exceptions=True)
+            return
+
+        round_i = 0
+        while teacher_wins.n_episodes < target:
+            round_i += 1
+            need = target - teacher_wins.n_episodes
+            print(
+                f"[bc-collect-only] round {round_i} "
+                f"wins={teacher_wins.n_episodes}/{target} "
+                f"steps={len(teacher_wins)} need={need}",
+                flush=True,
+            )
+            try:
+                new_eps, bc_meta = await collect_teacher_games(
+                    pool, infer_net, vocab, device, args, reset_kwargs)
+            except Exception as e:
+                print(f"  [bc-collect-only] teacher fail: {e}", flush=True)
+                _heartbeat(0)
+                continue
+            new_wins = 0
+            for ep in new_eps or []:
+                n_add = teacher_wins.add_episode(
+                    ep.get("steps") or [],
+                    {"result": ep.get("result"), "ticks": ep.get("ticks")})
+                if n_add > 0:
+                    new_wins += 1
+            if new_wins:
+                teacher_wins.save()
+            print(
+                f"[bc-collect-only] +new_wins={new_wins} "
+                f"wins={teacher_wins.n_episodes}/{target} "
+                f"steps={len(teacher_wins)} "
+                f"meta_wins={bc_meta.get('bc_n_win_eps', 0)}",
+                flush=True,
+            )
+            _heartbeat(new_wins)
+
+        print(
+            f"[bc-collect-only] DONE {teacher_wins.n_episodes}/{target} wins "
+            f"steps={len(teacher_wins)} — exit 0",
+            flush=True,
+        )
+        await asyncio.gather(*(env.close() for env in pool),
+                             return_exceptions=True)
+        return
+
     if args.bc or args.sil:
         print(
             f"BC games={getattr(args, 'bc_games', 1)} epochs={getattr(args, 'bc_epochs', 1)} "
@@ -565,17 +654,21 @@ async def amain(args):
             eval_n = int(getattr(args, "eval_games", 0) or 0)
             if eval_n > 0:
                 saved_ep = int(args.episodes)
+                saved_temp = float(args.temperature)
                 args.episodes = eval_n
+                # Phase A / bc_only: greedy eval (temp=1.0 samples junk buildings).
+                args.temperature = 1.0
                 try:
                     results = await launch_collection(None)
                     samples, outcomes = process_results(
                         results, args.gamma, args.lam,
                         adv_mode=args.adv_mode)
-                    print(f"  [eval] student n={len(outcomes)} "
+                    print(f"  [eval] student n={len(outcomes)} temp=0.0 "
                           f"{[o.get('result') for o in outcomes]}",
                           flush=True)
                 finally:
                     args.episodes = saved_ep
+                    args.temperature = saved_temp
         else:
             if pending is None:
                 pending = launch_collection(None)
@@ -1093,6 +1186,12 @@ def main():
                     help="Fase A: no jugar teacher games; SFT del ring "
                          "teacher_wins/. auto_train lo pasa en --scratch "
                          "cuando las cintas ya existen.")
+    ap.add_argument("--bc-collect-only", action="store_true",
+                    help="Solo recolecta teacher wins al buffer y sale "
+                         "(sin SFT/eval/ckpt). auto_train --onboard-collect-only.")
+    ap.add_argument("--bc-collect-target", type=int, default=40,
+                    help="Con --bc-collect-only: salir 0 al llegar a N "
+                         "episodios win en teacher_wins/ (default 40).")
     ap.add_argument("--lambda-sil", type=float, default=0.5,
                     help="Peso SIL cuando --sil (default 0.5).")
     args = ap.parse_args()

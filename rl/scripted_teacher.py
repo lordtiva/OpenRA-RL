@@ -18,7 +18,8 @@ Este teacher:
   - a PACK_ARMY (12): army_attack_move (lo que el alumno puede emitir)
   - hunt map-agnostic: home raid > visible leftover > mental enemy-base
     belief > last_seen ghosts > hunt/sweep cerca del último contacto >
-    fog scout. Beacon GPS off (no resolve_beacon; tapes eco_and_combat_mental_v3).
+    fog scout. When belief empty: resolve_beacon opening-SFT prior, else fog
+    (tapes eco_and_combat_mental_v4).
   - early fog scout away from home once a few combat exist (relative fog).
   - peel de raid; TRAIN e1 durante el push; 2 harvs; 0 guards / 0 APC
 """
@@ -38,7 +39,7 @@ from rl.auto_support import (
     hunt_near_cell,
     war_nudge_cell,
 )
-from rl.obs_encoding import EnemyBeliefStore
+from rl.obs_encoding import EnemyBeliefStore, resolve_beacon
 
 
 def _xy(obj) -> Tuple[int, int]:
@@ -181,10 +182,13 @@ class ScriptedTeacher(ScriptedBot):
             return None
 
     def _push_cell(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
-        """Raid > visible leftover > mental base > ghost > last contact > fog.
+        """Raid > visible leftover > mental base > ghost > last contact >
+        beacon (opening prior) > fog.
 
-        Beacon GPS (resolve_beacon / BEACON_BY_MAP) is intentionally unused.
-        Mental base: densest seen enemy-building cluster from belief store.
+        Visible / leftover / ghost / mental-base stay first. Only when those
+        are absent, prefer resolve_beacon(obs) as opening-SFT prior; else
+        fog_scout_destinations. Mental base: densest seen enemy-building
+        cluster from belief store.
         """
         self._refresh_contact(obs)
         raids = home_raid_targets(obs)
@@ -219,7 +223,10 @@ class ScriptedTeacher(ScriptedBot):
             if n_at >= MIN_PILE_FOR_HUNT:
                 return hunt_near_cell(obs, anchor)
             return int(anchor[0]), int(anchor[1])
-        # No contact yet: open shroud (map-agnostic), never beacon.
+        # Belief empty: beacon is opening-SFT prior when present; else fog.
+        beacon = resolve_beacon(obs)
+        if beacon is not None:
+            return int(beacon[0]), int(beacon[1])
         fog = fog_scout_destinations(obs, 1)
         if fog:
             return int(fog[0][0]), int(fog[0][1])

@@ -326,7 +326,7 @@ cell_g = th3._push_cell(obs_fog2)
 check("push_cell usa last_seen ghost tras fog", cell_g == (80, 18))
 
 # Mental enemy-base: first building sets belief; denser cluster updates;
-# push uses mental base after leftovers clear; GPS beacon unused.
+# push uses mental base after leftovers clear; GPS only if belief empty.
 from rl.obs_encoding import EnemyBeliefStore, scalar_features, SCALAR_DIM
 bel = EnemyBeliefStore()
 obs_b1 = _obs(
@@ -458,6 +458,22 @@ n_train = sum(1 for s in bal if sample_type_name(s) == "train")
 check("balance capea army", n_army == 40)
 check("balance conserva train", n_train == 12)
 check("balance no alarga", len(bal) == 52)
+import inspect
+_sig = inspect.signature(balance_bc_samples)
+check("balance defaults 512/512",
+      _sig.parameters["per_type_cap"].default == 512
+      and _sig.parameters["combat_cap"].default == 512)
+
+# Opening prior: fresh teacher, empty belief → beacon when map has GPS.
+th_open = ScriptedTeacher()
+obs_open = _obs(
+    cash=5000, harv=1,
+    bldgs=("fact", "proc", "barr"),
+    units=[_u(i, "e1", 12, 16) for i in range(1, 14)],
+)
+cell_open = th_open._push_cell(obs_open)
+check("empty belief push uses beacon opening prior",
+      cell_open == resolve_beacon(obs_open) == (95, 11))
 
 win_s = [_step("train")] * 3
 lose_s = [_step("no_op")] * 5
@@ -526,7 +542,7 @@ try:
           tw20.n_episodes == 1 and all(s["tag"][0] == "S" for s in tw20.snapshot()))
     man = json.loads((tw_dir / "manifest.json").read_text(encoding="utf-8"))
     check("TW schema hunt_v2", man.get("schema") == TAPE_SCHEMA)
-    check("TW schema string", TAPE_SCHEMA == "eco_and_combat_mental_v3")
+    check("TW schema string", TAPE_SCHEMA == "eco_and_combat_mental_v4")
     stale = Path(tempfile.mkdtemp(prefix="twstale_"))
     try:
         (stale / "manifest.json").write_text(
