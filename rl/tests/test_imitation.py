@@ -226,6 +226,15 @@ buf_t.add_episode([_sil_step(("Sa", i)) for i in range(80)],
 check("trim echa el win largo primero",
       len(buf_t) == 80 and all(s["tag"][0] == "Sa" for s in buf_t.snapshot()))
 
+import tempfile as _tf
+_el_dir = Path(_tf.mkdtemp(prefix="elite_"))
+buf_e.save(_el_dir / "elite.pt")
+buf_load = EliteBuffer(cap_steps=500, prefer_ticks=40000)
+n_load = buf_load.load(_el_dir / "elite.pt")
+check("elite save/load steps", n_load == len(buf_e) and n_load > 0)
+check("elite load missing = 0",
+      EliteBuffer().load(_el_dir / "nope.pt") == 0)
+
 th = ScriptedTeacher()
 from rl.action_adapter import PACK_ARMY as _PACK
 

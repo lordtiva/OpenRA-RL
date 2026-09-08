@@ -432,6 +432,41 @@ class EliteBuffer:
             out.extend(e.get("steps") or ())
         return out
 
+    def save(self, path: str | Path) -> None:
+        """Persist winning episodes across train relaunch (B→C, crash)."""
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "episodes": self._episodes,
+            "cap": self.cap,
+            "prefer_ticks": self.prefer_ticks,
+        }
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        torch.save(payload, tmp)
+        os.replace(tmp, p)
+
+    def load(self, path: str | Path) -> int:
+        """Restore from save(). Returns step count, 0 if missing/corrupt."""
+        p = Path(path)
+        if not p.exists():
+            return 0
+        try:
+            blob = torch.load(p, map_location="cpu", weights_only=False)
+        except Exception:
+            return 0
+        if not isinstance(blob, dict):
+            return 0
+        eps = blob.get("episodes")
+        if not isinstance(eps, list):
+            return 0
+        self._episodes = eps
+        if blob.get("cap"):
+            self.cap = int(blob["cap"])
+        if blob.get("prefer_ticks"):
+            self.prefer_ticks = int(blob["prefer_ticks"])
+        self._trim()
+        return self._n_steps()
+
     def sample_recent(self, max_steps: int = 512) -> list:
         """Even-pick across winning episodes. Prefer ticks < prefer_ticks.
 

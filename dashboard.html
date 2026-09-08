@@ -560,11 +560,16 @@ function render(rows, pfsp, best) {
         + " · clip " + fmtNum(r.clip_frac,2)
         + " · kl " + fmtNum(r.kl,4)
         + " · |g| " + fmtNum(r.grad_norm,2);
+      // kl×10 is meant to sit next to H~1 / clip~0.3. Unclamped kl (1e3+)
+      // used to autoscale the axis to 50k and flatten H/clip.
       drawLines($("cHealth"), [
         { ys: rows.map(x => x.entropy), color: "#b794f6" },
         { ys: rows.map(x => x.clip_frac), color: "#f5c542" },
-        { ys: rows.map(x => x.kl == null ? null : x.kl * 10), color: "#6ea8fe" },
-      ]);
+        { ys: rows.map(x => {
+            if (x.kl == null || !isFinite(x.kl)) return null;
+            return Math.min(x.kl * 10, 2.5);
+          }), color: "#6ea8fe" },
+      ], { ymin: 0, ymax: 2.5 });
     }
   }
 

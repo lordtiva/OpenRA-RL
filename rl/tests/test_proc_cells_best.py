@@ -29,11 +29,11 @@ from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.auto_support import (
     FOG_SCOUT_ARMY_FOR_MORE, FOG_SCOUT_N_BASE, FOG_SCOUT_N_MORE,
     MIN_ARMY_FOR_ASSAULT, MIN_HARVESTERS,
-    RAID_HOME_ORDERS, STAGING_STEPS,
+    RAID_HOME_ORDERS, REMNANT_MIN_TICK, REMNANT_SWEEP_N, STAGING_STEPS,
     STANCE_ATTACK_ANYTHING, SUPPORT_ASSAULT, SUPPORT_FOG_SCOUT,
-    SUPPORT_REMNANT, SUPPORT_WAR_NUDGE,
+    SUPPORT_LATE_REMNANT, SUPPORT_REMNANT, SUPPORT_WAR_NUDGE,
     apply_dest_credit, fog_scout_count, fog_scout_destinations,
-    support_commands, war_nudge_cell,
+    remnant_hunt_needed, support_commands, war_nudge_cell,
 )
 from rl.best_ckpt import (
     DROUGHT_PEAK,
@@ -47,6 +47,7 @@ from rl.best_ckpt import (
     is_strictly_better,
     is_wr20_drought,
     maybe_update_best,
+    policy_still_alive,
     viability_breakdown,
     viability_score,
 )
@@ -79,7 +80,7 @@ def _b(typ="fact", actor_id=10, x=12, y=16, hp=1.0):
 def _obs(*, cash=5000, harv=0, bldgs=("fact",), units=None, prod=(),
          avail=("e1", "proc", "powr", "barr"), w=128, h=128,
          map_name="fase2_a_short.oramap", enemies=(), enemy_bldgs=(),
-         tick=100, spatial_map=""):
+         tick=100, spatial_map="", global_summary=None):
     if units is None:
         units = [_u(1, "mcv", 12, 16)]
     return NS(
@@ -97,6 +98,7 @@ def _obs(*, cash=5000, harv=0, bldgs=("fact",), units=None, prod=(),
         visible_enemy_buildings=list(enemy_bldgs),
         spatial_map=spatial_map,
         spatial_channels=9,
+        global_summary=global_summary,
     )
 
 
@@ -615,6 +617,45 @@ cmds_noreman = support_commands(
 check("sin remate: idle de campo no marcha al leftover (hace falta pack 12 en casa)",
       not any(c.action.value in ("army_attack_move", "attack_move")
               for c in cmds_noreman))
+
+print("=== late remnant ===")
+check("late remnant flag on", SUPPORT_LATE_REMNANT is True)
+field_idle_late = [_u(i, "e1", 80 + (i % 4), 12 + (i // 4), idle=True)
+                   for i in range(1, 9)] + [_u(99, "harv", 14, 16)]
+obs_early = _obs(harv=1, bldgs=("fact", "proc"), units=field_idle_late, tick=100)
+obs_late = _obs(harv=1, bldgs=("fact", "proc"), units=field_idle_late,
+                tick=REMNANT_MIN_TICK)
+check("tick 100 no remnant", remnant_hunt_needed(obs_early) is False)
+check("tick 25k fog-empty sí remnant", remnant_hunt_needed(obs_late) is True)
+obs_vis_late = _obs(harv=1, bldgs=("fact", "proc"), units=field_idle_late,
+                    tick=REMNANT_MIN_TICK,
+                    enemy_bldgs=[_b("tent", 200, 90, 12)])
+check("tick 25k leftover visible no remnant",
+      remnant_hunt_needed(obs_vis_late) is False)
+gs_dead = {"own": {"cash": 0, "unit_value": 30000, "building_value": 4000},
+           "enemy": {"cash": 0, "unit_value": 555, "building_value": 4000}}
+obs_gs = _obs(harv=1, bldgs=("fact", "proc"), units=field_idle_late,
+              tick=REMNANT_MIN_TICK, global_summary=gs_dead)
+check("tick 25k wealth 4555 fog-empty sí", remnant_hunt_needed(obs_gs) is True)
+cmds_late = support_commands(obs_late, war_nudge=False)
+am_late = [c for c in cmds_late if c.action.value == "attack_move"]
+check("war_nudge off: remnant igual emite AM",
+      len(am_late) >= 1 and len(am_late) <= REMNANT_SWEEP_N)
+check("remnant destinos distintos",
+      len({(int(c.target_x), int(c.target_y)) for c in am_late}) == len(am_late))
+field_circle = [_u(i, "e1", 80 + (i % 4), 12 + (i // 4), idle=False)
+                for i in range(1, 9)] + [_u(99, "harv", 14, 16)]
+cmds_circle = support_commands(
+    _obs(harv=1, bldgs=("fact", "proc"), units=field_circle,
+         tick=REMNANT_MIN_TICK),
+    war_nudge=False)
+am_circle = [c for c in cmds_circle if c.action.value == "attack_move"]
+check("circling no-idle: retargeta el blob de campo",
+      len(am_circle) >= 1)
+cmds_early_off = support_commands(obs_early, war_nudge=False)
+check("tick 100 + nudge off: no remnant ni fog scout",
+      not any(c.action.value in ("army_attack_move", "attack_move")
+              for c in cmds_early_off))
 army_walk_home = [
     _u(i, "e1", 12 + (i % 4), 16 + (i // 4), idle=False) for i in range(1, 13)
 ] + [_u(9, "harv", 14, 16)]
@@ -765,6 +806,16 @@ alive = {
     "action_hist": {"no_op": 40, "train": 20, "harvest": 5, "build": 10},
 }
 check("Run32 wr20=0 con H alta NO es dead_policy", is_dead_policy(alive) is False)
+c_frozen_ppo = {
+    "iter": 133, "winrate_rolling20": 0.0, "entropy": 0.0,
+    "n_buildings": {"own": 9.5, "enemy": 73.0},
+    "action_hist": {
+        "no_op": 667, "train": 1726, "army_attack_move": 935,
+        "build": 26, "harvest": 64, "harvesters_move": 430,
+    },
+}
+check("C H=0 con army/train sigue alive",
+      policy_still_alive(c_frozen_ppo) is True)
 check("DROUGHT_STREAK es 5", DROUGHT_STREAK == 5)
 
 cmds_mcv = support_commands(_obs(bldgs=(), units=[_u(1, "mcv", 12, 16)],
@@ -800,6 +851,22 @@ with tempfile.TemporaryDirectory() as td_bt:
     meta_e = json.loads((d / "best.json").read_text(encoding="utf-8"))
     check("best.json bot_type easy", meta_e.get("bot_type") == "easy"
           and meta_e.get("reason") == "new_bot_type")
+
+with tempfile.TemporaryDirectory() as td_bt0:
+    d = Path(td_bt0)
+    latest = d / "latest.pt"
+    latest.write_bytes(b"BEG")
+    beg = dict(_builder_row())
+    beg.update({"iter": 132, "iter_winrate": 1.0, "winrate": 0.65,
+                "bot_type": "beginner", "winrate_rolling20": 0.65})
+    check("beginner wr se escribe", maybe_update_best(d, beg, latest_path=str(latest)))
+    latest.write_bytes(b"EASY0")
+    easy0 = dict(_builder_row())
+    easy0.update({"iter": 133, "iter_winrate": 0.0, "winrate": 0.0,
+                  "bot_type": "easy", "winrate_rolling20": 0.0})
+    check("easy 0-win NO pisa beginner",
+          maybe_update_best(d, easy0, latest_path=str(latest)) is False
+          and (d / "best.pt").read_bytes() == b"BEG")
 
 with tempfile.TemporaryDirectory() as td:
     d = Path(td)

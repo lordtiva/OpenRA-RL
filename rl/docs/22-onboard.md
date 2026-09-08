@@ -152,15 +152,17 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 
 | `--onboard-sft-iters` | 20 | Iters de SFT en A |
 
-| `--onboard-promote-wr20` | 0.50 | wr20 vs beginner para pasar a C |
+| `--onboard-a-promote-wr20` | 0.25 | wr20 vs beginner para pasar A→B (**sin** streak) |
+
+| `--onboard-promote-wr20` | 0.50 | wr20 vs beginner para pasar B→C (× streak) |
 
 | `--onboard-done-wr20` | 0.45 | wr20 vs easy para marcar DONE |
 
-| `--onboard-streak` | 10 | Iters **seguidos** sobre el umbral |
+| `--onboard-streak` | 10 | Iters **seguidos** sobre el umbral (B y C; A no usa streak) |
 
 | `--onboard-min-iters` | 20 | Mínimo de iters en B y en C (un 4/4 suelto no promociona) |
 
-| `--onboard-rewind N` | — | **Una vez**: `latest` ← `best`/`iterN`, trunca metrics/race. N≤`sft_iters` vuelve a A (`iter0020.pt`). N>sft en B pinnea BC. |
+| `--onboard-rewind N` | — | **Una vez**: `latest` y `best` ← `iterN`/`best@N`, trunca metrics/race. N≤`sft_iters` vuelve a A. N>sft en **B o C** vuelve a B; `λ_bc` queda en el piso. |
 | `--onboard-rush` | 8 | `ScriptedTeacher.RUSH_ATTACK_MOVE`. Bench n=20 eligió 8; 6/5 suben lose_rate. |
 | `--onboard-bc-games` | 4 | Partidas teacher / iter en A. |
 | `--onboard-eval-games` | 4 | Partidas eval del alumno / iter en A. |
@@ -168,7 +170,7 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 | `--onboard-collect` | — | Suma teacher games aunque ya haya tapes. |
 | `--onboard-collect-only` | — | Solo acumula `teacher_wins` hasta `--onboard-collect-target` (default 40); sin SFT/eval; no borra `latest.pt`; no requiere `--scratch`. |
 
-`--scratch --onboard` y el **resume** `--onboard` (sin `--scratch`) **reusan** `teacher_wins/` si el schema coincide (`eco_and_combat_mental_v4`) y hay eps; `launch_train` pasa `--bc-replay` (fase A). Log: `reusando teacher_wins/ … resume SFT no re-juega al teacher`. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas viejas (`eco_and_combat_v1` / hunt_v2 / sin schema) se ignoran y se vuelven a recolectar **una vez**.
+`--scratch --onboard` y el **resume** `--onboard` (sin `--scratch`) **reusan** `teacher_wins/` si el schema coincide (`eco_and_combat_mental_v4`) y hay eps; `launch_train` pasa `--bc-replay` (fases **A y B**; no C). Log: `reusando teacher_wins/ … resume no re-juega al teacher` y en train `[bc] replay tapes … (no collect)`. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas viejas (`eco_and_combat_v1` / hunt_v2 / sin schema) se ignoran y se vuelven a recolectar **una vez**.
 
 
 
@@ -247,9 +249,11 @@ En el log: `onboard START phase A`, `BC-ONLY`, `[bc] keep wins=…`, `[eval] stu
 
 
 
-Criterio de salida: ≥ `--onboard-sft-iters` **y** wr20 del alumno ≥ 0.50 × 10
+Criterio de salida: ≥ `--onboard-sft-iters` **y** wr20 del alumno ≥
 
-iters (mismo umbral que B). Log: `onboard PROMOTE A -> B`.
+`--onboard-a-promote-wr20` (default **0.25**) sobre las últimas 20 partidas.
+
+**Sin** streak de 10 (eso queda solo para B→C). Log: `onboard PROMOTE A -> B`.
 
 
 
@@ -269,21 +273,25 @@ a fase A desde `iter0020.pt` (no uses 24).
 
   2 partidas teacher / iter (APM de A: macro 40 / 1000), 2 epochs NLL,
 
-  `λ_bc` 1→**0.25** en 80 iters (no se apaga). BC **wins-only** (sin
+  `λ_bc` 1→**0.10** en 40 iters (no se apaga). BC **wins-only** (sin
 
   `--bc-keep-incomplete`). Sin `--bc-only` (PPO sigue, salvo tanda wipe:
 
   4 lose <15k ticks; ahí solo BC/SIL). Sin PFSP.
 
-- PPO: macro 50 / max-steps 1000. El teacher de B **no** usa esos knobs.
+- PPO: macro 50 / max-steps 1000, `--lr 2.0e-5`, `--adv-mode global`.
 
-- Collapse **off** en B. Un `best.pt` con iwr 0.5 (un 2/4 suelto) congela el
+  El teacher de B **no** usa esos knobs.
 
-  puntero; 3 iters `deploy-noop` restauraban ese snapshot cada ~20 iters y
+- Collapse **on** en B (mismo `--collapse` default que C). Restaura `best.pt`
 
-  nunca salías del SFT. Si la política se muere, se sigue; el criterio de
+  si política muerta o sequía wr20. `--no-collapse` lo apaga. Fase A lo
 
-  salida es wr20, no el watchdog.
+  ignora siempre (un eval suerte congelaría el SFT).
+
+- Remate tardío (`SUPPORT_LATE_REMNANT`): tick≥25k y niebla vacía, sweep a
+
+  bordes (no beacon). Sigue con `--no-war-nudge`.
 
 
 
@@ -327,19 +335,21 @@ Eso:
 
 |---|---|
 
-| `best.pt` / `best.json` | No los toca (son el seed) |
+| `best.pt` / `best.json` | También ← `iterN` (si no, collapse restauraría un C 0-win) |
 
-| `latest.pt` | Copia de `best.pt` si `best.json.iter==24`, si no `iter0024.pt` |
+| `latest.pt` | Copia de `best.pt` si `best.json.iter==N`, si no `iterN.pt` |
 
 | `metrics.jsonl` | Tira filas con `iter>24` (conserva A y `era_reset`) |
 
 | `economy_race.jsonl` | Igual, `iter>24` afuera (si no, el dash sigue gritando harvest −600) |
 
-| `curriculum.json` | Sigue en B; pinnea `b_bc_start_iter=24` para que `λ_bc` arranque en 1.0 |
+| `curriculum.json` | Fase B (desde C también vuelve a B). `b_bc_start_iter` queda en el origen de B (`λ_bc` en el piso). Desde C, `phase_started_iter=N` para que `min_iters` no re-promueva al toque. |
 
 
 
-No hace falta `--scratch` ni `--no-collapse` (A/B ya apagan collapse).
+No hace falta `--scratch`. Collapse en B queda ON; `--no-collapse` si no
+
+querés restore de `best.pt`.
 
 Siguiente corte de luz: `--onboard` **sin** rewind.
 
@@ -351,21 +361,27 @@ No borres `iter0030.pt`… a mano: el train los pisa al subir. `live_games.jsonl
 
 
 
-Si el seed que querés es `iter0140.pt` y no el `best@24`: `--onboard-rewind 140`.
+Si el seed que querés es `iter0140.pt` y no el `best@24`: `--onboard-rewind 140`. Desde C, el mismo flag vuelve a B (p.ej. `--onboard-rewind 130`).
 
 
 
-### Fase C — PPO vs easy
+### Fase C — PPO vs easy (rampa, sin BC)
 
 
 
-- Mismos pesos, `--bot-type easy`, Adam fresco **solo** en el primer launch de C.
-
-- El wr se va a caer. Es normal (Run 11: salto prematuro a easy = 0/140). Acá ya venís de un beginner estable.
+Al promover B→C se copia `best.pt` → `best_B.pt`. C **no** pisa ese best con un 0-win vs easy.
 
 
 
-Criterio: wr20 ≥ 0.45 × 10 iters, mínimo 20 iters en C.
+- Mismos pesos, **mismos knobs que B**: `--lr 2.0e-5`, `--adv-mode global`, Adam de B (**sin** `--reset-opt`).
+- **Sin BC.** El teacher no es experto vs easy; clonarías perder. El ancla es SIL (elite persistido en `elite.pt`) + mix de rival.
+- **Rampa suave** `--mix-from beginner`: P(easy) sube de **0.25 → 1.0** en 40 iters. wr20 / best.pt / promote **solo vs easy**. Beginner wins llenan SIL al arrancar.
+- AMP arranca en scale **8** (no 65536). Si `amp_skip_frac` ≥ 0.5 el log avisa; tras 2 floors AMP off (fp32).
+- Sequía: ignora el pico wr20 de B. En C no restaura hasta `min_iters` **y** un pico propio vs easy. H=0 de PPO skipped no cuenta como política muerta si el rollout sigue entrenando/raseando.
+
+El wr vs easy se cae al principio. Es normal (Run 11: salto a easy = 0/140). Lo que **no** es normal es H=clip=gn=0 durante decenas de iters — eso es PPO skipeado, no transferencia.
+
+Criterio: wr20 vs **easy** ≥ 0.45 × 10 iters, mínimo 20 iters en C.
 
 
 

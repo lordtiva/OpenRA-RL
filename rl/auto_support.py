@@ -30,6 +30,9 @@ Diseño:
   revelar, el nudge dispara el pack.
 - Remate leftovers (SUPPORT_REMNANT): APAGADO (Run 34). Sweep remap a
   agua/beacon, AM cada idle/bloque, wr 33%→17%. No reabrir en este corte.
+- Remate tardío (SUPPORT_LATE_REMNANT): tick≥25k, sin edificios enemigos
+  a la vista (o wealth espectador <6k). Fan-out a niebla/bordes, no beacon.
+  Independiente de war_nudge (onboard lleva --no-war-nudge).
 - Stance AttackAnything al nacer (Capa 0): Defend no caza; el scripted sí.
   Solo combate (no harv/mcv). Micro, no “andá al NE”.
 - Auto-tent (Capa 0, corte 987): con proc en pie y sin tent/barr, BUILD/PLACE
@@ -54,6 +57,11 @@ SUPPORT_ASSAULT = False
 SUPPORT_WAR_NUDGE = True
 # Leftover sweep+commit. Off: Run 34 wr 33%→17% (agua/beacon + AM spam).
 SUPPORT_REMNANT = False
+# Late leftover hunt: fog-empty after the rush window. Not the Run 34 remnant.
+SUPPORT_LATE_REMNANT = True
+REMNANT_MIN_TICK = 25000
+REMNANT_ENEMY_WEALTH = 6000
+REMNANT_SWEEP_N = 4
 # Fog scout: open shroud with 2–3 idle rifles when nudge has no contact.
 # Map-agnostic (spatial Ch3/Ch4 or angle fallback). Never beacon.
 SUPPORT_FOG_SCOUT = True
@@ -645,6 +653,110 @@ def fog_scout_destinations(obs, n: int, aidx=None):
     return dests[:n]
 
 
+def _spectator_enemy_wealth(obs):
+    """Spectator wealth if attached (rollout gs); None under fog-only obs."""
+    gs = getattr(obs, "global_summary", None)
+    if not isinstance(gs, dict):
+        md = getattr(obs, "metadata", None)
+        if isinstance(md, dict):
+            gs = md.get("global_summary")
+    if not isinstance(gs, dict):
+        return None
+    ene = gs.get("enemy") or {}
+    try:
+        return (int(ene.get("cash") or 0)
+                + int(ene.get("unit_value") or 0)
+                + int(ene.get("building_value") or 0))
+    except (TypeError, ValueError):
+        return None
+
+
+def remnant_hunt_needed(obs) -> bool:
+    """True when the enemy is crushed / fog-empty after the rush window.
+
+    Visible leftovers stay a fight (nudge / policy). Late fog-empty games
+    (own 34k vs enemy 4.5k, timeout 53k) need an edge sweep.
+    """
+    if not SUPPORT_LATE_REMNANT:
+        return False
+    try:
+        tick = int(getattr(obs, "tick", 0) or 0)
+    except (TypeError, ValueError):
+        tick = 0
+    if tick < REMNANT_MIN_TICK:
+        return False
+    if home_raid_targets(obs):
+        return False
+    vis_b = list(getattr(obs, "visible_enemy_buildings", None) or [])
+    vis_u = list(getattr(obs, "visible_enemies", None) or [])
+    if vis_b or vis_u:
+        return False
+    # Fog-empty after 25k (and optional spectator wealth<6k crushed leftover).
+    return True
+
+
+def _unexplored_edge_dests(obs, n: int, aidx=None):
+    """Fog / map-edge cells, one per quadrant. Never beacon GPS."""
+    n = max(0, int(n))
+    if n <= 0:
+        return []
+    dests = fog_scout_destinations(obs, n, aidx)
+    if len(dests) >= n:
+        return dests[:n]
+    info = getattr(obs, "map_info", None)
+    w = int(getattr(info, "width", 128) or 128)
+    h = int(getattr(info, "height", 64) or 64)
+    corners = ((w - 3, 2), (w - 3, h - 3), (2, h - 3), (2, 2))
+    for raw in corners:
+        if len(dests) >= n:
+            break
+        snap = _snap_passable(obs, raw, aidx) or raw
+        xy = (int(snap[0]), int(snap[1]))
+        if any(max(abs(xy[0] - dx), abs(xy[1] - dy)) < FOG_SCOUT_MIN_SEP
+               for dx, dy in dests):
+            continue
+        dests.append(xy)
+    return dests[:n]
+
+
+def _emit_late_remnant(obs, combat, aidx, out):
+    """Fan-out idle / circling field units to unexplored edges."""
+    if not remnant_hunt_needed(obs) or not combat:
+        return
+    idle = [u for u in combat if bool(getattr(u, "is_idle", False))]
+    if idle:
+        movers = idle
+    else:
+        away = []
+        for u in combat:
+            try:
+                if not _near_own_base(obs, _xy(u)):
+                    away.append(u)
+            except (TypeError, ValueError):
+                continue
+        if len(away) < MIN_PILE_FOR_HUNT:
+            return
+        movers = away
+    n = min(len(movers), REMNANT_SWEEP_N)
+    dests = _unexplored_edge_dests(obs, n, aidx)
+    if not dests:
+        return
+    n_go = min(n, len(dests))
+    for u, dest in zip(movers[:n_go], dests):
+        try:
+            aid = int(getattr(u, "actor_id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if aid <= 0:
+            continue
+        out.append(CommandModel(
+            action=ActionType.ATTACK_MOVE,
+            actor_id=aid,
+            target_x=int(dest[0]),
+            target_y=int(dest[1]),
+        ))
+
+
 def _scout_preference_key(u):
     """Prefer fast rifles; never medi/harv (harv already excluded from combat)."""
     ut = str(getattr(u, "type", "") or "").lower()
@@ -703,6 +815,7 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None, war_n
     Llamar con la obs que ve la red ANTES de ejecutar el step. Devuelve [] si
     no hay nada que hacer. No toca el estado del shaper ni el buffer de PPO.
     war_nudge=None usa SUPPORT_WAR_NUDGE; False apaga raid/push/fog-scout.
+    El remate tardío (tick≥25k, niebla vacía) sigue activo.
     """
     use_nudge = SUPPORT_WAR_NUDGE if war_nudge is None else bool(war_nudge)
     out = []
@@ -886,9 +999,16 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None, war_n
                     action=ActionType.ARMY_ATTACK_MOVE,
                     target_x=int(dest[0]), target_y=int(dest[1])))
         elif (has_proc
-              and len(idles_home) >= MIN_ARMY_FOR_ASSAULT):
+              and len(idles_home) >= MIN_ARMY_FOR_ASSAULT
+              and not remnant_hunt_needed(obs)):
             # Niebla vacía: 2–3 scouts abren mapa; al revelar, el nudge empuja.
+            # Late remnant takes over after 25k (edge sweep, not 2 home scouts).
             _emit_fog_scouts(obs, combat, idles_home, aidx, out)
+
+    # 3a) Late remnant: fog leftover after the rush. Independent of war_nudge
+    #     (onboard --no-war-nudge still closes 53k incompletes).
+    if combat:
+        _emit_late_remnant(obs, combat, aidx, out)
 
     # 3b-4) Asalto FULL / hunt / recall / rally-al-dest: off. Ablation only.
     if SUPPORT_ASSAULT:

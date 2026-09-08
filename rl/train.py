@@ -42,6 +42,7 @@ from rl.imitation import (
     BC_WIN_CAP, BC_WIN_PREFER_TICKS,
     balance_bc_samples, lambda_bc_at, merge_teacher_wins,
 )
+from rl.onboard import mix_target_prob
 from rl.scripted_teacher import ScriptedTeacher
 
 
@@ -220,6 +221,7 @@ async def amain(args):
         net, lr=args.lr, device=device,
         clip_eps=args.clip_eps, max_grad_norm=args.max_grad_norm,
         burn_in_len=args.burn_in,
+        amp_init_scale=float(getattr(args, "amp_init_scale", 0) or 0) or None,
     )
 
     start_iter = 0
@@ -365,6 +367,23 @@ async def amain(args):
                 pfsp.stats.setdefault("rl", {"wins": 0, "games": 0})
             print("PFSP-RL ON: pool puede samplear bot_type=rl (frozen Multi0).", flush=True)
 
+    mix_from = getattr(args, "mix_from", None) or None
+    mix_warmup = int(getattr(args, "mix_warmup", 0) or 0)
+    mix_start_p = float(getattr(args, "mix_start", 0.25) or 0.25)
+    mix_start_iter = int(getattr(args, "mix_start_iter", 0) or 0)
+    mixing = bool(
+        mix_from and args.bot_type and mix_from != args.bot_type
+        and pfsp is None)
+    collect_it = [0]
+    if mixing:
+        print(
+            f"Mix ON: P({args.bot_type}) ramps {mix_start_p:.2f}→1.0 "
+            f"over {mix_warmup} iters from {mix_from} "
+            f"(start_iter={mix_start_iter or 'first'}). "
+            f"North-star wr / best.pt solo vs {args.bot_type}.",
+            flush=True,
+        )
+
     if args.auto_support:
         if args.no_war_nudge:
             print("auto-support=on war_nudge=off", flush=True)
@@ -386,6 +405,14 @@ async def amain(args):
 
         async def run_batch():
             results = []
+            it_now = int(collect_it[0] or mix_start_iter or 1)
+            p_tgt = 1.0
+            if mixing:
+                start_it = mix_start_iter or it_now
+                p_tgt = mix_target_prob(
+                    it_now, start_it, mix_warmup, mix_start_p)
+                print(f"  [mix] it={it_now} p({args.bot_type})={p_tgt:.2f} "
+                      f"from {mix_from}", flush=True)
 
             async def worker(idx, n):
                 for _ in range(n):
@@ -395,6 +422,13 @@ async def amain(args):
                     if pfsp is not None:
                         ep_bot = pfsp.sample()
                         ep_kwargs["bot_type"] = ep_bot
+                    elif mixing:
+                        start_it = mix_start_iter or it_now
+                        p_now = mix_target_prob(
+                            it_now, start_it, mix_warmup, mix_start_p)
+                        if float(np.random.random()) >= p_now:
+                            ep_bot = mix_from
+                            ep_kwargs["bot_type"] = ep_bot
                     opp_net = None
                     if ep_bot == "rl":
                         ckpt = pfsp.pick_rl_ckpt() if pfsp is not None else None
@@ -524,6 +558,12 @@ async def amain(args):
     ema_collect = ema_update = None
     t_start = time.time()
     elite = EliteBuffer(cap_steps=2000) if args.sil else None
+    elite_path = os.path.join(args.ckpt_dir, "elite.pt")
+    if elite is not None:
+        n_elite = elite.load(elite_path)
+        if n_elite:
+            print(f"[sil] loaded elite steps={n_elite} from {elite_path}",
+                  flush=True)
     teacher_wins = None
     if args.bc or bc_only:
         win_cap = int(getattr(args, "bc_win_cap", 0) or BC_WIN_CAP)
@@ -645,7 +685,9 @@ async def amain(args):
     print(f"Entrenando iters {first_it}..{last_it} inclusive ({n_updates} updates)",
           flush=True)
     bc_epochs = max(1, int(getattr(args, "bc_epochs", 1) or 1))
+    collect_it[0] = first_it
     for it in range(first_it, last_it + 1):
+        collect_it[0] = it
         t0 = time.time()
         if bc_only:
             infer_net.load_state_dict(net.state_dict())
@@ -690,7 +732,6 @@ async def amain(args):
             try:
                 replay = (
                     bool(getattr(args, "bc_replay", False))
-                    and bc_only
                     and teacher_wins is not None
                     and teacher_wins.n_episodes > 0
                 )
@@ -760,6 +801,7 @@ async def amain(args):
         elif args.bc:
             print(f"  [bc] skip teacher (lambda_bc=0)", flush=True)
         if not bc_only:
+            collect_it[0] = it + 1
             pending = launch_collection(pending)
 
         t1 = time.time()
@@ -778,6 +820,11 @@ async def amain(args):
             for ep_i, traj in by_ep.items():
                 oc = outcomes[ep_i] if ep_i < len(outcomes) else {}
                 elite.add_episode(traj, oc)
+            if len(elite) > 0:
+                try:
+                    elite.save(elite_path)
+                except OSError as e:
+                    print(f"[sil] save elite fail: {e}", flush=True)
         if bc_only:
             def _imitation_only():
                 st = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
@@ -833,8 +880,13 @@ async def amain(args):
 
         if pfsp is not None:
             pfsp.record_many(outcomes)
+        wr_anchor = None
+        if pfsp is not None:
+            wr_anchor = pfsp.anchor
+        elif mixing:
+            wr_anchor = args.bot_type
         for o in outcomes:
-            if pfsp is not None and o.get("bot_type") != pfsp.anchor:
+            if wr_anchor and o.get("bot_type") != wr_anchor:
                 continue
             total += 1
             wins += 1 if str(o["result"]).startswith("win") else 0
@@ -870,10 +922,10 @@ async def amain(args):
             sim_tps = ticks_total / collect_s if collect_s > 0 else 0.0
             # winrate rodante: últimas 20 partidas (reacciona más rápido
             # que el global acumulado)
-            if pfsp is not None:
+            if wr_anchor:
                 recent_results.extend(
                     o["result"] for o in outcomes
-                    if o.get("bot_type") == pfsp.anchor)
+                    if o.get("bot_type") == wr_anchor)
             else:
                 recent_results.extend(o["result"] for o in outcomes)
             rolling = (sum(1 for r in recent_results[-20:] if str(r).startswith("win"))
@@ -939,10 +991,14 @@ async def amain(args):
             if nbs:
                 nb_mean = {side: round(sum(b[side] for b in nbs) / len(nbs), 1)
                            for side in ("own", "enemy")}
-            if pfsp is not None:
-                anchor_outs = [o for o in outcomes if o.get("bot_type") == pfsp.anchor]
+            if wr_anchor:
+                anchor_outs = [o for o in outcomes if o.get("bot_type") == wr_anchor]
             else:
                 anchor_outs = list(outcomes)
+            mix_p = None
+            if mixing:
+                start_it = mix_start_iter or it
+                mix_p = mix_target_prob(it, start_it, mix_warmup, mix_start_p)
             metrics_row = {
                     "iter": it,
                     "bot_type": (pfsp.anchor if pfsp is not None else args.bot_type),
@@ -954,6 +1010,11 @@ async def amain(args):
                         "pfsp_stats": pfsp.summary(),
                         "opponent_bots": [o.get("bot_type") for o in outcomes]}
                        if pfsp is not None else {}),
+                    **({"mix": True,
+                        "mix_from": mix_from,
+                        "mix_p_target": round(mix_p, 3),
+                        "opponent_bots": [o.get("bot_type") for o in outcomes]}
+                       if mixing else {}),
                     "elapsed_s": round(elapsed_s, 1),
                     "eta_min": round(max(eta_s, 0) / 60, 1),
                     "collect_s": round(collect_s, 1),
@@ -965,6 +1026,10 @@ async def amain(args):
                     "clip_frac": stats.get("clip_frac"),
                     "kl": stats.get("kl"),
                     "grad_norm": stats.get("grad_norm"),
+                    **({"amp_skip_frac": stats.get("amp_skip_frac"),
+                        "amp_scale": stats.get("amp_scale"),
+                        "amp_enabled": stats.get("amp_enabled")}
+                       if stats.get("amp_skip_frac") is not None else {}),
                     **({"lambda_bc": round(lmb_bc, 4)} if args.bc else {}),
                     **({"lambda_sil": round(lmb_sil, 4)} if args.sil else {}),
                     **bc_meta,
@@ -978,10 +1043,10 @@ async def amain(args):
                     "winrate": round(wins / total, 3) if total else 0.0,
                     "winrate_rolling20": round(rolling, 3),
                     "iter_winrate": round(
-                        (sum(1 for o in (anchor_outs or outcomes)
+                        (sum(1 for o in anchor_outs
                              if str(o.get("result", "")).startswith("win"))
-                         / len(anchor_outs or outcomes))
-                        if (anchor_outs or outcomes) else 0.0, 3),
+                         / len(anchor_outs))
+                        if anchor_outs else 0.0, 3),
                     "mean_episode_reward": round(mean_ep_reward, 4),
                     "reward_components": comp_means,
                     "sim_ticks_per_s": round(sim_tps),
@@ -1107,6 +1172,21 @@ def main():
                     help="Incluye oponente RL (bot_type=rl) en PFSP; requiere daemon dual.")
     ap.add_argument("--pfsp-prev20-every", type=int, default=20,
                     help="Cada N iters copia latest.pt -> prev20.pt.")
+    ap.add_argument("--mix-from", default=None,
+                    choices=("beginner", "easy", "medium", "hard", "brutal",
+                             "dummy"),
+                    help="Con --bot-type: rampa P(bot-type) mezclando este rival "
+                         "más fácil. wr20 / best.pt solo vs --bot-type. "
+                         "No usa PFSP. Fase C: beginner→easy.")
+    ap.add_argument("--mix-warmup", type=int, default=40,
+                    help="Iters para subir P(--bot-type) de --mix-start a 1.0.")
+    ap.add_argument("--mix-start", type=float, default=0.25,
+                    help="P(--bot-type) al --mix-start-iter (default 0.25).")
+    ap.add_argument("--mix-start-iter", type=int, default=0,
+                    help="Iter donde P=mix-start (0 = primer iter de este run).")
+    ap.add_argument("--amp-init-scale", type=float, default=0.0,
+                    help="GradScaler init. 0 = default PyTorch (65536). "
+                         "Fase C usa 8 para no skipear el primer PPO.")
     ap.add_argument("--roles-vocab", action="store_true",
                     help="Traductor universal: sembrar la cabeza de items con "
                          "ROLES funcionales estables (rl.roles) en vez de "
@@ -1183,9 +1263,9 @@ def main():
                     help="Dir del TeacherWinBuffer (default "
                          "{ckpt_dir}/teacher_wins).")
     ap.add_argument("--bc-replay", action="store_true",
-                    help="Fase A: no jugar teacher games; SFT del ring "
-                         "teacher_wins/. auto_train lo pasa en --scratch "
-                         "cuando las cintas ya existen.")
+                    help="Fase A/B: no jugar teacher games; BC del ring "
+                         "teacher_wins/. auto_train lo pasa cuando las "
+                         "cintas ya existen (no en fase C).")
     ap.add_argument("--bc-collect-only", action="store_true",
                     help="Solo recolecta teacher wins al buffer y sale "
                          "(sin SFT/eval/ckpt). auto_train --onboard-collect-only.")

@@ -23,21 +23,35 @@ import torch.nn.functional as F
 
 # Dest-credit puede guardar lp_old ~ -1e9 (celda tapada) y lp_new finito.
 # ratio=exp(Δ) → inf; con adv<0 PPO no clippea y pi_loss=inf (iter 923 Run 17).
-_LOG_RATIO_CLAMP = 8.0
+_LOG_RATIO_CLAMP = 2.0
 # SIL lp.clamp(-20) deja nll≈20 cuando la acción sigue ilegal. No clonar eso.
 _SIL_NLL_SKIP = 18.0
 
 
-def _make_scaler(device: str):
-    enabled = device == "cuda" and torch.cuda.is_available()
+# AMP backoff to ~1–8 is normal. Reset only if scale underflowed to ~0.
+# A second floor-hit in the same process disables AMP (fp32): bouncing
+# 8→0.0009766 forever skips every PPO minibatch (H=clip=gn=0).
+_AMP_SCALE_FLOOR = 1e-3
+_AMP_RESET_INIT_SCALE = 8.0
+_AMP_DISABLE_AFTER = 2
+
+
+def _make_scaler(device: str, init_scale: float | None = None,
+                 enabled: bool | None = None):
+    if enabled is None:
+        enabled = device == "cuda" and torch.cuda.is_available()
+    kw = {}
+    if init_scale is not None:
+        kw["init_scale"] = float(init_scale)
     try:
-        return torch.amp.GradScaler("cuda", enabled=enabled)
+        return torch.amp.GradScaler("cuda", enabled=enabled, **kw)
     except (TypeError, AttributeError):
-        return torch.cuda.amp.GradScaler(enabled=enabled)
+        return torch.cuda.amp.GradScaler(enabled=enabled, **kw)
 
 
-def _autocast(device: str):
-    enabled = device == "cuda" and torch.cuda.is_available()
+def _autocast(device: str, enabled: bool | None = None):
+    if enabled is None:
+        enabled = device == "cuda" and torch.cuda.is_available()
     try:
         return torch.amp.autocast("cuda", enabled=enabled)
     except (TypeError, AttributeError):
@@ -161,7 +175,7 @@ class PPOTrainer:
                  clip_eps: float = 0.2, vf_coef: float = 0.5,
                  ent_lo: float = 0.01, ent_hi: float = 0.04,
                  max_grad_norm: float = 0.5, bptt_len: int = 32,
-                 burn_in_len: int = 0):
+                 burn_in_len: int = 0, amp_init_scale: float | None = None):
         self.net = net.to(device)
         self.opt = torch.optim.Adam(self.net.parameters(), lr=lr)
         self.device = device
@@ -172,8 +186,14 @@ class PPOTrainer:
         self.max_grad_norm = max_grad_norm
         self.bptt_len = bptt_len  # longitud de segmento para BPTT truncado
         self.burn_in_len = max(0, int(burn_in_len))
-        self.scaler = _make_scaler(device)
-        self.use_amp = device == "cuda"
+        init_scale = None
+        if amp_init_scale is not None and float(amp_init_scale) > 0:
+            init_scale = float(amp_init_scale)
+        self.scaler = _make_scaler(device, init_scale=init_scale)
+        self.use_amp = device == "cuda" and torch.cuda.is_available()
+        self._amp_floor_hits = 0
+        self._mb_seen = 0
+        self._mb_applied = 0
         if self.use_amp:
             torch.backends.cudnn.benchmark = True
 
@@ -205,6 +225,28 @@ class PPOTrainer:
         return (torch.stack(lps), torch.stack(ents),
                 torch.stack(vals), torch.stack(masks))
 
+    def _autocast_ctx(self):
+        return _autocast(self.device, enabled=self.use_amp)
+
+    def _maybe_reset_scaler(self) -> None:
+        """Floor underflow: one modest reset, then AMP off (fp32)."""
+        try:
+            scale_val = self.scaler.get_scale()
+        except Exception:
+            return
+        if scale_val >= _AMP_SCALE_FLOOR:
+            return
+        self._amp_floor_hits += 1
+        if self._amp_floor_hits >= _AMP_DISABLE_AFTER:
+            print(f"[amp] GradScaler scale={scale_val:.4g} colapsó "
+                  f"x{self._amp_floor_hits} — AMP off (fp32)", flush=True)
+            self.use_amp = False
+            self.scaler = _make_scaler(self.device, enabled=False)
+            return
+        print(f"[amp] GradScaler scale={scale_val:.4g} colapsó — reset "
+              f"init={_AMP_RESET_INIT_SCALE}", flush=True)
+        self.scaler = _make_scaler(self.device, init_scale=_AMP_RESET_INIT_SCALE)
+
     def _opt_step(self, loss) -> float:
         """AMP scale + clip. Devuelve grad_norm (0 si skip)."""
         self.scaler.scale(loss).backward()
@@ -214,6 +256,7 @@ class PPOTrainer:
         if not math.isfinite(gn):
             self.net.zero_grad(set_to_none=True)
             self.scaler.update()
+            self._maybe_reset_scaler()
             return 0.0
         self.scaler.step(self.opt)
         self.scaler.update()
@@ -235,6 +278,8 @@ class PPOTrainer:
         segs_per_batch = max(1, int(round(batch_size / max(1, self.bptt_len + self.burn_in_len))))
         stats = {"pi_loss": [], "v_loss": [], "entropy": [],
                  "clip_frac": [], "kl": []}
+        self._mb_seen = 0
+        self._mb_applied = 0
         gn = 0.0
         try:
             gn = self._ppo_epochs(segs, epochs, segs_per_batch, stats)
@@ -253,9 +298,22 @@ class PPOTrainer:
                             else float(v))
         out = {k: round(float(np.mean(v)), 5) if v else 0.0
                for k, v in stats.items()}
+        seen = int(self._mb_seen or 0)
+        applied = int(self._mb_applied or 0)
+        skip_frac = (1.0 - applied / seen) if seen else 0.0
+        try:
+            amp_scale = float(self.scaler.get_scale())
+        except Exception:
+            amp_scale = 0.0
         out |= {"grad_norm": round(gn, 4),
                 "adv_mean": round(float(np.mean(adv_vals)), 5) if adv_vals else 0.0,
-                "n": len(samples)}
+                "n": len(samples),
+                "amp_skip_frac": round(skip_frac, 4),
+                "amp_scale": amp_scale,
+                "amp_enabled": bool(self.use_amp)}
+        if seen and skip_frac >= 0.5:
+            print(f"[amp] skip {seen - applied}/{seen} scale={amp_scale:.4g} "
+                  f"amp={'on' if self.use_amp else 'off'}", flush=True)
         return out
 
     def _ppo_epochs(self, segs, epochs, segs_per_batch, stats) -> float:
@@ -265,8 +323,9 @@ class PPOTrainer:
             np.random.shuffle(seg_idx)
             for start in range(0, len(segs), segs_per_batch):
                 mb = [segs[i] for i in seg_idx[start:start + segs_per_batch]]
+                self._mb_seen += 1
                 self.net.zero_grad(set_to_none=True)
-                with _autocast(self.device):
+                with self._autocast_ctx():
                     lp_new, entropy, value, valid = self._eval_mb(mb)
                 lp_new = lp_new.float()
                 entropy = entropy.float()
@@ -312,13 +371,18 @@ class PPOTrainer:
                     continue
                 gn = self._opt_step(loss)
                 if gn == 0.0:
+                    self.net.zero_grad(set_to_none=True)
                     continue
+                self._mb_applied += 1
                 with torch.no_grad():
                     w = valid.float()
                     clip_frac = (
                         ((ratio - 1).abs() > self.clip_eps).float() * w
                     ).sum() / w.sum().clamp(min=1.0)
-                    kl = ((lp_new - lp_old).clamp(min=0) * w).sum() / w.sum().clamp(min=1.0)
+                    # KL of the update (log_ratio already ±2). Unclamped
+                    # (lp_new-lp_old)+ hits 1e3–5e3 on a few tokens and
+                    # blows the dashboard (kl×10 vs H~1).
+                    kl = (log_ratio.clamp(min=0) * w).sum() / w.sum().clamp(min=1.0)
                     stats["pi_loss"].append(float(pi_b[seg_ok].mean().item()))
                     stats["v_loss"].append(float(v_b[seg_ok].mean().item()))
                     stats["entropy"].append(h_mean)
@@ -356,7 +420,7 @@ class PPOTrainer:
             for start in range(0, len(segs), segs_per_batch):
                 mb = [segs[i] for i in idx[start:start + segs_per_batch]]
                 self.net.zero_grad(set_to_none=True)
-                with _autocast(self.device):
+                with self._autocast_ctx():
                     lp, _, _, valid = self._eval_mb(mb)
                 lp = lp.float()
                 finite = ((~valid) | torch.isfinite(lp))
@@ -376,6 +440,7 @@ class PPOTrainer:
                     continue
                 gn = self._opt_step(coef * loss)
                 if gn == 0.0:
+                    self.net.zero_grad(set_to_none=True)
                     continue
                 nlls.append(float(loss.item()))
         return nlls

@@ -9,13 +9,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from rl.onboard import (
     build_train_argv,
+    drought_blocked_until_min_iters,
+    drought_since_iter,
     era_reset_row,
+    mix_target_prob,
     new_curriculum,
     outcomes_from_rows,
     phase_flags,
     rewind_onboard,
     should_promote,
     should_resume,
+    snapshot_phase_best,
     strip_flags,
     wr20,
     wr20_streak,
@@ -51,6 +55,7 @@ check("strip conserva --macro-ticks (A lo pisa)", "--macro-ticks" in stripped)
 
 cfg = new_curriculum()
 check("new curriculum fase A", cfg["phase"] == "A")
+check("default a_promote_wr20 0.25", abs(cfg["a_promote_wr20"] - 0.25) < 1e-9)
 check("primer A no resume", should_resume(cfg) is False)
 cfg["a_launched"] = True
 check("A ya lanzada resume", should_resume(cfg) is True)
@@ -86,9 +91,11 @@ check("B sil beginner", "--sil" in fb and fb[fb.index("--bot-type") + 1] == "beg
 check("B bc mezclado no bc-only", "--bc" in fb and "--bc-only" not in fb)
 check("B teacher beginner", fb[fb.index("--bc-teacher-bot") + 1] == "beginner")
 check("B bc-games 2", fb[fb.index("--bc-games") + 1] == "2")
-check("B bc-warmup 80", fb[fb.index("--bc-warmup") + 1] == "80")
+check("B bc-warmup 40", fb[fb.index("--bc-warmup") + 1] == "40")
 check("B wins-only (no keep incomplete)", "--bc-keep-incomplete" not in fb)
-check("B lambda piso 0.25", fb[fb.index("--bc-lambda-end") + 1] == "0.25")
+check("B lambda piso 0.10", fb[fb.index("--bc-lambda-end") + 1] == "0.10")
+check("B lr 2e-5", fb[fb.index("--lr") + 1] == "2.0e-5")
+check("B adv-mode global", fb[fb.index("--adv-mode") + 1] == "global")
 check("B teacher macro 40", fb[fb.index("--bc-macro-ticks") + 1] == "40")
 check("B teacher max-steps 1800", fb[fb.index("--bc-max-steps") + 1] == "1800")
 check("B rush 8", fb[fb.index("--bc-rush") + 1] == "8")
@@ -103,10 +110,25 @@ fb24 = phase_flags("B", cfg_b_start)
 check("B pin b_bc_start_iter",
       fb24[fb24.index("--bc-start-iter") + 1] == "24")
 fc = phase_flags("C", cfg)
-check("C easy + reset-opt", fc[fc.index("--bot-type") + 1] == "easy" and "--reset-opt" in fc)
+check("A lr 1e-4", fa[fa.index("--lr") + 1] == "1.0e-4")
+check("A adv-mode episode", fa[fa.index("--adv-mode") + 1] == "episode")
+check("C easy sin reset-opt", fc[fc.index("--bot-type") + 1] == "easy"
+      and "--reset-opt" not in fc)
+check("C lr 2e-5 (igual B)", fc[fc.index("--lr") + 1] == "2.0e-5")
+check("C adv-mode global", fc[fc.index("--adv-mode") + 1] == "global")
+check("C amp-init-scale 8", fc[fc.index("--amp-init-scale") + 1] == "8")
+check("C mix-from beginner", fc[fc.index("--mix-from") + 1] == "beginner")
+check("C mix-warmup 40", fc[fc.index("--mix-warmup") + 1] == "40")
+check("C mix-start 0.25", fc[fc.index("--mix-start") + 1] == "0.25")
+check("C sil sin bc", "--sil" in fc and "--bc" not in fc)
 cfg["c_reset_opt_done"] = True
 fc2 = phase_flags("C", cfg)
-check("C relaunch sin reset-opt", "--reset-opt" not in fc2)
+check("C nunca reset-opt", "--reset-opt" not in fc2)
+cfg_c_start = dict(cfg)
+cfg_c_start["phase_started_iter"] = 132
+fc132 = phase_flags("C", cfg_c_start)
+check("C mix-start-iter = phase_started+1",
+      fc132[fc132.index("--mix-start-iter") + 1] == "133")
 
 cmd = build_train_argv(base, "A", new_curriculum())
 check("argv A last bot-type beginner",
@@ -143,6 +165,32 @@ rows_a_win = [
 ]
 check("promove A->B con sft + wr alumno",
       should_promote(cfg_a, rows_a_win, last_iter=20) == "B")
+
+# A easy gate: wr20>=0.25 once (no streak / no promote_wr20 0.50 bar)
+rows_a_025 = [
+    {"iter": i, "bot_type": "beginner", "onboard_phase": "A",
+     "outcomes": ["lose", "lose", "lose", "win"]}
+    for i in range(1, 21)
+]
+check("A wr20=0.25 promove sin streak",
+      abs(wr20(outcomes_from_rows(rows_a_025, "beginner", "A")) - 0.25) < 1e-9
+      and should_promote(cfg_a, rows_a_025, last_iter=20) == "B")
+# 1 win in last 20 eps via last iter only — build 19 lose-iters + one mixed
+rows_a_024 = (
+    [{"iter": i, "bot_type": "beginner", "onboard_phase": "A",
+      "outcomes": ["lose", "lose", "lose", "lose"]} for i in range(1, 20)]
+    + [{"iter": 20, "bot_type": "beginner", "onboard_phase": "A",
+        "outcomes": ["lose", "lose", "lose", "win"]}]
+)
+check("A wr20<0.25 no promove",
+      wr20(outcomes_from_rows(rows_a_024, "beginner", "A")) < 0.25
+      and should_promote(cfg_a, rows_a_024, last_iter=20) is None)
+# Even if promote_wr20 were still 0.50 with streak, A uses a_promote only
+cfg_a_hard = new_curriculum()
+cfg_a_hard["promote_wr20"] = 0.50
+cfg_a_hard["streak"] = 10
+check("A ignora promote_wr20/streak (solo a_promote)",
+      should_promote(cfg_a_hard, rows_a_025, last_iter=20) == "B")
 
 cfg_b = new_curriculum()
 cfg_b["phase"] = "B"
@@ -187,6 +235,44 @@ check("argv B last teacher beginner",
 check("argv B sin pfsp", "--pfsp" not in cmd_b)
 check("argv C no bc", "--bc" not in phase_flags("C", cfg))
 
+print("=== mix ramp / drought gate ===")
+check("mix start_iter p=start",
+      abs(mix_target_prob(133, 133, 40, 0.25) - 0.25) < 1e-9)
+check("mix mid",
+      abs(mix_target_prob(153, 133, 40, 0.25) - 0.625) < 1e-9)
+check("mix end",
+      abs(mix_target_prob(173, 133, 40, 0.25) - 1.0) < 1e-9)
+check("mix after warmup stays 1",
+      abs(mix_target_prob(200, 133, 40, 0.25) - 1.0) < 1e-9)
+check("mix warmup 0 = 100% target",
+      abs(mix_target_prob(1, 1, 0, 0.25) - 1.0) < 1e-9)
+cfg_d = new_curriculum()
+cfg_d["phase"] = "C"
+cfg_d["phase_started_iter"] = 132
+check("drought since = phase start",
+      drought_since_iter(cfg_d, 0) == 132)
+check("drought since max(restore, start)",
+      drought_since_iter(cfg_d, 140) == 140)
+c_early = [{"iter": 132 + i, "bot_type": "easy", "onboard_phase": "C",
+            "outcomes": ["incomplete"] * 4} for i in range(1, 6)]
+check("C drought blocked < min_iters",
+      drought_blocked_until_min_iters(cfg_d, c_early) is True)
+c_late = [{"iter": 132 + i, "bot_type": "easy", "onboard_phase": "C",
+           "outcomes": ["incomplete"] * 4} for i in range(1, 22)]
+check("C drought allowed after min_iters",
+      drought_blocked_until_min_iters(cfg_d, c_late) is False)
+check("B drought never blocked by this gate",
+      drought_blocked_until_min_iters({"phase": "B"}, c_early) is False)
+mix_row = {
+    "iter": 140, "bot_type": "easy", "onboard_phase": "C",
+    "outcomes": ["win", "win", "win", "incomplete"],
+    "opponent_bots": ["beginner", "easy", "beginner", "easy"],
+}
+check("mix wr20 cuenta solo easy",
+      abs(wr20(outcomes_from_rows([mix_row], "easy", "C")) - 0.5) < 1e-9)
+check("mix beginner wins no inflan C",
+      abs(wr20(outcomes_from_rows([mix_row], "beginner", "C")) - 1.0) < 1e-9)
+
 # rewind: latest <- best@24, drop metrics > 24
 import tempfile
 td = Path(tempfile.mkdtemp())
@@ -215,7 +301,8 @@ check("rewind trunca metrics >24", '"iter": 185' not in kept_m and '"iter": 24' 
 check("rewind conserva era_reset", "era_reset" in kept_m)
 check("rewind trunca race >24",
       '"iter": 185' not in (td / "economy_race.jsonl").read_text(encoding="utf-8"))
-check("rewind pin bc start 24", cfg_out["b_bc_start_iter"] == 24)
+check("rewind no reinicia lambda a keep_iter",
+      cfg_out["b_bc_start_iter"] == 20)
 check("rewind no mueve phase_started", cfg_out["phase_started_iter"] == 20)
 check("rewind src best.pt", info["src"] == "best.pt")
 cfg_a_rw = new_curriculum()
@@ -235,9 +322,65 @@ check("rewind 20 latest = iter0020",
       (td / "latest.pt").read_bytes() == b"SFT20")
 check("rewind 20 src decade", inf20["src"] == "iter0020.pt")
 
+# C → B rewind (undo a bad promote). Restore best + latest from decade.
+td2 = Path(tempfile.mkdtemp())
+(td2 / "best.pt").write_bytes(b"EASY0")
+(td2 / "latest.pt").write_bytes(b"EASYLATE")
+(td2 / "iter0130.pt").write_bytes(b"B130")
+(td2 / "best.json").write_text(
+    json.dumps({"iter": 153, "bot_type": "easy", "iter_winrate": 0.0}),
+    encoding="utf-8")
+(td2 / "best_B.pt").write_bytes(b"BBEST")
+(td2 / "metrics.jsonl").write_text(
+    '{"iter": 130, "onboard_phase": "B", "bot_type": "beginner", '
+    '"outcomes": ["win","win","win","incomplete"], "iter_winrate": 0.75}\n'
+    '{"iter": 153, "onboard_phase": "C", "bot_type": "easy"}\n',
+    encoding="utf-8")
+(td2 / "economy_race.jsonl").write_text(
+    '{"iter": 130}\n{"iter": 153}\n', encoding="utf-8")
+(td2 / "elite.pt").write_bytes(b"ELITE")
+cfg_c_rw = new_curriculum()
+cfg_c_rw["phase"] = "C"
+cfg_c_rw["a_launched"] = True
+cfg_c_rw["phase_started_iter"] = 132
+cfg_c_rw["b_bc_start_iter"] = 36
+out_c, inf_c = rewind_onboard(td2, 130, cfg=cfg_c_rw)
+check("rewind C->B phase B", out_c["phase"] == "B")
+check("rewind C latest = decade", (td2 / "latest.pt").read_bytes() == b"B130")
+check("rewind C restaura best", (td2 / "best.pt").read_bytes() == b"B130")
+check("rewind C borra elite", not (td2 / "elite.pt").exists())
+check("rewind C lambda origin B", out_c["b_bc_start_iter"] == 36)
+check("rewind C phase_started = keep (min_iters)",
+      int(out_c["phase_started_iter"]) == 130)
+check("rewind C trunca metrics 153",
+      '"iter": 153' not in (td2 / "metrics.jsonl").read_text(encoding="utf-8"))
+best_meta = json.loads((td2 / "best.json").read_text(encoding="utf-8"))
+check("rewind C best.json iter 130",
+      best_meta.get("iter") == 130
+      and best_meta.get("reason") == "onboard_rewind")
+check("snapshot_phase_best copia",
+      snapshot_phase_best(td2, "B") is not None
+      and (td2 / "best_B.pt").exists())
+
+
+print("=== collapse A vs B ===")
+from rl import auto_train as at
+
+check("A never collapse even if flag on",
+      at.collapse_active("A", True) is False)
+check("B collapse follows flag on",
+      at.collapse_active("B", True) is True)
+check("B collapse follows flag off",
+      at.collapse_active("B", False) is False)
+check("C collapse follows flag on",
+      at.collapse_active("C", True) is True)
+check("C collapse follows flag off",
+      at.collapse_active("C", False) is False)
+check("no onboard follows flag on",
+      at.collapse_active(None, True) is True)
+
 
 print("=== collect-only wiring ===")
-from rl import auto_train as at
 
 pa = at.parse_auto_args([
     "--onboard", "--onboard-collect-only", "--onboard-collect-target", "40",
@@ -268,10 +411,15 @@ check("would_pass_bc_replay False when no tapes",
           onboard={"phase": "A"},
           collect_only=False) is False)
 
-check("would_pass_bc_replay False when phase B even with tapes",
+check("would_pass_bc_replay True when replay+B without collect-only",
       at.would_pass_bc_replay(
           replay_tapes=True,
           onboard={"phase": "B"},
+          collect_only=False) is True)
+check("would_pass_bc_replay False when phase C even with tapes",
+      at.would_pass_bc_replay(
+          replay_tapes=True,
+          onboard={"phase": "C"},
           collect_only=False) is False)
 
 print("=== resume replay wiring ===")
@@ -326,7 +474,7 @@ try:
     check("resume+collect would_pass False",
           at.would_pass_bc_replay() is False)
 
-    # Phase B resume: do not force bc-replay
+    # Phase B resume: reuse tapes + --bc-replay (same as A offline path)
     (td / "curriculum.json").write_text(
         json.dumps({
             "phase": "B", "sft_iters": 20, "promote_wr20": 0.5,
@@ -341,9 +489,29 @@ try:
     args_b = at.parse_auto_args(["--onboard"])
     with mock.patch.object(at.ob, "save_curriculum"):
         at._init_onboard(args_b)
-    check("resume phase B leaves _replay_tapes False",
+    check("resume phase B sets _replay_tapes",
+          at._replay_tapes is True)
+    check("resume phase B would_pass True",
+          at.would_pass_bc_replay() is True)
+
+    # Phase C resume: never force bc-replay
+    (td / "curriculum.json").write_text(
+        json.dumps({
+            "phase": "C", "sft_iters": 20, "promote_wr20": 0.5,
+            "done_wr20": 0.45, "streak": 10, "min_iters": 20,
+            "bc_games": 4, "a_eval_games": 4, "a_rush": 8,
+            "a_launched": True, "c_reset_opt_done": False,
+            "phase_started_iter": 40,
+        }), encoding="utf-8")
+    at._replay_tapes = False
+    at._collect_only = False
+    at._onboard = None
+    args_c2 = at.parse_auto_args(["--onboard"])
+    with mock.patch.object(at.ob, "save_curriculum"):
+        at._init_onboard(args_c2)
+    check("resume phase C leaves _replay_tapes False",
           at._replay_tapes is False)
-    check("resume phase B would_pass False",
+    check("resume phase C would_pass False",
           at.would_pass_bc_replay() is False)
 finally:
     at.CKPT_DIR = orig_ckpt

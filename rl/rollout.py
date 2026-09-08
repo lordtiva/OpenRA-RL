@@ -405,6 +405,14 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         last_push_cell = (int(c.target_x), int(c.target_y))
                 # Pilar B: autonomía de soporte (0 decisiones, gratis para PPO)
                 if auto_support:
+                    gs_live = getattr(race, "_last_gs", None)
+                    if isinstance(gs_live, dict):
+                        try:
+                            obs.global_summary = gs_live
+                        except Exception:
+                            md = getattr(obs, "metadata", None)
+                            if isinstance(md, dict):
+                                md["global_summary"] = gs_live
                     for cmd in support_commands(obs, last_push=last_push_cell, aidx=aidx, war_nudge=war_nudge):
                         action.commands.append(cmd)
                 # Executed-command hysteresis: suppress near-duplicate army pushes

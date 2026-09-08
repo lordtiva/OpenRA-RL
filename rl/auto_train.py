@@ -42,11 +42,12 @@ Flags del launcher (no van a rl.train):
   --onboard       curriculum A→B→C (SFT teacher vs beginner, PPO+BC beginner,
                   PPO easy). Ver rl/docs/22-onboard.md.
   --onboard-rewind N
-                  Una vez, en B: latest <- best/iterN, trunca metrics/race,
-                  pinnea BC start. Luego el launch es --onboard.
+                  Una vez, en B: latest <- best/iterN, trunca metrics/race.
+                  λ_bc se queda en el piso (no reinicia a 1.0).
   --collapse / --no-collapse
                   watchdog COLAPSO (politica muerta) + SEQUIA wr20
-                  que restaura best.pt (default: --collapse).
+                  que restaura best.pt (default: --collapse). Fase A
+                  lo ignora (siempre off). B y C lo respetan.
 """
 import subprocess, sys, time, pathlib, signal, os, json, re, urllib.request, shutil
 
@@ -198,6 +199,17 @@ def hang_threshold() -> int:
     if _onboard and _onboard.get("phase") in ("A", "B"):
         return ONBOARD_A_THRESHOLD_S
     return THRESHOLD_S
+
+
+def collapse_active(phase, collapse_flag: bool) -> bool:
+    """Restore best.pt on dead policy / wr20 drought.
+
+    Phase A (SFT, no PPO wr) never restores — a lucky eval freezes the clone.
+    B and C follow --collapse / --no-collapse (default on).
+    """
+    if phase == "A":
+        return False
+    return bool(collapse_flag)
 
 
 def find_latest_pt() -> str | None:
@@ -518,7 +530,11 @@ def try_promote(last_iter: int) -> str | None:
     if nxt == "B":
         ob.append_era_reset(METRICS, "onboard phase B beginner PPO+BC", "beginner")
     elif nxt == "C":
-        _onboard["c_reset_opt_done"] = False
+        snap = ob.snapshot_phase_best(CKPT_DIR, "B")
+        if snap:
+            log(f"onboard snapshot {snap.name} (best B, no pisa 0-win easy)")
+        # Never --reset-opt on C: Adam de B es el que ganó beginner.
+        _onboard["c_reset_opt_done"] = True
         ob.append_era_reset(METRICS, "onboard phase C easy", "easy")
     ob.save_curriculum(CURRICULUM, _onboard)
     return nxt
@@ -538,7 +554,9 @@ def would_pass_bc_replay(replay_tapes: bool = None, onboard=None,
     co = _collect_only if collect_only is None else bool(collect_only)
     if co:
         return False
-    return bool(rt and ob_cfg is not None and ob_cfg.get("phase") == "A")
+    phase = (ob_cfg or {}).get("phase")
+    # A offline SFT + B mixed BC reuse teacher_wins/; C has no teacher.
+    return bool(rt and phase in ("A", "B"))
 
 
 def launch_train(extra_args=None) -> subprocess.Popen:
@@ -594,6 +612,8 @@ def parse_auto_args(argv=None):
              "Ver rl/docs/22-onboard.md.")
     ap.add_argument("--onboard-sft-iters", type=int, default=20,
                     help="Iters de SFT (fase A).")
+    ap.add_argument("--onboard-a-promote-wr20", type=float, default=0.25,
+                    help="wr20 vs beginner para pasar A->B (sin streak).")
     ap.add_argument("--onboard-promote-wr20", type=float, default=0.50,
                     help="wr20 vs beginner para pasar a easy.")
     ap.add_argument("--onboard-done-wr20", type=float, default=0.45,
@@ -627,12 +647,14 @@ def parse_auto_args(argv=None):
              "en teacher_wins/ (default 40, ~bc_win_cap con rushes cortos).")
     ap.add_argument(
         "--onboard-rewind", type=int, default=None, metavar="N",
-        help="Fase B: copia best/iterN -> latest, trunca metrics y "
-             "economy_race a iter<=N, pinnea --bc-start-iter=N. Una vez.")
+        help="Fase B o C: copia iterN/best -> latest y best, trunca "
+             "metrics y economy_race a iter<=N. λ_bc sigue en el piso "
+             "(no reinicia a 1.0). Desde C vuelve a B. Una vez.")
     ap.add_argument(
         "--collapse", action=argparse.BooleanOptionalAction, default=True,
         help="Watchdog de politica muerta / sequia wr20 que restaura best.pt "
-             "(default: on). Usa --no-collapse para desactivarlo.")
+             "(default: on). Fase A lo ignora. Usa --no-collapse para "
+             "desactivarlo en B/C.")
     ap.add_argument(
         "--ckpt-dir", default=None,
         help="Carpeta de ckpts relativa al repo (default: rl/ckpts_v2). "
@@ -644,8 +666,8 @@ def parse_auto_args(argv=None):
 def _maybe_set_replay_tapes(args, *, resume: bool = False) -> None:
     """Reuse teacher_wins/ when schema matches (sets _replay_tapes).
 
-    On resume, only phase A wires replay (matches would_pass_bc_replay).
-    Collect flags keep live teacher collection (no --bc-replay).
+    On resume, phase A or B wires replay (matches would_pass_bc_replay).
+    Phase C never; collect flags keep live teacher collection (no --bc-replay).
     """
     global _replay_tapes
     tw = CKPT_DIR / "teacher_wins"
@@ -668,12 +690,12 @@ def _maybe_set_replay_tapes(args, *, resume: bool = False) -> None:
         log(f"  teacher_wins/ {n_eps} eps — {why} suma más "
             f"(no --bc-replay)")
         return
-    if resume and (_onboard is None or _onboard.get("phase") != "A"):
+    if resume and (_onboard is None or _onboard.get("phase") not in ("A", "B")):
         return
     _replay_tapes = True
     if resume:
         log(f"  reusando teacher_wins/ ({n_eps} eps, schema {TAPE_SCHEMA}; "
-            f"resume SFT no re-juega al teacher)")
+            f"resume no re-juega al teacher)")
     else:
         log(f"  reusando teacher_wins/ ({n_eps} eps, schema {TAPE_SCHEMA}; "
             f"SFT scratch no re-juega al teacher)")
@@ -696,6 +718,7 @@ def _init_onboard(args) -> None:
     _replay_tapes = False
     overrides = {
         "sft_iters": int(args.onboard_sft_iters),
+        "a_promote_wr20": float(args.onboard_a_promote_wr20),
         "promote_wr20": float(args.onboard_promote_wr20),
         "done_wr20": float(args.onboard_done_wr20),
         "streak": int(args.onboard_streak),
@@ -713,7 +736,9 @@ def _init_onboard(args) -> None:
         # parallel teacher / B mixed-BC without --scratch.
         for k in ("a_macro_ticks", "a_max_steps", "a_k_skip",
                   "b_bc_games", "b_bc_epochs", "b_bc_warmup",
-                  "bc_win_cap", "bc_win_prefer_ticks"):
+                  "b_bc_lambda_end",
+                  "bc_win_cap", "bc_win_prefer_ticks",
+                  "c_mix_from", "c_mix_warmup", "c_mix_start"):
             _onboard[k] = ob.DEFAULTS[k]
         if args.onboard_rewind is not None:
             keep = int(args.onboard_rewind)
@@ -723,9 +748,18 @@ def _init_onboard(args) -> None:
             except (FileNotFoundError, ValueError) as e:
                 log(f"FAIL: --onboard-rewind {keep}: {e}")
                 sys.exit(2)
+            from rl.imitation import lambda_bc_at
+            nxt = keep + 1
+            lmb = lambda_bc_at(
+                nxt,
+                int(_onboard.get("b_bc_start_iter") or 0) or 1,
+                int(_onboard.get("b_bc_warmup") or ob.DEFAULTS["b_bc_warmup"]),
+                end=float(_onboard.get("b_bc_lambda_end")
+                          or ob.DEFAULTS["b_bc_lambda_end"]))
             log(f"  latest <- {info['src']}  metrics_kept={info['metrics_kept']} "
                 f"race_kept={info['race_kept']}  "
-                f"b_bc_start_iter={_onboard.get('b_bc_start_iter')}")
+                f"b_bc_start_iter={_onboard.get('b_bc_start_iter')} "
+                f"lambda@{nxt}={lmb:.2f}")
         else:
             ob.save_curriculum(CURRICULUM, _onboard)
         # --onboard-fresh-tapes also applies on resume (not only --scratch).
@@ -746,17 +780,18 @@ def _init_onboard(args) -> None:
             log(f"onboard COLLECT-ONLY target={_collect_target} "
                 f"wins_so_far={n_eps} (no SFT, keep latest.pt)")
         else:
-            # Phase A offline SFT: reuse tapes like --scratch --onboard.
-            # would_pass_bc_replay still gates on phase==A (B/C never get
-            # --bc-replay from this flag alone).
+            # Phase A/B: reuse tapes like --scratch --onboard.
+            # would_pass_bc_replay gates on phase in (A, B); C never gets
+            # --bc-replay from this flag alone.
             _maybe_set_replay_tapes(args, resume=True)
         log(f"onboard resume phase={_onboard['phase']} "
             f"(sft_iters={_onboard['sft_iters']} "
+            f"a_promote={_onboard.get('a_promote_wr20', 0.25)} "
             f"promote={_onboard['promote_wr20']} "
             f"done={_onboard['done_wr20']})")
         return
     if args.onboard_rewind is not None:
-        log("FAIL: --onboard-rewind necesita curriculum.json en fase B "
+        log("FAIL: --onboard-rewind necesita curriculum.json en fase B o C "
             "(no uses --scratch).")
         sys.exit(2)
     if existing and args.scratch:
@@ -794,10 +829,8 @@ def main():
     if args.scratch and not args.onboard:
         os.environ["FORCE_SCRATCH"] = "1"
     collapse_watch = bool(args.collapse)
-    # A/B: restoring best@lucky-2/4 freezes SFT (docs/22-onboard.md).
-    if _onboard and _onboard.get("phase") in ("A", "B"):
-        collapse_watch = False
-    _cw = "ON" if collapse_watch else "OFF"
+    _phase = _onboard.get("phase") if _onboard else None
+    _cw = "ON" if collapse_active(_phase, collapse_watch) else "OFF"
     _sc = "yes" if args.scratch else "no"
     _ob = _onboard.get("phase") if _onboard else "off"
     _dk = "docker" if docker_available() else "no-docker"
@@ -855,7 +888,8 @@ def main():
                             "No relanza. Cerrá esta ventana.")
                         sys.exit(0)
                     if nxt:
-                        log(f"onboard relanza fase {nxt}")
+                        cw = "ON" if collapse_active(nxt, collapse_watch) else "OFF"
+                        log(f"onboard relanza fase {nxt} collapse={cw}")
                         time.sleep(2)
                         proc = launch_train()
                         last_mtime = metrics_mtime()
@@ -927,20 +961,21 @@ def main():
                         kill_train(proc)
                         sys.exit(0)
                     if nxt:
-                        log(f"onboard relanza fase {nxt}")
+                        cw = "ON" if collapse_active(nxt, collapse_watch) else "OFF"
+                        log(f"onboard relanza fase {nxt} collapse={cw}")
                         kill_train(proc)
                         time.sleep(2)
+                        if nxt == "C":
+                            # Drought must not see B's wr20 peak as C's.
+                            last_restore_iter = int(n)
                         proc = launch_train()
                         last_mtime = metrics_mtime()
                         last_progress = time.time()
                         gpu_low_streak = 0
                         continue
-                collapse_now = collapse_watch
-                # A: no wr. B: best@24 iwr=0.5 congela el puntero y
-                # deploy-noop cada ~20 iters restaura ese lucky 2/4
-                # (loop 52/70/90/129/156). C ya puede usar collapse.
-                if _onboard and _onboard.get("phase") in ("A", "B"):
-                    collapse_now = False
+                # A: never restore (lucky eval freezes SFT). B/C follow flag.
+                collapse_now = collapse_active(
+                    _onboard.get("phase") if _onboard else None, collapse_watch)
                 if not collapse_now:
                     continue
                 rows_tail = last_metrics_rows(max(COLLAPSE_STREAK, DROUGHT_STREAK))
@@ -950,8 +985,16 @@ def main():
                 last_it = int((rows_era or rows_tail or [{"iter": 0}])[-1]["iter"])
                 cooldown_ok = (last_it - last_restore_iter) >= COLLAPSE_COOLDOWN_ITERS
                 dead = bool(tail) and all(is_dead_policy(r) for r in tail) and cooldown_ok
-                drought = cooldown_ok and drought_should_restore(
-                    rows_era, last_restore_iter)
+                drought_since = last_restore_iter
+                if _onboard:
+                    drought_since = ob.drought_since_iter(
+                        _onboard, last_restore_iter)
+                drought = (
+                    cooldown_ok
+                    and not ob.drought_blocked_until_min_iters(
+                        _onboard, rows_era)
+                    and drought_should_restore(rows_era, drought_since)
+                )
                 if dead or drought:
                     its = [r["iter"] for r in (tail if dead else rows_era[-DROUGHT_STREAK:])]
                     kind = f"COLAPSO {reasons}" if dead else "SEQUIA wr20"

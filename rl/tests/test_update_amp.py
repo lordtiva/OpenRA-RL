@@ -148,6 +148,59 @@ st = tr.update(
     epochs=1, batch_size=64)
 check("ppo batched update finito", math.isfinite(st.get("pi_loss", 0)))
 check("ppo batched n samples", st.get("n") == 3)
+check("ppo reporta amp_skip_frac", st.get("amp_skip_frac") is not None)
+tr8 = PPOTrainer(AlphaLiteNet(), lr=1e-4, device="cpu", amp_init_scale=8)
+check("amp_init_scale no crashea en cpu", tr8.scaler is not None)
+
+print("=== GradScaler collapse reset ===")
+
+
+class _TinyScaler:
+    def __init__(self, scale):
+        self._scale = float(scale)
+        self.n_update = 0
+
+    def scale(self, loss):
+        return loss
+
+    def unscale_(self, opt):
+        return None
+
+    def step(self, opt):
+        opt.step()
+
+    def update(self):
+        self.n_update += 1
+
+    def get_scale(self):
+        return self._scale
+
+
+class _WNet(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.w = torch.nn.Parameter(torch.ones(1))
+
+
+net_sc = _WNet()
+tr_sc = PPOTrainer(net_sc, lr=1e-3, device="cpu")
+tr_sc.scaler = _TinyScaler(0.5)
+gn_ok = tr_sc._opt_step(net_sc.w * float("inf"))
+check("inf gn skip", gn_ok == 0.0)
+check("scale 0.5 no reset (backoff sano)", isinstance(tr_sc.scaler, _TinyScaler))
+check("grad purgado tras skip",
+      all(p.grad is None for p in net_sc.parameters()))
+tr_sc.use_amp = True
+tr_sc._amp_floor_hits = 0
+tr_sc.scaler = _TinyScaler(1e-4)
+gn_lo = tr_sc._opt_step(net_sc.w * float("inf"))
+check("inf gn skip otra vez", gn_lo == 0.0)
+check("scale 1e-4 sí reset", not isinstance(tr_sc.scaler, _TinyScaler))
+check("primer floor no apaga AMP", tr_sc.use_amp is True and tr_sc._amp_floor_hits == 1)
+tr_sc.scaler = _TinyScaler(1e-4)
+gn_lo2 = tr_sc._opt_step(net_sc.w * float("inf"))
+check("segundo floor skip", gn_lo2 == 0.0)
+check("segundo floor apaga AMP", tr_sc.use_amp is False)
 
 print("=== fin update amp ===")
 if not ok:

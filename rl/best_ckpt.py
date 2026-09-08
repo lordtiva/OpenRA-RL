@@ -185,6 +185,10 @@ def policy_still_alive(row: dict) -> bool:
     Used to block wr20-drought restores that would wipe a living PPO run
     (Run 42: H~1.2 and low no_op while wr20 dipped — SEQUIA restored
     best-iter-1 three times and erased medium wins).
+
+    PPO-skipped updates log entropy=0 even when the actor still plays
+    (C 133–167: H=clip=gn=0, but train/army_attack_move + own buildings).
+    Fall back to rollout action_hist in that case.
     """
     if is_dead_policy(row):
         return False
@@ -198,6 +202,12 @@ def policy_still_alive(row: dict) -> bool:
     if h >= 0.5 and noop <= 0.55:
         return True
     if own_b >= 2.0 and h >= 0.35 and noop <= 0.65:
+        return True
+    productive = action_frac(row, (
+        "train", "build", "place_building", "army_attack_move",
+        "attack_move", "harvest", "harvesters_move",
+    ))
+    if own_b >= 2.0 and productive >= 0.20 and noop <= 0.40:
         return True
     return False
 
@@ -336,9 +346,15 @@ def maybe_update_best(ckpt_dir, metrics_row: dict,
     else:
         bt_c = str(metrics_row.get("bot_type") or "")
         bt_b = str(current.get("bot_type") or "")
-        # Beginner 4/4 (iwr=1, wr 0.88) froze easy: never a 4/4 vs easy.
+        # A 0-win easy row must not replace a winning beginner (onboard C).
+        # Still allow a real transfer: at least one win vs the new bot.
         if bt_c and bt_b and bt_c != bt_b:
-            better, reason = True, "new_bot_type"
+            wr_c = iter_winrate(metrics_row)
+            r20_c = float(metrics_row.get("winrate_rolling20") or 0.0)
+            if wr_c > 0.0 or r20_c > 0.0:
+                better, reason = True, "new_bot_type"
+            else:
+                better, reason = False, "harder_bot_no_wins"
         else:
             better, reason = is_strictly_better(metrics_row, current)
     if not better:

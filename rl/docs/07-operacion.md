@@ -47,9 +47,9 @@ Flags del **launcher** (no se reenvian a `rl.train`):
 | *(default)* | Resume `rl/ckpts/latest.pt` si existe; si no, seed/`iter*.pt`. |
 | `--scratch` | Pesos random; ignora latest/seed (`FORCE_SCRATCH=1`). |
 | `--onboard` | Curriculum A→B→C para un clone **sin** `.pt`. Primera vez: `--scratch --onboard`. B trae `--bc --bc-teacher-bot beginner`. Doc: `22-onboard.md`. |
-| `--onboard-rewind N` | En B: `latest` ← best/iterN, trunca metrics/race, pinnea BC start. Una vez. |
-| `--collapse` | *(default)* Watchdog politica muerta + sequia wr20 -> copia `best.pt` -> `latest.pt` + `--reset-opt`. |
-| `--no-collapse` | Apaga solo ese watchdog. Siguen cuelgue GPU/daemon y relanzos por crash. |
+| `--onboard-rewind N` | En B o C: `latest` y `best` ← iterN, trunca metrics/race. Desde C vuelve a B. `λ_bc` en el piso. Una vez. |
+| `--collapse` | *(default)* Watchdog politica muerta + sequia wr20 -> copia `best.pt` -> `latest.pt` + `--reset-opt`. En `--onboard`, A lo ignora (siempre off); B y C lo usan. |
+| `--no-collapse` | Apaga solo ese watchdog (B/C). Siguen cuelgue GPU/daemon y relanzos por crash. |
 
 Ejemplo onboarding (no uses el `TRAIN_ARGS` de PFSP/easy; el overlay de fase lo saca):
 
@@ -168,7 +168,7 @@ Ckpts viejos (cell `Conv 296->1`, SCALAR 21): cargan con missing keys; **scratch
 5. **Metrica norte:** `wr20` / era WR vs el ancla (`bot-type` / PFSP anchor). Componentes de reward = diagnostico.
 6. **Colapso:** con pesos maduros deja `--collapse`. En scratch temprano suele convenir `--no-collapse` (best@1 con iwr=1.0 pisa aprendizaje; ver Run 42 / doc 16).
 7. **BC:** `--bc-start-iter` nunca `0` (train lo trata como unset y en resume reinicia warmup). Usar `1` en scratch.
-8. **Onboard:** no mezclar con PFSP/hard. No `--scratch --onboard` a mitad de B/C. A no sale a las 20 iters: hace falta wr20 del *alumno*. Un 4/4 no promociona. Collapse off en A y B. Redo A desde SFT: `--onboard --onboard-rewind 20`. Detalle: `22-onboard.md`.
+8. **Onboard:** no mezclar con PFSP/hard. No `--scratch --onboard` a mitad de B/C. A no sale a las 20 iters: hace falta wr20 del *alumno*. Un 4/4 no promociona. Collapse **off en A**, on en B/C. Redo A desde SFT: `--onboard --onboard-rewind 20`. Undo C: `--onboard-rewind N` (vuelve a B). Detalle: `22-onboard.md`.
 
 ---
 
