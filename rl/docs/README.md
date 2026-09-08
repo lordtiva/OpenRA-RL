@@ -32,6 +32,7 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | **20** | `20-run46-burnin-topk.md` | **Run 46: burn-in 8 + XF top-k 16** | **2026-09-04** |
 | **21** | `21-run47-map-qsa.md` | **Run 47: map QSA block 8 top-8** | **2026-09-04** |
 | **22** | `22-onboard.md` | **De 0 a ~50% vs easy sin un `best.pt`: `--scratch --onboard` (SFT teacher → beginner → easy)** | **Onboarding — 2026-09-04** |
+| **23** | `23-ra-completo-todo.md` | **Gaps RA completo vs train land: naval/air macros, building slots, micro, mapas, obs/dash (P0-P4)** | **TODO vivo - 2026-09-08** |
 
 ## Cómo leer esto
 
@@ -40,6 +41,7 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 2. **Si vas a tocar reward:** `08-avance-run2.md` §3 + `09-fullstack-run3.md` §1-2 + `11-revision-quisquillosa.md` §4-5 + `12-plan-4-capas-siguiente-nivel.md` Capa 0 (riesgo garrison/annealing) + `06-filosofia-rl.md` §2-3 + `reward_shaping.py` como fuente.
 3. **Si vas a tocar arquitectura:** `diseno-advance-macro.md` + `parche-grande-2026-08.md` §3 (CoordConv/U-Net/broadcast GRU) + `13-capa0-status-post-run8.md` *Deuda de la cabeza de celda* y *Qué robar de Qwen3.8-Flash-Next* (Capa 2: pointer + QSA al mapa; no GDN/MoE el mismo PR). **Capa 2c (slots / rol / enemigos / attack-actor):** `14-capa2c-identidad-matchup.md` — tres PRs Net2Net, no 128/256, no 2b el mismo corte.
 4. **Si vas a lanzar un run:** `07-operacion.md` (3 comandos). Si es el primer train del clone: `22-onboard.md`.
+4c. **Si vas a ampliar RA completo (naval/air/buildings):** `23-ra-completo-todo.md`.
 4b. **Si vas a self-play / PFSP-RL:** `16-rl-vs-rl-run42.md` (dual bridge, Run 42).
 6. **Si pensás “¿un train por facción?”:** `15-facciones-mods-roles.md` (no: un ckpt `ra` Aliados cubre los 3 países; soviet=mismo ckpt; `cnc`/`d2k`=ckpt nuevo).
 5. **Si vas a tocar el action set** (`sell`/`rally`/`guard`/`APC`/`stance`): `13-capa0-status-post-run8.md` *Órdenes vs scripted* — Capa 0 = support, Capa 2 = pointer, nunca `surrender`. No meter tipos nuevos en `ENABLED_TYPES` el mismo corte que la red.

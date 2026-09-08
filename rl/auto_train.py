@@ -313,6 +313,27 @@ def restore_best_over_latest() -> bool:
     return True
 
 
+
+def write_last_collapse(kind: str, iters, last_it: int) -> None:
+    """Lightweight sidecar for dashboard Alertas (último collapse).
+
+    Written when COLAPSO / SEQUIA restore fires. Dashboard also parses
+    auto_train.log as a live fallback, so this is optional enrichment.
+    """
+    payload = {
+        "ts": time.strftime("%H:%M:%S"),
+        "ts_epoch": time.time(),
+        "iter": int(last_it),
+        "iters": [int(x) for x in (iters or [])],
+        "kind": str(kind),
+    }
+    path = CKPT_DIR / "last_collapse.json"
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False) + "\n", encoding="utf-8")
+    except OSError as e:
+        log(f"last_collapse.json FAIL: {e}")
+
+
 def metrics_mtime() -> float:
     try: return METRICS.stat().st_mtime
     except: return 0
@@ -999,6 +1020,7 @@ def main():
                     its = [r["iter"] for r in (tail if dead else rows_era[-DROUGHT_STREAK:])]
                     kind = f"COLAPSO {reasons}" if dead else "SEQUIA wr20"
                     log(f"{kind} — iters {its} — restaurando best.pt -> latest.pt + Adam fresco")
+                    write_last_collapse(kind, its, last_it)
                     kill_train(proc)
                     if restore_best_over_latest():
                         last_restore_iter = last_it

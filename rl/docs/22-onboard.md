@@ -1,4 +1,4 @@
-# 22 — Onboarding: de 0 a ~50% vs easy, sin un `best.pt`
+﻿# 22 — Onboarding: de 0 a ~50% vs easy, sin un `best.pt`
 
 
 
@@ -464,6 +464,8 @@ Si B no llega a 50% en ~200 iters, el teacher de A no dejó un build order usabl
 
 
 Detalle de operación diaria: `07-operacion.md`. Plan de capas (BC/SIL/self-play): `12-plan-4-capas-siguiente-nivel.md`.
+
+Gaps RA completo (naval/air/buildings/micro): `23-ra-completo-todo.md`.
 
 
 

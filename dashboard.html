@@ -165,9 +165,9 @@
     <h2>Mix de acciones</h2>
     <canvas id="cAct"></canvas>
     <div class="legend">
-      <span style="--c:var(--bad)">attack*</span>
-      <span style="--c:var(--good)">eco (build/place/harvest/train)</span>
-      <span style="--c:var(--muted)">no_op + other</span>
+      <span style="--c:var(--bad)">attack* (attack / attack_move / army / infantry / vehicle)</span>
+      <span style="--c:var(--good)">eco (build/place/harvest/train/harvesters_move)</span>
+      <span style="--c:var(--muted)">no_op</span>
     </div>
   </section>
 
@@ -195,7 +195,8 @@
   </section>
 </main>
 <footer>
-  Fuentes: <code id="srcMetrics">rl/ckpts_v2/metrics.jsonl</code> · <code id="srcPfsp">…/pfsp_stats.json</code> · <code id="srcBest">…/best.json</code>.
+  Fuentes: <code id="srcMetrics">rl/ckpts_v2/metrics.jsonl</code> · <code id="srcPfsp">…/pfsp_stats.json</code> · <code id="srcBest">…/best.json</code> · <code id="srcCollapse">…/last_collapse.json</code> · <code>rl/auto_train.log</code>.
+  Alertas: último collapse (no reloj). attack* incluye infantry/vehicle_attack_move; eco incluye harvesters_move; gris = solo no_op.
   Cambiá carpeta con <code>?dir=rl/ckpts</code> (v1.1) o <code>?dir=rl/ckpts_v2</code> (default). Backup: <code>dashboard.html.bak</code>.
 </footer>
 
@@ -205,6 +206,8 @@ const CKPT_DIR = (params.get("dir") || "rl/ckpts_v2").replace(/\\/g, "/").replac
 const METRICS = CKPT_DIR + "/metrics.jsonl";
 const PFSP = CKPT_DIR + "/pfsp_stats.json";
 const BEST = CKPT_DIR + "/best.json";
+const LAST_COLLAPSE = CKPT_DIR + "/last_collapse.json";
+const AUTO_LOG = "rl/auto_train.log";
 const POLL_MS = 2000;
 const pathHintEl = document.getElementById("pathHint");
 if (pathHintEl) pathHintEl.textContent = CKPT_DIR + "/";
@@ -214,6 +217,8 @@ const srcP = document.getElementById("srcPfsp");
 if (srcP) srcP.textContent = PFSP;
 const srcB = document.getElementById("srcBest");
 if (srcB) srcB.textContent = BEST;
+const srcC = document.getElementById("srcCollapse");
+if (srcC) srcC.textContent = LAST_COLLAPSE;
 
 const $ = (id) => document.getElementById(id);
 
@@ -255,18 +260,23 @@ function parseMetrics(text) {
 }
 
 function attackFrac(hist) {
+  // combat*: attack + *attack_move (army / infantry / vehicle)
   if (!hist) return 0;
   let n = 0, atk = 0;
+  const ATK = new Set([
+    "attack", "attack_move", "army_attack_move",
+    "infantry_attack_move", "vehicle_attack_move",
+  ]);
   for (const [k,v] of Object.entries(hist)) {
     const c = +v || 0; n += c;
-    if (k === "attack" || k === "attack_move" || k === "army_attack_move") atk += c;
+    if (ATK.has(k)) atk += c;
   }
   return n ? atk / n : 0;
 }
 function ecoFrac(hist) {
   if (!hist) return 0;
   let n = 0, eco = 0;
-  const E = new Set(["build","place_building","harvest","train","deploy"]);
+  const E = new Set(["build","place_building","harvest","train","deploy","harvesters_move"]);
   for (const [k,v] of Object.entries(hist)) {
     const c = +v || 0; n += c;
     if (E.has(k)) eco += c;
@@ -282,6 +292,44 @@ function noopFrac(hist) {
   }
   return n ? z / n : 0;
 }
+
+function parseCollapseFromLog(text) {
+  // auto_train.log: "[HH:MM:SS] COLAPSO|SEQUIA wr20 … iters [a, b]"
+  let best = null;
+  for (const line of String(text || "").split(/\n/)) {
+    const hm = line.match(/^\[(\d{2}:\d{2}:\d{2})\]\s+(COLAPSO|SEQUIA wr20)\b/);
+    if (!hm) continue;
+    const im = line.match(/iters\s*\[([^\]]*)\]/);
+    const iters = im
+      ? im[1].split(/,/).map(s => parseInt(s.trim(), 10)).filter(n => !Number.isNaN(n))
+      : [];
+    best = {
+      ts: hm[1],
+      kind: hm[2],
+      iter: iters.length ? iters[iters.length - 1] : null,
+      iters,
+      source: "auto_train.log",
+    };
+  }
+  return best;
+}
+function normalizeCollapse(j) {
+  if (!j || typeof j !== "object") return null;
+  const iters = Array.isArray(j.iters) ? j.iters.map(Number).filter(n => !Number.isNaN(n)) : [];
+  const it = j.iter != null ? Number(j.iter) : (iters.length ? iters[iters.length - 1] : null);
+  const ts = j.ts || j.time || null;
+  const kind = j.kind || j.reason || "collapse";
+  if (!ts && (it == null || Number.isNaN(it))) return null;
+  return { ts, kind, iter: Number.isNaN(it) ? null : it, iters, source: j.source || "last_collapse.json" };
+}
+function fmtLastCollapse(c) {
+  if (!c) return "último collapse: —";
+  const t = c.ts || "—";
+  const it = c.iter != null ? "iter " + c.iter : null;
+  const k = c.kind ? String(c.kind) : null;
+  return "último collapse: " + [t, it, k].filter(Boolean).join(" · ");
+}
+
 
 function fitCanvas(c) {
   const dpr = window.devicePixelRatio || 1;
@@ -411,10 +459,13 @@ function isBcOnly(r) {
   return !!(r && (r.bc_only || r.onboard_phase === "A"));
 }
 
-function buildAlerts(rows, pfsp) {
+function buildAlerts(rows, pfsp, collapse) {
   const a = [];
   const r = last(rows);
-  if (!r) { $("alerts").innerHTML = '<div class="empty">Sin métricas todavía</div>'; return; }
+  if (!r) {
+    $("alerts").innerHTML = '<div class="empty">Sin métricas todavía</div><div style="padding:8px 0;border-bottom:1px solid var(--border)">' + fmtLastCollapse(collapse) + '</div>';
+    return;
+  }
   const atk = attackFrac(r.action_hist);
   const ent = r.entropy;
   const r20 = r.winrate_rolling20;
@@ -458,13 +509,13 @@ function buildAlerts(rows, pfsp) {
     if (weak.length)
       a.push(["accent", "PFSP flojo vs: " + weak.join(", ")]);
   }
-  a.push(["", "Actualizado " + new Date().toLocaleTimeString() + " · " + rows.length + " iters"]);
+  a.push(["", fmtLastCollapse(collapse) + " · " + rows.length + " iters"]);
   $("alerts").innerHTML = a.map(([cls,msg]) =>
     `<div style="padding:8px 0;border-bottom:1px solid var(--border)" class="${cls||""}">${msg}</div>`
   ).join("");
 }
 
-function render(rows, pfsp, best) {
+function render(rows, pfsp, best, collapse) {
   const r = last(rows);
   $("updated").textContent = new Date().toLocaleTimeString();
   $("livePill").textContent = rows.length ? (rows.length + " iters") : "sin data";
@@ -592,20 +643,30 @@ function render(rows, pfsp, best) {
     { ys: rows.map(x => x.n_buildings && x.n_buildings.enemy), color: "#ff6b7a" },
   ]);
 
-  buildAlerts(rows, pfsp);
+  buildAlerts(rows, pfsp, collapse);
 }
 
 let failStreak = 0;
 async function tick() {
   try {
-    const [mt, pfsp, best] = await Promise.all([
+    const [mt, pfsp, best, collapseJson, logText] = await Promise.all([
       fetchText(METRICS).then(parseMetrics),
       fetchJson(PFSP).catch(() => null),
       fetchJson(BEST).catch(() => null),
+      fetchJson(LAST_COLLAPSE).catch(() => null),
+      fetchText(AUTO_LOG).catch(() => null),
     ]);
+    // Prefer structured last_collapse.json; fall back to auto_train.log (live without restart).
+    const fromFile = normalizeCollapse(collapseJson);
+    const fromLog = parseCollapseFromLog(logText);
+    let collapse = fromFile || fromLog;
+    if (fromFile && fromLog) {
+      if (fromLog.iter != null && (fromFile.iter == null || fromLog.iter >= fromFile.iter))
+        collapse = fromLog;
+    }
     failStreak = 0;
     $("livePill").className = "pill on";
-    render(mt, pfsp, best);
+    render(mt, pfsp, best, collapse);
   } catch (e) {
     failStreak++;
     $("livePill").className = "pill off";

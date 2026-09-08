@@ -1,4 +1,4 @@
-# Operacion — Comandos y reglas de run limpio
+﻿# Operacion — Comandos y reglas de run limpio
 
 > **Actualizado 2026-09-04.** Fuente de verdad de flags del train: `rl/auto_train.py` -> `TRAIN_ARGS`.
 > Este doc describe **como operar**; el detalle de cada run esta en `rl/docs/16-…` … `21-…`.
@@ -99,8 +99,10 @@ cd C:\Users\lordc\Desktop\OpenRA-RL
 # http://localhost:8501/dashboard.html
 ```
 
-* Lee `rl/ckpts/metrics.jsonl` (append-only mientras corre el train).
-* `auto_train` escribe en la **raiz** `rl/ckpts/` para que el dash vea el run vivo; al cerrar una era, archivar con `rl/archive_run.py`.
+* Lee `rl/ckpts_v2/metrics.jsonl` por default (`?dir=rl/ckpts` para v1.1). Append-only mientras corre el train.
+* `auto_train` escribe en la **raiz** del ckpt-dir para que el dash vea el run vivo; al cerrar una era, archivar con `rl/archive_run.py`.
+* **Mix de acciones:** `attack*` suma `attack` + `attack_move` + `army/infantry/vehicle_attack_move`. Eco incluye `harvesters_move`. La linea gris es **solo `no_op`**.
+* **Alertas / ultimo collapse:** muestra HH:MM:SS + iter desde `last_collapse.json` (escrito por `auto_train` al restaurar best) o, en vivo sin reiniciar, parseando `rl/auto_train.log` (COLAPSO / SEQUIA wr20).
 
 ### 5) Visor live (headless, canvas)
 
@@ -168,7 +170,7 @@ Ckpts viejos (cell `Conv 296->1`, SCALAR 21): cargan con missing keys; **scratch
 5. **Metrica norte:** `wr20` / era WR vs el ancla (`bot-type` / PFSP anchor). Componentes de reward = diagnostico.
 6. **Colapso:** con pesos maduros deja `--collapse`. En scratch temprano suele convenir `--no-collapse` (best@1 con iwr=1.0 pisa aprendizaje; ver Run 42 / doc 16).
 7. **BC:** `--bc-start-iter` nunca `0` (train lo trata como unset y en resume reinicia warmup). Usar `1` en scratch.
-8. **Onboard:** no mezclar con PFSP/hard. No `--scratch --onboard` a mitad de B/C. A no sale a las 20 iters: hace falta wr20 del *alumno*. Un 4/4 no promociona. Collapse **off en A**, on en B/C. Redo A desde SFT: `--onboard --onboard-rewind 20`. Undo C: `--onboard-rewind N` (vuelve a B). Detalle: `22-onboard.md`.
+8. **Onboard:** no mezclar con PFSP/hard. No `--scratch --onboard` a mitad de B/C. A no sale a las 20 iters: hace falta wr20 del *alumno*. Un 4/4 no promociona. Collapse **off en A**, on en B/C. Redo A desde SFT: `--onboard --onboard-rewind 20`. Undo C: `--onboard-rewind N` (vuelve a B). Detalle: `22-onboard.md`. Gaps RA completo: `23-ra-completo-todo.md`.
 
 ---
 
