@@ -90,15 +90,22 @@ def test_group_helpers():
         _U(actor_id=2, type="e3"),
         _U(actor_id=3, type="1tnk"),
         _U(actor_id=4, type="harv", can_attack=False),
+        _U(actor_id=5, type="dd"),
+        _U(actor_id=6, type="heli"),
     ]
     obs = _Obs(units=units)
     assert group_actor_ids(obs, "infantry") == [1, 2]
-    assert group_actor_ids(obs, "vehicle") == [3]
+    assert group_actor_ids(obs, "vehicle") == [3]  # land-only; dd/heli excluded
     assert group_actor_ids(obs, "harvesters") == [4]
+    assert group_actor_ids(obs, "naval") == [5]
+    assert group_actor_ids(obs, "air") == [6]
     assert "infantry_attack_move" in ENABLED_TYPES
     assert "infantry_attack_move" in MOVE_CELL_TYPES
     assert "infantry_attack_move" in TYPES_USE_CELL
-    assert TYPE_TO_IDX["harvesters_move"] == N_ACTION_TYPES - 1
+    assert TYPE_TO_IDX["air_attack_move"] == N_ACTION_TYPES - 1
+    assert TYPE_TO_IDX["naval_attack_move"] == N_ACTION_TYPES - 2
+    assert "naval_attack_move" in ENABLED_TYPES
+    assert "air_attack_move" in TYPES_USE_CELL
 
 
 def test_net_forward_smoke():

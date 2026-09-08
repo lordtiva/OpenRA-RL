@@ -8,7 +8,7 @@ Arquitectura:
     - Core: GRU (memoria de parcialmente-observable; hidden se guarda entre
       steps y se DESACOPLA del gradiente — sin BPTT, simplificación deliberada)
     - Cabezas AUTORREGRESIVAS con máscaras de acciones legales:
-        1) tipo de acción (25 tipos)
+        1) tipo de acción (27 tipos)
         2) slot de unidad (condicionada al tipo elegido)
         3) celda objetivo H×W (conv 1×1: fmap + scatter + tipo + GRU + unidad)
         4) ítem de producción (embedding de tipos de actor)
@@ -36,6 +36,8 @@ ACTION_TYPES = [
     "army_attack_move",
     # v2 multi-select macros (adapter emite N× ATTACK_MOVE / MOVE)
     "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
+    # P0 RA-completo: append-only naval/air (partial type-head load)
+    "naval_attack_move", "air_attack_move",
 ]
 N_ACTION_TYPES = len(ACTION_TYPES)
 TYPE_TO_IDX = {t: i for i, t in enumerate(ACTION_TYPES)}
@@ -71,14 +73,18 @@ TYPES_USE_UNIT = {"move", "attack_move", "attack", "stop", "set_stance",
                   "harvest", "deploy"}
 TYPES_USE_CELL = {"move", "attack_move", "attack", "place_building",
                   "army_attack_move", "infantry_attack_move",
-                  "vehicle_attack_move", "harvesters_move"}
+                  "vehicle_attack_move", "harvesters_move",
+                  "naval_attack_move", "air_attack_move",
+                  "harvest"}
 # Role-group macros: cell only (no unit head); adapter multi-commands.
 TYPES_GROUP_MACRO = {"army_attack_move", "infantry_attack_move",
-                     "vehicle_attack_move", "harvesters_move"}
+                     "vehicle_attack_move", "harvesters_move",
+                     "naval_attack_move", "air_attack_move"}
 # Student dual-emit (K=2 eco+push): second AR sample restricted to these.
 COMBAT_PUSH_TYPES = frozenset({
     "army_attack_move", "attack_move", "attack",
     "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
+    "naval_attack_move", "air_attack_move",
 })
 TYPES_USE_ITEM = {"train", "build", "place_building", "cancel_production"}
 
@@ -148,7 +154,7 @@ def build_type_masks(obs) -> torch.Tensor:
         for t in ("move", "attack_move", "attack", "stop", "guard",
                   "harvest", "set_stance", "army_attack_move",
                   "infantry_attack_move", "vehicle_attack_move",
-                  "harvesters_move"):
+                  "harvesters_move", "naval_attack_move", "air_attack_move"):
             m[TYPE_TO_IDX[t]] = True
         m[TYPE_TO_IDX["deploy"]] = any("mcv" in u.type.lower() for u in obs.units)
     if have_buildings:

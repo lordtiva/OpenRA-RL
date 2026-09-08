@@ -397,7 +397,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 # Destino de push vivo: last combat cmd (eco may be commands[0]).
                 _push_names = ("army_attack_move", "attack_move",
                                "infantry_attack_move", "vehicle_attack_move",
-                               "harvesters_move", "attack")
+                               "harvesters_move", "naval_attack_move",
+                               "air_attack_move", "attack")
                 for c in action.commands:
                     cname = getattr(getattr(c, "action", None), "value", None) or str(
                         getattr(c, "action", ""))

@@ -28,15 +28,11 @@ cerrar gaps de RA completo:
 
 | Cosa | Qué hace de verdad |
 |------|--------------------|
-| `harvesters_move` | **Todas** las harvs MOVE a la **misma** celda (macro de grupo). |
-| Una sola harv | Via **unit head** (`move` / `attack` / etc. sobre ese `actor_id`). |
-| Rewrite | `move` / `attack_move` / `attack` sobre una harv se reescriben a menudo a `harvest` (`action_adapter`). |
-| Fallback | `harvest` puede caer en `_any_harvester` si no hay actor útil en la cabeza. |
+| \harvesters_move\ | **Todas** las harvs MOVE a la **misma** celda (macro de grupo). |
+| Una sola harv + celda | Via **unit head**: \move\ / \ttack_move\ / \ttack\ sobre un harv emite **MOVE** a \(cx,cy)\ para **ese** \ctor_id\ (ya no se reescribe a \harvest\ sin celda). |
+| \harvest\ | Usa el harvester **seleccionado** si es válido; pasa \	arget_x/y\ (CommandModel/HARVEST lo acepta). Si la cabeza no apunta a un harv, fallback \_any_harvester\. |
 
-Opcional P0: harvest por harv con celda propia (hoy el macro de grupo no alcanza
-para “esta harv a este ore”).
-
----
+P0 (rama \exp/ra-completo-p0\): path singular harv→celda **existe** (unit head + \harvest\+cell). El macro de grupo sigue siendo all→same cell.
 
 ## TODO priorizado (P0 → P4)
 

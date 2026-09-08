@@ -32,6 +32,7 @@ ENABLED_TYPES = {
     "set_stance", "deploy", "train", "build", "place_building",
     "cancel_production", "army_attack_move",
     "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
+    "naval_attack_move", "air_attack_move",
 }
 
 UNIT_ACTION_TYPES = {"move", "attack_move", "attack", "stop", "set_stance",
@@ -114,16 +115,19 @@ ECONOMY_BUILD_ROLES = {"power", "refinery"}  # legal BUILD before proc exists
 MOVE_CELL_TYPES = {
     "move", "attack_move", "attack", "army_attack_move",
     "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
+    "naval_attack_move", "air_attack_move", "harvest",
 }
 # Combat movement: masked until a refinery stands. Otherwise PPO
 # reward-hacks army_attack_move / attack_move (the 201-309 collapse).
 COMBAT_MOVE_TYPES = (
     "army_attack_move", "attack_move", "attack",
     "infantry_attack_move", "vehicle_attack_move",
+    "naval_attack_move", "air_attack_move",
 )
 GROUP_MACRO_TYPES = (
     "army_attack_move", "infantry_attack_move",
     "vehicle_attack_move", "harvesters_move",
+    "naval_attack_move", "air_attack_move",
 )
 # Group push: legal once TOTAL combat >= PACK_ARMY (home OR field).
 # Run 43: home-only gate froze 200+ units mid-map (incomplete @53k) because
@@ -174,6 +178,11 @@ def n_combat_total(obs) -> int:
 
 _INFANTRY_TYPE_PREFIXES = ("e1", "e2", "e3", "e4", "e6", "dog", "spy", "med",
                            "shok", "thf", "chan", "delphi")
+# Exact internal names from rl.roles (RA air / navy). Keep vehicle land-only.
+_NAVAL_TYPES = frozenset({"ss", "msub", "dd", "ca", "pt", "lst"})
+_AIR_TYPES = frozenset({
+    "mig", "yak", "u2", "badr", "heli", "hind", "mh60", "tran",
+})
 
 
 def _utype(u) -> str:
@@ -185,10 +194,21 @@ def _is_infantry_unit(u) -> bool:
     return any(t == p or t.startswith(p) for p in _INFANTRY_TYPE_PREFIXES)
 
 
+def _is_naval_unit(u) -> bool:
+    return _utype(u) in _NAVAL_TYPES
+
+
+def _is_air_unit(u) -> bool:
+    return _utype(u) in _AIR_TYPES
+
+
 def _is_vehicle_combat(u) -> bool:
+    """Land combat vehicle only (excludes infantry / naval / air)."""
     if not _is_combat_unit(u):
         return False
-    return not _is_infantry_unit(u)
+    if _is_infantry_unit(u) or _is_naval_unit(u) or _is_air_unit(u):
+        return False
+    return True
 
 
 def _is_harvester_unit(u) -> bool:
@@ -203,6 +223,16 @@ def n_infantry_total(obs) -> int:
 def n_vehicle_combat_total(obs) -> int:
     return sum(1 for u in (getattr(obs, "units", None) or [])
                if _is_vehicle_combat(u))
+
+
+def n_naval_total(obs) -> int:
+    return sum(1 for u in (getattr(obs, "units", None) or [])
+               if _is_naval_unit(u))
+
+
+def n_air_total(obs) -> int:
+    return sum(1 for u in (getattr(obs, "units", None) or [])
+               if _is_air_unit(u))
 
 
 def n_harvester_total(obs) -> int:
@@ -225,6 +255,10 @@ def group_actor_ids(obs, group: str, limit: int = 64) -> list:
             ok = _is_infantry_unit(u)
         elif group == "vehicle":
             ok = _is_vehicle_combat(u)
+        elif group == "naval":
+            ok = _is_naval_unit(u)
+        elif group == "air":
+            ok = _is_air_unit(u)
         elif group == "harvesters":
             ok = _is_harvester_unit(u)
         else:
@@ -765,6 +799,11 @@ class ActionIndex:
             m[TYPE_TO_IDX["vehicle_attack_move"]] = False
         if n_harvester_total(obs) < 1:
             m[TYPE_TO_IDX["harvesters_move"]] = False
+        # P0: naval/air macros masked until at least one matching unit exists.
+        if n_naval_total(obs) < 1:
+            m[TYPE_TO_IDX["naval_attack_move"]] = False
+        if n_air_total(obs) < 1:
+            m[TYPE_TO_IDX["air_attack_move"]] = False
         self.type_mask = torch.from_numpy(m)
 
 
@@ -884,12 +923,16 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         t_name = "no_op"
     if t_name == "harvesters_move" and n_harvester_total(obs) < 1:
         t_name = "no_op"
+    if t_name == "naval_attack_move" and n_naval_total(obs) < 1:
+        t_name = "no_op"
+    if t_name == "air_attack_move" and n_air_total(obs) < 1:
+        t_name = "no_op"
 
-    # Recolectora no combate: move/attack_move/attack sobre harv es harvest.
-    # Dest credit + rally weap la mandaban al beacon (visor 921). El C#
-    # army_attack_move sí salta Harvester; el per-unit no.
+    # Per-harvester cell path (P0): move/attack_move/attack on a selected
+    # harvester stays MOVE to (cx,cy) for THAT actor_id — do not rewrite to
+    # harvest (which used to drop the cell and swap to _any_harvester).
     if t_name in ("move", "attack_move", "attack") and _is_harvester(obs, actor_id):
-        t_name = "harvest"
+        t_name = "move"
 
     if t_name == "train" and not owns_proc(obs):
         t_name = "no_op"
@@ -918,9 +961,13 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         # son roles. Sin role_of el slot queda el muestreado (auditoría 1.4).
         eff_item_slot = _item_slot_of(item_type, aidx)
     if t_name == "harvest":
-        h_id = _any_harvester(obs)
-        if h_id and h_id in aidx.unit_ids:
-            eff_unit_slot = aidx.unit_ids.index(h_id)
+        # Prefer unit-head selection when it is a harvester; else any harv.
+        if _is_harvester(obs, actor_id) and actor_id in aidx.unit_ids:
+            eff_unit_slot = aidx.unit_ids.index(actor_id)
+        else:
+            h_id = _any_harvester(obs)
+            if h_id and h_id in aidx.unit_ids:
+                eff_unit_slot = aidx.unit_ids.index(h_id)
     elif t_name == "deploy":
         m_id = _any_mcv(obs)
         if m_id and m_id in aidx.unit_ids:
@@ -939,12 +986,15 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         # propias y les emite AttackMove hacia la celda.
         cmd = CommandModel(action=t, target_x=cx, target_y=cy)
     elif t in (ActionType.INFANTRY_ATTACK_MOVE, ActionType.VEHICLE_ATTACK_MOVE,
-               ActionType.HARVESTERS_MOVE):
-        # v2: N per-unit cmds (engine has no typed group macros besides army).
+               ActionType.HARVESTERS_MOVE, ActionType.NAVAL_ATTACK_MOVE,
+               ActionType.AIR_ATTACK_MOVE):
+        # v2/P0: N per-unit cmds (engine has no typed group macros besides army).
         gkey = {
             ActionType.INFANTRY_ATTACK_MOVE: "infantry",
             ActionType.VEHICLE_ATTACK_MOVE: "vehicle",
             ActionType.HARVESTERS_MOVE: "harvesters",
+            ActionType.NAVAL_ATTACK_MOVE: "naval",
+            ActionType.AIR_ATTACK_MOVE: "air",
         }[t]
         ids = group_actor_ids(obs, gkey)
         atk = (ActionType.MOVE if t == ActionType.HARVESTERS_MOVE
@@ -968,7 +1018,11 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     elif t in (ActionType.STOP, ActionType.SET_STANCE):
         cmd = CommandModel(action=t, actor_id=actor_id)
     elif t == ActionType.HARVEST:
-        cmd = CommandModel(action=t, actor_id=_any_harvester(obs) or actor_id)
+        # Selected harvester + cell when possible (CommandModel/HARVEST accepts
+        # target_x/y; MCP harvest uses the same fields).
+        hid = actor_id if _is_harvester(obs, actor_id) else (
+            _any_harvester(obs) or actor_id)
+        cmd = CommandModel(action=t, actor_id=hid, target_x=cx, target_y=cy)
     elif t == ActionType.DEPLOY:
         cmd = CommandModel(action=t, actor_id=_any_mcv(obs) or actor_id)
     elif t == ActionType.TRAIN:
