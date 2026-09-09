@@ -35,6 +35,8 @@ ENABLED_TYPES = {
     "naval_attack_move", "air_attack_move",
     # P1 scaffold: building slot (masked until buildings exist)
     "sell", "repair", "set_rally_point", "power_down", "set_primary",
+    # P2 micro: guard (existing ActionType) + group stop/stance/guard macros
+    "guard", "army_stop", "army_set_stance", "army_guard",
 }
 
 # Types that pick a building actor via building_head -> building_ids.
@@ -43,7 +45,7 @@ BUILDING_SLOT_TYPES = {
 }
 
 UNIT_ACTION_TYPES = {"move", "attack_move", "attack", "stop", "set_stance",
-                     "harvest"}
+                     "harvest", "guard"}
 
 
 # Techo del vocabulario de tipos de actor (debe == n_item_types de
@@ -124,6 +126,7 @@ MOVE_CELL_TYPES = {
     "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
     "naval_attack_move", "air_attack_move", "harvest",
     "set_rally_point",
+    "guard", "army_guard", "army_set_stance",
 }
 # Combat movement: masked until a refinery stands. Otherwise PPO
 # reward-hacks army_attack_move / attack_move (the 201-309 collapse).
@@ -136,6 +139,7 @@ GROUP_MACRO_TYPES = (
     "army_attack_move", "infantry_attack_move",
     "vehicle_attack_move", "harvesters_move",
     "naval_attack_move", "air_attack_move",
+    "army_stop", "army_set_stance", "army_guard",
 )
 # Group push: legal once TOTAL combat >= PACK_ARMY (home OR field).
 # Run 43: home-only gate froze 200+ units mid-map (incomplete @53k) because
@@ -688,6 +692,136 @@ def _split_production(obs):
     return train_roles, build_roles, rol_a_concreto
 
 
+
+# P2 micro helpers -----------------------------------------------------------
+
+_STANCE_ATTACK_ANYTHING = 3  # proto SET_STANCE target_x
+
+
+def _any_visible_enemy(obs) -> bool:
+    return bool(getattr(obs, "visible_enemies", None) or []) or bool(
+        getattr(obs, "visible_enemy_buildings", None) or [])
+
+
+def _guard_candidate_entries(obs):
+    """Own actors worth escorting: harv/MCV first, then buildings, else units."""
+    out = []
+    for u in getattr(obs, "units", None) or []:
+        try:
+            aid = int(getattr(u, "actor_id", 0) or 0)
+            cx = int(getattr(u, "cell_x", 0) or 0)
+            cy = int(getattr(u, "cell_y", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if aid <= 0:
+            continue
+        ut = str(getattr(u, "type", "") or "").lower()
+        if "harv" in ut:
+            prio = 0
+        elif "mcv" in ut:
+            prio = 1
+        else:
+            prio = 3
+        out.append((prio, aid, cx, cy))
+    for b in getattr(obs, "buildings", None) or []:
+        try:
+            aid = int(getattr(b, "actor_id", 0) or 0)
+            cx = int(getattr(b, "cell_x", 0) or 0)
+            cy = int(getattr(b, "cell_y", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if aid <= 0:
+            continue
+        out.append((2, aid, cx, cy))
+    return out
+
+
+def has_guard_target(obs, exclude_id: int = 0) -> bool:
+    ex = int(exclude_id or 0)
+    for _p, aid, _x, _y in _guard_candidate_entries(obs):
+        if aid != ex:
+            return True
+    return False
+
+
+def can_issue_guard(obs) -> bool:
+    """True if some combat escort has a distinct own target (harv/MCV/bld/unit)."""
+    for aid in group_actor_ids(obs, "army"):
+        if has_guard_target(obs, exclude_id=aid):
+            return True
+    return False
+
+
+def resolve_guard_target(obs, cx: int, cy: int, exclude_id: int = 0):
+    """Nearest preferred escort target to cell (harv/MCV/building/own)."""
+    ex = int(exclude_id or 0)
+    best, best_key = None, None
+    for prio, aid, ax, ay in _guard_candidate_entries(obs):
+        if aid == ex:
+            continue
+        d = (ax - int(cx)) ** 2 + (ay - int(cy)) ** 2
+        key = (prio, d, aid)
+        if best_key is None or key < best_key:
+            best, best_key = aid, key
+    return best
+
+
+def _is_escort_unit(obs, actor_id) -> bool:
+    """Combat unit suitable to Guard-on-actor (not harv/mcv)."""
+    try:
+        aid = int(actor_id or 0)
+    except (TypeError, ValueError):
+        return False
+    if aid <= 0:
+        return False
+    for u in getattr(obs, "units", None) or []:
+        try:
+            if int(getattr(u, "actor_id", 0) or 0) != aid:
+                continue
+        except (TypeError, ValueError):
+            continue
+        if not _is_combat_unit(u):
+            return False
+        return bool(getattr(u, "can_attack", True))
+    return False
+
+
+def _stance_from_cell(cx: int, cy: int = 0) -> int:
+    """Map cell to stance bucket 0..3 (HoldFire..AttackAnything)."""
+    return int(cx) % 4
+
+
+def _focus_enemy_at_cell(obs, cx: int, cy: int):
+    """Focus-fire target: nearest visible enemy to cell, prefer wounded units.
+
+    Strengthens ATTACK vs pure attack_move-to-cell by always binding a
+    concrete target_actor_id when enemies are visible.
+    """
+    best, best_key = None, None
+    units = list(getattr(obs, "visible_enemies", None) or [])
+    blds = list(getattr(obs, "visible_enemy_buildings", None) or [])
+    for is_bld, pool in ((0, units), (1, blds)):
+        for e in pool:
+            try:
+                aid = int(getattr(e, "actor_id", 0) or 0)
+                ex = int(getattr(e, "cell_x", 0) or 0)
+                ey = int(getattr(e, "cell_y", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if aid <= 0:
+                continue
+            try:
+                hp = float(getattr(e, "hp_percent", 1.0) or 1.0)
+            except (TypeError, ValueError):
+                hp = 1.0
+            d = (ex - int(cx)) ** 2 + (ey - int(cy)) ** 2
+            # Prefer units over buildings; among equals, lower HP (focus fire).
+            key = (d, is_bld, hp, aid)
+            if best_key is None or key < best_key:
+                best, best_key = aid, key
+    return best
+
+
 class ActionIndex:
     """Todo lo que la red necesita para decidir sobre una observación."""
 
@@ -827,6 +961,17 @@ class ActionIndex:
         if len(self.building_ids) < 1:
             for name in BUILDING_SLOT_TYPES:
                 m[TYPE_TO_IDX[name]] = False
+        # P2 micro: guard needs escort + distinct target (prefer harv/MCV/building).
+        if not can_issue_guard(obs):
+            m[TYPE_TO_IDX["guard"]] = False
+            m[TYPE_TO_IDX["army_guard"]] = False
+        # Group stop/stance: at least one combat unit.
+        if n_combat_total(obs) < 1:
+            m[TYPE_TO_IDX["army_stop"]] = False
+            m[TYPE_TO_IDX["army_set_stance"]] = False
+        # Focus fire: ATTACK only when a visible enemy actor exists.
+        if not _any_visible_enemy(obs):
+            m[TYPE_TO_IDX["attack"]] = False
         self.type_mask = torch.from_numpy(m)
 
 
@@ -933,7 +1078,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     # AQUÍ, antes de computar los índices efectivos — así el tipo efectivo
     # refleja la acción realmente ejecutada (antes quedaba "attack" y el
     # buffer atribuía el crédito al tipo equivocado).
-    if t_name == "attack" and _nearest_enemy_at_cell(obs, cx, cy) is None:
+    # P2: use focus resolver (same visibility set; prefers wounded).
+    if t_name == "attack" and _focus_enemy_at_cell(obs, cx, cy) is None:
         t_name = "attack_move"
 
     if t_name in COMBAT_MOVE_TYPES and not owns_proc(obs):
@@ -951,6 +1097,12 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     if t_name == "air_attack_move" and n_air_total(obs) < 1:
         t_name = "no_op"
     if t_name in BUILDING_SLOT_TYPES and not aidx.building_ids:
+        t_name = "no_op"
+    # P2 micro gates
+    if t_name in ("guard", "army_guard"):
+        if not can_issue_guard(obs):
+            t_name = "no_op"
+    if t_name in ("army_stop", "army_set_stance") and n_combat_total(obs) < 1:
         t_name = "no_op"
 
     # Per-harvester cell path (P0): move/attack_move/attack on a selected
@@ -1040,9 +1192,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         ]
         cmd = group_cmds[0] if group_cmds else CommandModel(action=ActionType.NO_OP)
     elif t == ActionType.ATTACK:
-        # Con la degradación temprana F1, acá solo se llega CON enemigo
-        # resolvible; el if queda como defensa en profundidad.
-        target = _nearest_enemy_at_cell(obs, cx, cy)
+        # P2 focus fire: bind concrete enemy actor (wounded/nearest to cell).
+        target = _focus_enemy_at_cell(obs, cx, cy)
         if target is None:
             cmd = CommandModel(action=ActionType.ATTACK_MOVE,
                                actor_id=actor_id, target_x=cx, target_y=cy)
@@ -1050,8 +1201,57 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
             cmd = CommandModel(action=t, actor_id=actor_id,
                                target_actor_id=target,
                                target_x=cx, target_y=cy)
-    elif t in (ActionType.STOP, ActionType.SET_STANCE):
+    elif t == ActionType.GUARD:
+        # Escort unit (unit head) guards preferred own harv/MCV/building.
+        if not _is_escort_unit(obs, actor_id):
+            escort = next((uid for uid in aidx.unit_ids
+                           if _is_escort_unit(obs, uid)), None)
+            if escort is None:
+                actor_id = 0
+            else:
+                actor_id = int(escort)
+                eff_unit_slot = aidx.unit_ids.index(actor_id)
+        tgt = (resolve_guard_target(obs, cx, cy, exclude_id=actor_id)
+               if actor_id > 0 else None)
+        if actor_id <= 0 or tgt is None:
+            cmd = CommandModel(action=ActionType.NO_OP)
+        else:
+            cmd = CommandModel(action=ActionType.GUARD, actor_id=actor_id,
+                               target_actor_id=int(tgt))
+    elif t == ActionType.ARMY_GUARD:
+        tgt = resolve_guard_target(obs, cx, cy)
+        ids = group_actor_ids(obs, "army")
+        if tgt is None or not ids:
+            cmd = CommandModel(action=ActionType.NO_OP)
+        else:
+            group_cmds = [
+                CommandModel(action=ActionType.GUARD, actor_id=aid,
+                             target_actor_id=int(tgt))
+                for aid in ids if aid != int(tgt)
+            ]
+            cmd = group_cmds[0] if group_cmds else CommandModel(
+                action=ActionType.NO_OP)
+    elif t == ActionType.ARMY_STOP:
+        ids = group_actor_ids(obs, "army")
+        group_cmds = [
+            CommandModel(action=ActionType.STOP, actor_id=aid) for aid in ids
+        ]
+        cmd = group_cmds[0] if group_cmds else CommandModel(action=ActionType.NO_OP)
+    elif t == ActionType.ARMY_SET_STANCE:
+        ids = group_actor_ids(obs, "army")
+        stance = _stance_from_cell(cx, cy)
+        group_cmds = [
+            CommandModel(action=ActionType.SET_STANCE, actor_id=aid,
+                         target_x=stance)
+            for aid in ids
+        ]
+        cmd = group_cmds[0] if group_cmds else CommandModel(action=ActionType.NO_OP)
+    elif t == ActionType.STOP:
         cmd = CommandModel(action=t, actor_id=actor_id)
+    elif t == ActionType.SET_STANCE:
+        # Proto: target_x encodes stance; default AttackAnything (land-safe).
+        stance = _stance_from_cell(cx, cy) if (cx or cy) else _STANCE_ATTACK_ANYTHING
+        cmd = CommandModel(action=t, actor_id=actor_id, target_x=stance)
     elif t == ActionType.HARVEST:
         # Selected harvester + cell when possible (CommandModel/HARVEST accepts
         # target_x/y; MCP harvest uses the same fields).
@@ -1097,14 +1297,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
 
 
 def _nearest_enemy_at_cell(obs, cx: int, cy: int):
-    """ID del enemigo visible más cercano a la celda (para attack)."""
-    best, best_d = None, float("inf")
-    candidates = list(obs.visible_enemies) + list(obs.visible_enemy_buildings)
-    for e in candidates:
-        d = (e.cell_x - cx) ** 2 + (e.cell_y - cy) ** 2
-        if d < best_d:
-            best, best_d = e.actor_id, d
-    return best
+    """ID del enemigo visible más cercano a la celda (legacy; prefer focus)."""
+    return _focus_enemy_at_cell(obs, cx, cy)
 
 
 def _pending_building_type(obs):

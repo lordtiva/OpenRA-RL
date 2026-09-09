@@ -41,6 +41,8 @@ ACTION_TYPES = [
     "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
     # P0 RA-completo: append-only naval/air (partial type-head load)
     "naval_attack_move", "air_attack_move",
+    # P2 micro: append-only group stop/stance/guard (partial type-head load)
+    "army_stop", "army_set_stance", "army_guard",
 ]
 N_ACTION_TYPES = len(ACTION_TYPES)
 TYPE_TO_IDX = {t: i for i, t in enumerate(ACTION_TYPES)}
@@ -73,16 +75,19 @@ CELL_HEAD_OLD_IN = SPATIAL_CH + 64 + 64  # fmap + tipo + hidden (pre Capa 2)
 # Qué cabeza usa cada tipo de acción (FUENTE ÚNICA para log_prob condicional;
 # action_adapter debe ser coherente con estos conjuntos). Auditoría 2026-08-24.
 TYPES_USE_UNIT = {"move", "attack_move", "attack", "stop", "set_stance",
-                  "harvest", "deploy"}
+                  "harvest", "deploy", "guard"}
 TYPES_USE_CELL = {"move", "attack_move", "attack", "place_building",
                   "army_attack_move", "infantry_attack_move",
                   "vehicle_attack_move", "harvesters_move",
                   "naval_attack_move", "air_attack_move",
-                  "harvest", "set_rally_point"}
+                  "harvest", "set_rally_point",
+                  # P2: cell picks guard escort target / stance bucket
+                  "guard", "army_set_stance", "army_guard"}
 # Role-group macros: cell only (no unit head); adapter multi-commands.
 TYPES_GROUP_MACRO = {"army_attack_move", "infantry_attack_move",
                      "vehicle_attack_move", "harvesters_move",
-                     "naval_attack_move", "air_attack_move"}
+                     "naval_attack_move", "air_attack_move",
+                     "army_stop", "army_set_stance", "army_guard"}
 # Student dual-emit (K=2 eco+push): second AR sample restricted to these.
 COMBAT_PUSH_TYPES = frozenset({
     "army_attack_move", "attack_move", "attack",
@@ -243,7 +248,8 @@ def build_type_masks(obs) -> torch.Tensor:
         for t in ("move", "attack_move", "attack", "stop", "guard",
                   "harvest", "set_stance", "army_attack_move",
                   "infantry_attack_move", "vehicle_attack_move",
-                  "harvesters_move", "naval_attack_move", "air_attack_move"):
+                  "harvesters_move", "naval_attack_move", "air_attack_move",
+                  "army_stop", "army_set_stance", "army_guard"):
             m[TYPE_TO_IDX[t]] = True
         m[TYPE_TO_IDX["deploy"]] = any("mcv" in u.type.lower() for u in obs.units)
     if have_buildings:

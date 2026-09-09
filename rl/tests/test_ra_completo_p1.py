@@ -133,8 +133,10 @@ def test_building_types_enabled_append_only():
         assert name not in TYPES_USE_UNIT  # dedicated building head
         assert name in ACTION_TYPES
     assert "set_rally_point" in TYPES_USE_CELL
-    assert ACTION_TYPES[-2:] == ["naval_attack_move", "air_attack_move"]
-    assert N_ACTION_TYPES == TYPE_TO_IDX["air_attack_move"] + 1
+    assert "naval_attack_move" in ACTION_TYPES and "air_attack_move" in ACTION_TYPES
+    assert ACTION_TYPES.index("air_attack_move") == ACTION_TYPES.index("naval_attack_move") + 1
+    # P2 appends after air; P0 pair stay contiguous.
+    assert N_ACTION_TYPES == TYPE_TO_IDX["army_guard"] + 1
 
 
 def test_building_tokens_shape_and_flags():
@@ -421,10 +423,10 @@ def test_command_to_indices_building_actor():
     assert c2 == 4 * aidx.w + 3
 
 
-def test_guard_still_disabled_in_enabled_types():
-    """Guard is documented as P2 ? must NOT sneak into ENABLED_TYPES here."""
+def test_guard_enabled_in_p2():
+    """P2 enables guard; still present in ACTION_TYPES (not a new append)."""
     assert "guard" in ACTION_TYPES
-    assert "guard" not in ENABLED_TYPES
+    assert "guard" in ENABLED_TYPES
 
 
 if __name__ == "__main__":
@@ -443,5 +445,5 @@ if __name__ == "__main__":
     test_evaluate_actions_uses_building_head()
     test_old_ckpt_soft_adds_building_head()
     test_command_to_indices_building_actor()
-    test_guard_still_disabled_in_enabled_types()
+    test_guard_enabled_in_p2()
     print("OK ra-completo-p1 dedicated building_head tests")

@@ -47,6 +47,10 @@ class ActionType(str, Enum):
     HARVESTERS_MOVE = "harvesters_move"
     NAVAL_ATTACK_MOVE = "naval_attack_move"
     AIR_ATTACK_MOVE = "air_attack_move"
+    # P2 micro: group macros (adapter expands to N engine STOP/SET_STANCE/GUARD)
+    ARMY_STOP = "army_stop"
+    ARMY_SET_STANCE = "army_set_stance"
+    ARMY_GUARD = "army_guard"
 
 
 class CommandModel(Action):

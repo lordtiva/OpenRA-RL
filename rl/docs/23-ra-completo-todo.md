@@ -3,7 +3,7 @@
 > **Para quién:** cuando quieras ampliar el action set / mapas más allá del land-only
 > de Phase A/B (naval, air, buildings UI, micro).
 >
-> **Fecha:** 2026-09-08 (P0 cerrado 2026-09-09; P1 building_head DONE 2026-09-09 en `exp/ra-completo-p0`).
+> **Fecha:** 2026-09-08 (P0 cerrado 2026-09-09; P1 building_head DONE 2026-09-09; P2 micro DONE 2026-09-09 en `exp/ra-completo-p0`).
 >
 > **Relacionado:** onboarding land `22-onboard.md`; operación diaria `07-operacion.md`;
 > índice `README.md`.
@@ -55,14 +55,16 @@ P0 (rama `exp/ra-completo-p0`): path singular harv→celda **existe** (unit head
 - [ ] Caveat: kind-masks son heur?sticas suaves (no engine-perfect); SFT corto sobre sell/repair/rally recomendable antes de confiar en prod.
 - [ ] Caveat: `set_rally_point` condiciona celda con pool de unidades (no embedding de edificio) ? suficiente para P1.
 
-**Estado:** DONE en `exp/ra-completo-p0`. Tests: `test_ra_completo_p1` (+ load-compat smoke). Land macros intactos. Guard sigue en P2.
+**Estado:** DONE en `exp/ra-completo-p0`. Tests: `test_ra_completo_p1` (+ load-compat smoke). Land macros intactos. Guard → P2 (DONE).
 
 
-### P2 — Micro: group stance / stop, focus fire (+ guard)
+### P2 — Micro: group stance / stop, focus fire (+ guard) — DONE
 
-- [ ] Stance / stop a nivel **grupo** (no solo unidad suelta).
-- [ ] Focus fire (elegir target actor con intención de foco, no solo attack-move a celda).
-- [ ] Habilitar RL **`guard`** (OpenRA Guard-on-actor = escoltar harvesters/MCV). Ya está en ActionType / proto / MCP / `guard_target`; falta en `ENABLED_TYPES` + `index_to_command`. Escolta clásica C&C; limitaciones del engine (rango). (P0.5/P2 micro.)
+- [x] Stance / stop a nivel **grupo**: macros append-only `army_stop` / `army_set_stance` (N× STOP / SET_STANCE sobre combat via `group_actor_ids`). `set_stance` single ahora emite `target_x` (stance; default AttackAnything).
+- [x] Focus fire: `attack` enmascara sin enemigos visibles; resolución `_focus_enemy_at_cell` elige `target_actor_id` (prefer wounded / nearest to cell) en vez de solo attack-move a celda.
+- [x] Habilitar RL **`guard`** en `ENABLED_TYPES` + `index_to_command` (`actor_id` escort + `target_actor_id` harv/MCV/building). Máscara: hace falta combat + target válido. Forma grupo opcional: `army_guard` (N combat guard same target).
+
+**Estado:** DONE en `exp/ra-completo-p0`. Tests: `test_ra_completo_p2` (+ p0/p1/alphalite smoke). Type-head crece +3 (`army_stop`/`army_set_stance`/`army_guard`) → partial load. Caveat: engine Guard rango limitado; SFT corto recomendable sobre guard/focus antes de prod.
 
 ### P3 — Producción RA completa + mapas agua/aire + spawn variety
 
