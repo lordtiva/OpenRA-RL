@@ -29,6 +29,7 @@ from rl.imitation import (
 from rl.network import ACTION_TYPES, COMBAT_PUSH_TYPES, HIDDEN_DIM
 from rl.obs_encoding import (
     decode_spatial, scalar_features, unit_tokens, EnemyBeliefStore,
+    building_tokens, MAX_BUILDINGS,
 )
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
@@ -38,7 +39,7 @@ from rl.auto_support import apply_dest_credit, support_commands
 
 
 def _pad_building_valid(building_valid, width: int) -> torch.Tensor:
-    """Pad/truncate ActionIndex.building_valid (MAX_UNITS) to unit mask width."""
+    """Pad/truncate ActionIndex.building_valid to building-head width."""
     bv = building_valid if torch.is_tensor(building_valid) else torch.as_tensor(
         building_valid, dtype=torch.bool)
     bv = bv.bool().reshape(-1)
@@ -62,6 +63,7 @@ def _batch_of(obs, vocab, device, belief: EnemyBeliefStore | None = None):
         spatial = np.zeros((9, h, w), dtype=np.float32)
 
     units_feats, role_ids, unit_valid, own_mask = unit_tokens(obs, belief=belief)
+    b_feats, _b_valid = building_tokens(obs)
 
     aidx = ActionIndex(obs, vocab)
     # Channel 3 is passability (0/1). Mask illegal cells in the cell head so
@@ -81,9 +83,10 @@ def _batch_of(obs, vocab, device, belief: EnemyBeliefStore | None = None):
         "item_mask": aidx.item_mask.unsqueeze(0).to(device),
         "train_slot_mask": aidx.train_slot_mask.unsqueeze(0).to(device),
         "build_slot_mask": aidx.build_slot_mask.unsqueeze(0).to(device),
-        # P1: pad to unit_valid width (MAX_TOKENS); act masks via building_valid
+        # P1 dedicated building head: feats + valid at MAX_BUILDINGS
+        "building_feats": torch.from_numpy(b_feats).unsqueeze(0).to(device),
         "building_valid": _pad_building_valid(
-            aidx.building_valid, unit_valid.shape[-1]).unsqueeze(0).to(device),
+            aidx.building_valid, MAX_BUILDINGS).unsqueeze(0).to(device),
     }, aidx
 
 

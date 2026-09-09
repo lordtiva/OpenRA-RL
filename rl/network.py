@@ -25,7 +25,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rl.obs_encoding import MAX_TOKENS, MAX_UNITS, SCALAR_DIM, UNIT_FEAT_DIM, ready_place_items
+from rl.obs_encoding import (
+    MAX_TOKENS, MAX_UNITS, MAX_BUILDINGS, SCALAR_DIM, UNIT_FEAT_DIM,
+    BUILDING_FEAT_DIM, ready_place_items,
+)
 from rl.roles import N_ROLES
 
 ACTION_TYPES = [
@@ -70,10 +73,7 @@ CELL_HEAD_OLD_IN = SPATIAL_CH + 64 + 64  # fmap + tipo + hidden (pre Capa 2)
 # Qué cabeza usa cada tipo de acción (FUENTE ÚNICA para log_prob condicional;
 # action_adapter debe ser coherente con estos conjuntos). Auditoría 2026-08-24.
 TYPES_USE_UNIT = {"move", "attack_move", "attack", "stop", "set_stance",
-                  "harvest", "deploy",
-                  # P1 scaffold: unit_slot indexes ActionIndex.building_ids
-                  "sell", "repair", "power_down", "set_primary",
-                  "set_rally_point"}
+                  "harvest", "deploy"}
 TYPES_USE_CELL = {"move", "attack_move", "attack", "place_building",
                   "army_attack_move", "infantry_attack_move",
                   "vehicle_attack_move", "harvesters_move",
@@ -90,7 +90,7 @@ COMBAT_PUSH_TYPES = frozenset({
     "naval_attack_move", "air_attack_move",
 })
 TYPES_USE_ITEM = {"train", "build", "place_building", "cancel_production"}
-# P1: building-slot actions (adapter remaps unit_slot -> building_ids).
+# P1: dedicated building_head; adapter remaps unit_slot -> building_ids.
 TYPES_USE_BUILDING = {"sell", "repair", "power_down", "set_primary",
                       "set_rally_point"}
 
@@ -143,30 +143,86 @@ def _heads_used(t_idx: torch.Tensor, device=None) -> tuple:
             _USE_I.to(dev, non_blocking=True)[t])
 
 
-def _slot_legal_for_types(t_idx, own, building_valid):
-    """Unit-head legality: building_valid for TYPES_USE_BUILDING, else own.
-
-    P1: sell/repair/rally/power_down/set_primary index ActionIndex.building_ids
-    via the shared unit_slot head — mask with building_valid so sampling does
-    not collapse onto unit-own slots when #buildings != #units.
-    Missing building_valid (old traj / tests) falls back to own.
-    """
+def _align_building_valid(building_valid, batch_size, device):
+    """Pad/truncate building_valid to [B, MAX_BUILDINGS]."""
     if building_valid is None:
-        return own
+        return torch.zeros(batch_size, MAX_BUILDINGS, dtype=torch.bool,
+                           device=device)
+    bv = building_valid.bool().to(device=device, non_blocking=True)
+    if bv.dim() == 1:
+        bv = bv.unsqueeze(0)
+    if bv.size(0) == 1 and batch_size > 1:
+        bv = bv.expand(batch_size, -1)
+    if bv.size(-1) < MAX_BUILDINGS:
+        pad = bv.new_zeros(bv.size(0), MAX_BUILDINGS - bv.size(-1))
+        bv = torch.cat([bv, pad], dim=-1)
+    elif bv.size(-1) > MAX_BUILDINGS:
+        bv = bv[..., :MAX_BUILDINGS]
+    return bv
+
+
+def _building_kind_legal(t_idx, building_valid, building_feats):
+    """Soft kind masks from building_feats (never empties a row).
+
+    sell ? prefer sellable (feat7); rally/primary ? can_produce (feat5);
+    power_down ? |power| (feat6); repair ? any valid.
+    If a kind filter would zero a row, keep full building_valid.
+    """
+    bv = building_valid.bool()
+    if building_feats is None:
+        return bv
+    feats = building_feats
+    if not torch.is_tensor(feats):
+        return bv
+    if feats.dim() == 2:
+        feats = feats.unsqueeze(0)
+    if feats.size(0) == 1 and bv.size(0) > 1:
+        feats = feats.expand(bv.size(0), -1, -1)
+    if feats.size(-1) < 8:
+        return bv
+    Nb = bv.size(-1)
+    if feats.size(-2) < Nb:
+        pad = feats.new_zeros(feats.size(0), Nb - feats.size(-2), feats.size(-1))
+        feats = torch.cat([feats, pad], dim=-2)
+    elif feats.size(-2) > Nb:
+        feats = feats[..., :Nb, :]
     t = t_idx.long().reshape(-1)
-    use_b = _USE_B.to(device=t.device, non_blocking=True)[t]
-    bv = building_valid.bool().to(device=own.device, non_blocking=True)
-    own_b = own.bool()
-    if bv.shape != own_b.shape:
-        B, U = own_b.shape
-        if bv.dim() == 1:
-            bv = bv.unsqueeze(0).expand(B, -1)
-        if bv.size(-1) < U:
-            pad = bv.new_zeros(B, U - bv.size(-1))
-            bv = torch.cat([bv, pad], dim=-1)
-        elif bv.size(-1) > U:
-            bv = bv[..., :U]
-    return torch.where(use_b.unsqueeze(-1), bv, own_b)
+    sellable = feats[..., 7] > 0.5
+    can_prod = feats[..., 5] > 0.5
+    has_power = feats[..., 6].abs() > 1e-3
+    preferred = bv.clone()
+    for i in range(t.shape[0]):
+        ti = int(t[i].item())
+        name = ACTION_TYPES[ti] if 0 <= ti < len(ACTION_TYPES) else ""
+        row = bv[i]
+        if name == "sell":
+            cand = row & sellable[i]
+        elif name in ("set_rally_point", "set_primary"):
+            cand = row & can_prod[i]
+        elif name == "power_down":
+            cand = row & has_power[i]
+        else:
+            cand = row
+        if bool(cand.any().item()):
+            preferred[i] = cand
+    return preferred
+
+
+def _slot_legal_for_types(t_idx, own, building_valid):
+    """Legacy: unit-own legality (building types use building_head now).
+
+    Kept for older tests/call sites that still pass building_valid.
+    """
+    return own.bool() if torch.is_tensor(own) else own
+
+
+def _building_slot_legal(t_idx, building_valid, building_feats=None):
+    """Legality mask [B, MAX_BUILDINGS] for the dedicated building head."""
+    device = t_idx.device
+    B = int(t_idx.reshape(-1).shape[0])
+    bv = _align_building_valid(building_valid, B, device)
+    return _building_kind_legal(t_idx, bv, building_feats)
+
 
 
 def build_type_masks(obs) -> torch.Tensor:
@@ -298,6 +354,15 @@ class AlphaLiteNet(nn.Module):
         self.unit_scorer = nn.Sequential(
             nn.Linear(UNIT_MLP_IN + HIDDEN_DIM + 64, 256), nn.ReLU(),
             nn.Linear(256, 1),
+        )
+        # P1 dedicated building head (soft-added on old land ckpts).
+        self.building_mlp = nn.Sequential(
+            nn.Linear(BUILDING_FEAT_DIM, 64), nn.ReLU(),
+            nn.Linear(64, 64), nn.ReLU(),
+        )
+        self.building_scorer = nn.Sequential(
+            nn.Linear(64 + HIDDEN_DIM + 64, 128), nn.ReLU(),
+            nn.Linear(128, 1),
         )
         # Capa 2: fmap + scatter + tipo + GRU + unidad elegida (o pool).
         self.scatter_proj = nn.Linear(UNIT_MLP_IN, SCATTER_CH)
@@ -544,6 +609,50 @@ class AlphaLiteNet(nn.Module):
             hidden, chosen_type, unit_feats, unit_legal, role_ids)
         return self._categorical(logits)
 
+    def _scores_building(self, hidden, chosen_type, building_feats,
+                         building_legal):
+        """Logits [B, MAX_BUILDINGS] for the dedicated building head."""
+        B = hidden.size(0)
+        if building_feats is None:
+            return hidden.new_full((B, MAX_BUILDINGS), -1e9)
+        feats = building_feats
+        if feats.dim() == 2:
+            feats = feats.unsqueeze(0)
+        if feats.size(0) == 1 and B > 1:
+            feats = feats.expand(B, -1, -1)
+        if feats.size(-1) != BUILDING_FEAT_DIM:
+            Nb, F = feats.size(-2), feats.size(-1)
+            if F < BUILDING_FEAT_DIM:
+                pad = feats.new_zeros(feats.size(0), Nb, BUILDING_FEAT_DIM - F)
+                feats = torch.cat([feats, pad], dim=-1)
+            else:
+                feats = feats[..., :BUILDING_FEAT_DIM]
+        if feats.size(-2) != MAX_BUILDINGS:
+            Nb, F = feats.size(-2), feats.size(-1)
+            if Nb < MAX_BUILDINGS:
+                pad = feats.new_zeros(feats.size(0), MAX_BUILDINGS - Nb, F)
+                feats = torch.cat([feats, pad], dim=-2)
+            else:
+                feats = feats[..., :MAX_BUILDINGS, :]
+        Nb = feats.size(-2)
+        emb = self.building_mlp(feats)
+        h = hidden.unsqueeze(1).expand(-1, Nb, -1)
+        t = self.type_embedding(chosen_type).unsqueeze(1).expand(-1, Nb, -1)
+        scores = self.building_scorer(
+            torch.cat([emb, h, t], dim=-1)).squeeze(-1)
+        legal = building_legal
+        if legal is None:
+            legal = torch.ones(B, Nb, dtype=torch.bool, device=scores.device)
+        else:
+            legal = _align_building_valid(legal, B, scores.device)
+        return _mask_illegal(scores, ~legal)
+
+    def dist_building(self, hidden, chosen_type, building_feats, building_legal):
+        logits = self._scores_building(
+            hidden, chosen_type, building_feats, building_legal)
+        return self._categorical(logits)
+
+
     def _unit_cond_map(self, tokens, unit_valid, unit_slot, chosen_type, hw,
                        unit_own_mask=None):
         """Broadcast del slot elegido, o del pool propio si el tipo no usa unidad."""
@@ -710,12 +819,21 @@ class AlphaLiteNet(nn.Module):
         t_idx = lt.argmax(dim=-1) if greedy else \
             self._categorical(lt / temperature).sample()
 
-        slot_legal = _slot_legal_for_types(
-            t_idx, own, batch.get("building_valid"))
-        ls_u = self._scores_unit(new_hidden, t_idx, feats, slot_legal, role_ids)
+        # Unit head (own slots) + dedicated building head; merge by type.
+        ls_u = self._scores_unit(new_hidden, t_idx, feats, own, role_ids)
         dist_u = self._categorical(ls_u)
-        u_idx = ls_u.argmax(dim=-1) if greedy else \
+        u_from_u = ls_u.argmax(dim=-1) if greedy else \
             self._categorical(ls_u / temperature).sample()
+        b_feats = batch.get("building_feats")
+        b_legal = _building_slot_legal(
+            t_idx, batch.get("building_valid"), b_feats)
+        ls_b = self._scores_building(new_hidden, t_idx, b_feats, b_legal)
+        dist_b = self._categorical(ls_b)
+        u_from_b = ls_b.argmax(dim=-1) if greedy else \
+            self._categorical(ls_b / temperature).sample()
+        use_b = _USE_B.to(device=t_idx.device, non_blocking=True)[t_idx.long().reshape(-1)]
+        u_idx = torch.where(use_b, u_from_b, u_from_u)
+
 
         lc = self._logits_cell(
             fmap, t_idx, batch["cell_mask"], new_hidden,
@@ -742,8 +860,11 @@ class AlphaLiteNet(nn.Module):
         # celda dominando con ruido puro en no_op/train/build).
         use_u, use_c, use_i = _heads_used(t_idx, t_idx.device)
         zero = torch.zeros_like(dist_t.log_prob(t_idx))
+        # building slot stored in unit_slot; clamp for building dist width
+        u_for_b = u_idx.clamp(min=0, max=MAX_BUILDINGS - 1)
         lp = (dist_t.log_prob(t_idx)
               + torch.where(use_u, dist_u.log_prob(u_idx), zero)
+              + torch.where(use_b, dist_b.log_prob(u_for_b), zero)
               + torch.where(use_c, dist_c.log_prob(c_idx), zero)
               + torch.where(use_i & has_items, dist_i.log_prob(i_idx.clamp(
                   min=0, max=safe_item_mask.size(1) - 1)), zero))
@@ -824,9 +945,11 @@ class AlphaLiteNet(nn.Module):
         )
         t_idx = actions["type"]
         dist_t = self.dist_type(new_hidden, batch["type_mask"])
-        slot_legal = _slot_legal_for_types(
-            t_idx, own, batch.get("building_valid"))
-        dist_u = self.dist_unit(new_hidden, t_idx, feats, slot_legal, role_ids)
+        dist_u = self.dist_unit(new_hidden, t_idx, feats, own, role_ids)
+        b_feats = batch.get("building_feats")
+        b_legal = _building_slot_legal(
+            t_idx, batch.get("building_valid"), b_feats)
+        dist_b = self.dist_building(new_hidden, t_idx, b_feats, b_legal)
         dist_c = self.dist_cell(
             fmap, t_idx, batch["cell_mask"], new_hidden,
             tokens, feats, valid, actions["unit_slot"],
@@ -839,37 +962,38 @@ class AlphaLiteNet(nn.Module):
                                 safe_item_mask)
 
         use_u, use_c, use_i = _heads_used(t_idx, t_idx.device)
+        use_b = _USE_B.to(device=t_idx.device, non_blocking=True)[
+            t_idx.long().reshape(-1)]
         zero = torch.zeros_like(dist_t.log_prob(t_idx))
+        u_slot = actions["unit_slot"]
+        u_for_b = u_slot.clamp(min=0, max=MAX_BUILDINGS - 1)
         lp = (dist_t.log_prob(t_idx)
-              + torch.where(use_u, dist_u.log_prob(actions["unit_slot"]), zero)
+              + torch.where(use_u, dist_u.log_prob(u_slot), zero)
+              + torch.where(use_b, dist_b.log_prob(u_for_b), zero)
               + torch.where(use_c, dist_c.log_prob(actions["cell_flat"]), zero)
               + torch.where(use_i & has_items & actions["had_item"],
                             dist_i.log_prob(actions["item_slot"].clamp(
                                 min=0, max=batch["item_mask"].size(1) - 1)),
                             zero))
 
-        # Entropía TOTAL de las cabezas activas (revisión externa 2026-08-24):
-        # antes solo la del tipo ("proxy regularizador"), lo que permitía
-        # colapso determinista prematuro en unidad/celda/ítem. La cabeza de
-        # celda va amortiguada (x0.25): su espacio es ~6000 veces el del tipo
-        # y sin freno dominaría el bono. Promedio ponderado mantiene la escala
-        # del coeficiente de entropía existente.
         h_t = dist_t.entropy()
         h_u = dist_u.entropy()
+        h_b = dist_b.entropy()
         h_c = dist_c.entropy() * 0.25
         h_i = torch.where(has_items, dist_i.entropy(),
                           torch.zeros_like(h_t)) * 0.5
-        # Entropía ENMASCARADA por cabeza activa (mismo criterio que en el
-        # entrenamiento por segmentos): no regularizar cabezas no actuantes.
         zero_h = torch.zeros_like(h_t)
         use_u_f = use_u.float()
+        use_b_f = use_b.float()
         use_c_f = use_c.float() * 0.25
         use_i_f = (use_i & has_items).float() * 0.5
         entropy = ((h_t
                     + torch.where(use_u, h_u, zero_h)
+                    + torch.where(use_b, h_b, zero_h)
                     + torch.where(use_c, h_c, zero_h)
                     + torch.where(use_i & has_items, h_i, zero_h))
-                   / (1.0 + use_u_f + use_c_f + use_i_f))
+                   / (1.0 + use_u_f + use_b_f + use_c_f + use_i_f))
+
         value = self.value_head(new_hidden).squeeze(-1)
         return lp, entropy, value
 
@@ -895,9 +1019,15 @@ class AlphaLiteNet(nn.Module):
             tok_f = tokens.float()
             feats_f = feats.float()
             dist_t = self.dist_type(h_f, batch["type_mask"])
-            slot_legal = _slot_legal_for_types(
-                t_idx, own, batch.get("building_valid"))
-            dist_u = self.dist_unit(h_f, t_idx, feats_f, slot_legal, role_ids)
+            dist_u = self.dist_unit(h_f, t_idx, feats_f, own, role_ids)
+            b_feats = batch.get("building_feats")
+            if b_feats is not None and torch.is_tensor(b_feats):
+                b_feats_f = b_feats.float()
+            else:
+                b_feats_f = b_feats
+            b_legal = _building_slot_legal(
+                t_idx, batch.get("building_valid"), b_feats_f)
+            dist_b = self.dist_building(h_f, t_idx, b_feats_f, b_legal)
             u_idx = actions["unit_slot"].reshape(-1)
             dist_c = self.dist_cell(
                 fmap_f, t_idx, batch["cell_mask"], h_f,
@@ -909,6 +1039,7 @@ class AlphaLiteNet(nn.Module):
             dist_i = self.dist_item(h_f, t_idx, batch["item_indices"], safe_item)
 
             use_u, use_c, use_i = _heads_used(t_idx)
+            use_b = _USE_B.to(device=t_idx.device, non_blocking=True)[t_idx]
             zero = torch.zeros_like(dist_t.log_prob(t_idx))
             c_idx = actions["cell_flat"].reshape(-1)
             i_idx = actions["item_slot"].reshape(-1)
@@ -916,8 +1047,10 @@ class AlphaLiteNet(nn.Module):
             if not torch.is_tensor(had_item):
                 had_item = torch.as_tensor(had_item, device=t_idx.device)
             had_item = had_item.reshape(-1).bool()
+            u_for_b = u_idx.clamp(min=0, max=MAX_BUILDINGS - 1)
             lp = (dist_t.log_prob(t_idx)
                   + torch.where(use_u, dist_u.log_prob(u_idx), zero)
+                  + torch.where(use_b, dist_b.log_prob(u_for_b), zero)
                   + torch.where(use_c, dist_c.log_prob(c_idx), zero)
                   + torch.where(use_i & has_items & had_item,
                                 dist_i.log_prob(i_idx.clamp(
@@ -925,18 +1058,22 @@ class AlphaLiteNet(nn.Module):
 
             ht = dist_t.entropy()
             hu = dist_u.entropy()
+            hb = dist_b.entropy()
             hc = dist_c.entropy() * 0.25
             hi = torch.where(has_items, dist_i.entropy(),
                              torch.zeros_like(ht)) * 0.5
             zero_h = torch.zeros_like(ht)
             use_u_f = use_u.float()
+            use_b_f = use_b.float()
             use_c_f = use_c.float() * 0.25
             use_i_f = (use_i & has_items).float() * 0.5
             entropy = ((ht
                         + torch.where(use_u, hu, zero_h)
+                        + torch.where(use_b, hb, zero_h)
                         + torch.where(use_c, hc, zero_h)
                         + torch.where(use_i & has_items, hi, zero_h))
-                       / (1.0 + use_u_f + use_c_f + use_i_f))
+                       / (1.0 + use_u_f + use_b_f + use_c_f + use_i_f))
+
             value = self.value_head(h_f).squeeze(-1)
         return lp, entropy, value, h_new
 
@@ -1027,7 +1164,8 @@ def _stack_steps(steps, device):
             "type_mask", "cell_mask", "item_indices", "item_mask")
     batch = {k: _cat_field(steps, bget(k), device) for k in keys}
     for k in ("train_slot_mask", "build_slot_mask",
-              "unit_role_ids", "unit_own_mask", "building_valid"):
+              "unit_role_ids", "unit_own_mask", "building_valid",
+              "building_feats"):
         if all(s["batch"].get(k) is not None for s in steps):
             batch[k] = _cat_field(steps, bget(k), device)
         elif k in ("train_slot_mask", "build_slot_mask"):
@@ -1141,6 +1279,8 @@ def adapt_v2_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
         else:
             out[key] = expanded
 
+    # P1 building_mlp / building_scorer: absent in old land ckpts ?
+    # missing keys under strict=False (fresh init = soft-add).
     # Type head / embedding grow when ACTION_TYPES gains group macros.
     for key in ("head_type.weight", "head_type.bias", "type_embedding.weight"):
         if key not in out or key not in target:

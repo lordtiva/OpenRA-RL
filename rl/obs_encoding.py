@@ -271,6 +271,73 @@ GHOST_CONF_FLOOR = 0.05
 # aunque tenga actor_id alto (los e1 nuevos no cabían en oldest-48).
 THREAT_RADIUS = 18
 
+# P1 dedicated building head: own buildings as a separate entity stream.
+MAX_BUILDINGS = MAX_UNITS  # same cap as ActionIndex.building_ids
+BUILDING_FEAT_DIM = 10
+# Indices:
+# 0 hp, 1 is_producing, 2 is_powered, 3 is_repairing, 4 has_rally,
+# 5 can_produce, 6 power_signed (-1..1), 7 sellable (sell_value>0),
+# 8 cell_x/128, 9 cell_y/128
+
+
+def _building_feat(b) -> list:
+    """Compact features for one own building (BuildingInfoModel-ish)."""
+    try:
+        sell_v = float(getattr(b, "sell_value", 0) or 0)
+    except (TypeError, ValueError):
+        sell_v = 0.0
+    try:
+        power = float(getattr(b, "power_amount", 0) or 0)
+    except (TypeError, ValueError):
+        power = 0.0
+    can_prod = getattr(b, "can_produce", None) or []
+    try:
+        rally_x = int(getattr(b, "rally_x", -1))
+    except (TypeError, ValueError):
+        rally_x = -1
+    try:
+        rally_y = int(getattr(b, "rally_y", -1))
+    except (TypeError, ValueError):
+        rally_y = -1
+    return [
+        float(getattr(b, "hp_percent", 1.0) or 0.0),
+        1.0 if getattr(b, "is_producing", False) else 0.0,
+        1.0 if getattr(b, "is_powered", True) else 0.0,
+        1.0 if getattr(b, "is_repairing", False) else 0.0,
+        1.0 if (rally_x >= 0 and rally_y >= 0) else 0.0,
+        1.0 if len(can_prod) > 0 else 0.0,
+        max(-1.0, min(1.0, power / 200.0)),
+        1.0 if sell_v > 0 else 0.0,
+        float(getattr(b, "cell_x", 0) or 0) / 128.0,
+        float(getattr(b, "cell_y", 0) or 0) / 128.0,
+    ]
+
+
+def building_tokens(obs):
+    """Own buildings padded to MAX_BUILDINGS.
+
+    Returns feats[MAX_BUILDINGS, BUILDING_FEAT_DIM], valid[MAX_BUILDINGS] bool.
+    Order matches ActionIndex.building_ids (actor_id > 0, capped).
+    """
+    feats = np.zeros((MAX_BUILDINGS, BUILDING_FEAT_DIM), dtype=np.float32)
+    valid = np.zeros(MAX_BUILDINGS, dtype=bool)
+    blds = list(getattr(obs, "buildings", None) or [])
+    slot = 0
+    for b in blds:
+        if slot >= MAX_BUILDINGS:
+            break
+        try:
+            aid = int(getattr(b, "actor_id", 0) or 0)
+        except (TypeError, ValueError):
+            aid = 0
+        if aid <= 0:
+            continue
+        feats[slot] = _building_feat(b)
+        valid[slot] = True
+        slot += 1
+    return feats, valid
+
+
 
 def _actor_id(u) -> int:
     try:

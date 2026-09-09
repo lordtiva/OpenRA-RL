@@ -3,7 +3,7 @@
 > **Para quién:** cuando quieras ampliar el action set / mapas más allá del land-only
 > de Phase A/B (naval, air, buildings UI, micro).
 >
-> **Fecha:** 2026-09-08 (P0 cerrado 2026-09-09 en `exp/ra-completo-p0` @ fe02a7c).
+> **Fecha:** 2026-09-08 (P0 cerrado 2026-09-09; P1 building_head DONE 2026-09-09 en `exp/ra-completo-p0`).
 >
 > **Relacionado:** onboarding land `22-onboard.md`; operación diaria `07-operacion.md`;
 > índice `README.md`.
@@ -44,15 +44,19 @@ P0 (rama `exp/ra-completo-p0`): path singular harv→celda **existe** (unit head
 
 **Estado:** cerrado en `exp/ra-completo-p0` (rebase sobre `alphalite-v2` / AMP `dfb2b02`). Tip: `fe02a7c`. Tests: `test_ra_completo_p0`, `test_alphalite_v2`, `test_onboard`.
 
-### P1 — Building slot head (sell / repair / rally / power_down / set_primary) — USABLE (reusa unit head)
+### P1 ? Building slot head (sell / repair / rally / power_down / set_primary) ? DONE
 
-- [x] Path de **building slot**: `sell`, `repair`, `set_rally_point`, `power_down`, `set_primary` en `ENABLED_TYPES`; `ActionIndex.building_ids` + máscara de tipo si no hay edificios; `index_to_command` emite `CommandModel` correcto (`actor_id`; rally + `target_x/y`).
-- [x] Sampling/act/eval: la unit head usa **`building_valid`** cuando el tipo ∈ `TYPES_USE_BUILDING` (batch en `_batch_of`, `_sample_ar` / `evaluate_actions` / BPTT). Así el slot no colapsa al own-mask de unidades.
-- [x] `command_to_indices` mapea `actor_id` → slot de `building_ids` (SIL/teacher).
-- [ ] Cabeza neural **dedicada** a edificios (hoy reusa unit feats/scorer sobre el mismo slot index).
-- [x] No mezclar con el mismo corte que crece type-head + maps — P1 reusa filas ya existentes en `ACTION_TYPES` (sin crecer type-head).
+- [x] Path de **building slot**: `sell`, `repair`, `set_rally_point`, `power_down`, `set_primary` en `ENABLED_TYPES`; `ActionIndex.building_ids` + m?scara de tipo si no hay edificios; `index_to_command` emite `CommandModel` correcto (`actor_id`; rally + `target_x/y`).
+- [x] Sampling/act/eval: **`building_head` dedicado** (`building_mlp` + `building_scorer`) sobre `building_feats` / `building_valid` cuando el tipo ? `TYPES_USE_BUILDING` (ya no reusa unit feats/scorer). Slot sigue en `unit_slot` ? adapter `building_ids`.
+- [x] `command_to_indices` mapea `actor_id` ? slot de `building_ids` (SIL/teacher).
+- [x] Cabeza neural **dedicada** a edificios + soft kind-masks (sellable / can_produce / power) sin vaciar filas.
+- [x] Partial load: `building_*` ausente en land ckpts ? missing keys bajo `strict=False` (soft-add / init fresco). `adapt_v2_state_dict` no toca type-head size.
+- [x] No mezclar con el mismo corte que crece type-head + maps ? P1 reusa filas ya existentes en `ACTION_TYPES` (sin crecer type-head).
+- [ ] Caveat: kind-masks son heur?sticas suaves (no engine-perfect); SFT corto sobre sell/repair/rally recomendable antes de confiar en prod.
+- [ ] Caveat: `set_rally_point` condiciona celda con pool de unidades (no embedding de edificio) ? suficiente para P1.
 
-**Estado:** usable en `exp/ra-completo-p0` (sin cabeza dedicada). Tests: `test_ra_completo_p1`. Land macros intactos.
+**Estado:** DONE en `exp/ra-completo-p0`. Tests: `test_ra_completo_p1` (+ load-compat smoke). Land macros intactos. Guard sigue en P2.
+
 
 ### P2 — Micro: group stance / stop, focus fire (+ guard)
 

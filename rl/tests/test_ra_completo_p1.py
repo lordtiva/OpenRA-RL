@@ -1,18 +1,22 @@
-﻿# -*- coding: utf-8 -*-
-"""P1 RA-completo: building-slot sell/repair/rally/power_down/set_primary (usable)."""
+# -*- coding: utf-8 -*-
+"""P1 RA-completo: dedicated building_head for sell/repair/rally/power_down/set_primary."""
 import torch
 from openra_env.models import ActionType, CommandModel
 from rl.network import (
     ACTION_TYPES, TYPE_TO_IDX, TYPES_USE_CELL, TYPES_USE_UNIT,
     TYPES_USE_BUILDING, N_ACTION_TYPES, adapt_v2_state_dict, AlphaLiteNet,
-    HIDDEN_DIM, _slot_legal_for_types,
+    HIDDEN_DIM, _building_slot_legal, _slot_legal_for_types, MAX_BUILDINGS,
 )
 from rl.action_adapter import (
     ActionIndex, Vocab, ENABLED_TYPES, BUILDING_SLOT_TYPES,
     index_to_command, index_to_command_effective,
 )
 from rl.imitation import command_to_indices
-from rl.obs_encoding import MAX_UNITS, MAX_TOKENS, UNIT_FEAT_DIM, SCALAR_DIM
+from rl.obs_encoding import (
+    MAX_UNITS, MAX_TOKENS, UNIT_FEAT_DIM, SCALAR_DIM,
+    BUILDING_FEAT_DIM, building_tokens,
+)
+from rl.trainer import load_checkpoint
 
 
 class _U:
@@ -32,11 +36,20 @@ class _U:
 
 
 class _B:
-    def __init__(self, typ="proc", x=5, y=5, aid=99):
+    def __init__(self, typ="proc", x=5, y=5, aid=99, **kw):
         self.type = typ
         self.cell_x = x
         self.cell_y = y
         self.actor_id = aid
+        self.hp_percent = kw.get("hp_percent", 1.0)
+        self.is_producing = kw.get("is_producing", False)
+        self.is_powered = kw.get("is_powered", True)
+        self.is_repairing = kw.get("is_repairing", False)
+        self.sell_value = kw.get("sell_value", 500)
+        self.rally_x = kw.get("rally_x", -1)
+        self.rally_y = kw.get("rally_y", -1)
+        self.power_amount = kw.get("power_amount", 0)
+        self.can_produce = kw.get("can_produce", [])
 
 
 class _Obs:
@@ -73,16 +86,27 @@ def _aidx(obs):
     return ActionIndex(obs, v)
 
 
-def _mini_batch(aidx, h=8, w=8):
-    """Minimal act() batch with building_valid for P1 sampling tests."""
+def _mini_batch(aidx, h=8, w=8, obs=None):
+    """Minimal act() batch with building_feats/valid for P1 sampling tests."""
     B, U = 1, MAX_TOKENS
     own = torch.zeros(B, U, dtype=torch.bool)
     own[0, 0] = True  # only 1 own unit slot
-    bvalid = aidx.building_valid.unsqueeze(0).clone()
-    # building_valid is MAX_UNITS; pad to MAX_TOKENS like unit masks
-    if bvalid.size(-1) < U:
-        pad = torch.zeros(B, U - bvalid.size(-1), dtype=torch.bool)
-        bvalid = torch.cat([bvalid, pad], dim=-1)
+    if obs is not None:
+        b_feats, b_valid_np = building_tokens(obs)
+        bvalid = torch.from_numpy(b_valid_np).unsqueeze(0).bool()
+        bfeats = torch.from_numpy(b_feats).unsqueeze(0)
+    else:
+        bvalid = aidx.building_valid.unsqueeze(0).clone()
+        if bvalid.size(-1) < MAX_BUILDINGS:
+            pad = torch.zeros(B, MAX_BUILDINGS - bvalid.size(-1), dtype=torch.bool)
+            bvalid = torch.cat([bvalid, pad], dim=-1)
+        bfeats = torch.zeros(B, MAX_BUILDINGS, BUILDING_FEAT_DIM)
+        # mark sellable/can_produce so kind masks do not starve
+        n = int(aidx.building_valid.sum().item())
+        if n:
+            bfeats[0, :n, 7] = 1.0  # sellable
+            bfeats[0, :n, 5] = 1.0  # can_produce
+            bfeats[0, :n, 6] = 0.5  # power
     return {
         "spatial": torch.zeros(B, 9, h, w),
         "scalars": torch.zeros(B, SCALAR_DIM),
@@ -97,6 +121,7 @@ def _mini_batch(aidx, h=8, w=8):
         "train_slot_mask": aidx.train_slot_mask.unsqueeze(0),
         "build_slot_mask": aidx.build_slot_mask.unsqueeze(0),
         "building_valid": bvalid,
+        "building_feats": bfeats,
     }
 
 
@@ -105,12 +130,27 @@ def test_building_types_enabled_append_only():
         assert name in ENABLED_TYPES
         assert name in BUILDING_SLOT_TYPES
         assert name in TYPES_USE_BUILDING
-        assert name in TYPES_USE_UNIT
+        assert name not in TYPES_USE_UNIT  # dedicated building head
         assert name in ACTION_TYPES
     assert "set_rally_point" in TYPES_USE_CELL
-    # Still append-only naval/air at end of ACTION_TYPES
     assert ACTION_TYPES[-2:] == ["naval_attack_move", "air_attack_move"]
     assert N_ACTION_TYPES == TYPE_TO_IDX["air_attack_move"] + 1
+
+
+def test_building_tokens_shape_and_flags():
+    obs = _Obs(buildings=[
+        _B("proc", aid=50, sell_value=800, can_produce=["harv"], power_amount=0),
+        _B("powr", aid=51, sell_value=300, power_amount=100, can_produce=[]),
+        _B("weap", aid=52, sell_value=1000, can_produce=["1tnk"], power_amount=-30),
+    ])
+    feats, valid = building_tokens(obs)
+    assert feats.shape == (MAX_BUILDINGS, BUILDING_FEAT_DIM)
+    assert valid.shape == (MAX_BUILDINGS,)
+    assert int(valid[:3].sum()) == 3
+    assert feats[0, 7] == 1.0  # sellable
+    assert feats[0, 5] == 1.0  # can_produce
+    assert feats[1, 6] > 0  # power plant positive
+    assert feats[2, 6] < 0  # weap drains
 
 
 def test_building_slot_masked_without_buildings():
@@ -160,7 +200,7 @@ def test_sell_repair_power_primary_use_building_slot():
 def test_set_rally_point_uses_cell_and_building():
     obs = _Obs(
         units=[_U(actor_id=1, type="1tnk")],
-        buildings=[_B("weap", aid=77)],
+        buildings=[_B("weap", aid=77, can_produce=["1tnk"])],
         harv_count=1,
     )
     aidx = _aidx(obs)
@@ -203,33 +243,57 @@ def test_land_path_macros_still_work():
 
 
 def test_partial_load_unchanged_n_types():
-    """P1 reuses existing ACTION_TYPES rows — no type-head growth."""
+    """P1 reuses existing ACTION_TYPES rows ? no type-head growth."""
     net = AlphaLiteNet()
     raw = {k: v.clone() for k, v in net.state_dict().items()}
     adapted = adapt_v2_state_dict(net, raw)
     assert adapted["head_type.weight"].shape[0] == N_ACTION_TYPES
 
 
-def test_slot_legal_switches_to_building_valid():
-    """With 1 unit and 3 buildings, sell must legalize 3 slots not 1."""
+def test_building_head_params_present():
+    net = AlphaLiteNet()
+    sd = net.state_dict()
+    assert "building_mlp.0.weight" in sd
+    assert "building_scorer.0.weight" in sd
+    assert sd["building_mlp.0.weight"].shape == (64, BUILDING_FEAT_DIM)
+
+
+def test_building_slot_legal_kind_soft():
+    """Kind masks prefer sellable / producers without emptying the row."""
     obs = _Obs(
         units=[_U(actor_id=1, type="1tnk")],
-        buildings=[_B("proc", aid=50), _B("powr", aid=51), _B("weap", aid=52)],
+        buildings=[
+            _B("proc", aid=50, sell_value=800, can_produce=["harv"], power_amount=0),
+            _B("powr", aid=51, sell_value=0, can_produce=[], power_amount=100),
+            _B("weap", aid=52, sell_value=1000, can_produce=["1tnk"], power_amount=-20),
+        ],
         harv_count=1,
     )
     aidx = _aidx(obs)
-    B, U = 1, MAX_UNITS
-    own = torch.zeros(B, U, dtype=torch.bool)
-    own[0, 0] = True
-    bv = aidx.building_valid.unsqueeze(0)
+    feats, valid = building_tokens(obs)
+    bv = torch.from_numpy(valid).unsqueeze(0)
+    bf = torch.from_numpy(feats).unsqueeze(0)
     t_sell = torch.tensor([TYPE_TO_IDX["sell"]])
+    t_rally = torch.tensor([TYPE_TO_IDX["set_rally_point"]])
+    t_pwr = torch.tensor([TYPE_TO_IDX["power_down"]])
     t_move = torch.tensor([TYPE_TO_IDX["move"]])
-    legal_sell = _slot_legal_for_types(t_sell, own, bv)
+    legal_sell = _building_slot_legal(t_sell, bv, bf)
+    legal_rally = _building_slot_legal(t_rally, bv, bf)
+    legal_pwr = _building_slot_legal(t_pwr, bv, bf)
+    # sell prefers sellable (slots 0 and 2; powr has sell_value=0)
+    assert bool(legal_sell[0, 0]) and bool(legal_sell[0, 2])
+    assert not bool(legal_sell[0, 1])
+    # rally prefers can_produce (proc+weap)
+    assert bool(legal_rally[0, 0]) and bool(legal_rally[0, 2])
+    assert not bool(legal_rally[0, 1])
+    # power_down prefers non-zero power (powr+weap)
+    assert not bool(legal_pwr[0, 0])
+    assert bool(legal_pwr[0, 1]) and bool(legal_pwr[0, 2])
+    # unit path unchanged
+    own = torch.zeros(1, MAX_UNITS, dtype=torch.bool)
+    own[0, 0] = True
     legal_move = _slot_legal_for_types(t_move, own, bv)
-    assert int(legal_sell[0].sum()) == 3
-    assert bool(legal_sell[0, 2])
     assert int(legal_move[0].sum()) == 1
-    assert bool(legal_move[0, 0]) and not bool(legal_move[0, 1])
 
 
 def test_act_samples_building_slot_beyond_unit_own():
@@ -237,13 +301,14 @@ def test_act_samples_building_slot_beyond_unit_own():
     torch.manual_seed(0)
     obs = _Obs(
         units=[_U(actor_id=1, type="1tnk")],
-        buildings=[_B("proc", aid=50), _B("powr", aid=51), _B("weap", aid=52),
-                   _B("barr", aid=53)],
+        buildings=[_B("proc", aid=50, sell_value=500),
+                   _B("powr", aid=51, sell_value=300),
+                   _B("weap", aid=52, sell_value=900),
+                   _B("barr", aid=53, sell_value=400)],
         harv_count=1,
     )
     aidx = _aidx(obs)
-    batch = _mini_batch(aidx)
-    # Only sell legal
+    batch = _mini_batch(aidx, obs=obs)
     tm = torch.zeros_like(batch["type_mask"])
     tm[0, TYPE_TO_IDX["sell"]] = True
     batch["type_mask"] = tm
@@ -264,8 +329,77 @@ def test_act_samples_building_slot_beyond_unit_own():
         assert action.commands[0].action == ActionType.SELL
         assert action.commands[0].actor_id in (50, 51, 52, 53)
         assert eff[1] == slot
-    # With 4 buildings and only 1 own unit, must not be stuck on slot 0 only
     assert len(seen) >= 2, seen
+
+
+def test_evaluate_actions_uses_building_head():
+    """log_prob for sell must flow through building_scorer (grad on building_*)."""
+    torch.manual_seed(1)
+    obs = _Obs(
+        units=[_U(actor_id=1, type="1tnk")],
+        buildings=[_B("proc", aid=50, sell_value=500),
+                   _B("weap", aid=52, sell_value=900, can_produce=["1tnk"])],
+        harv_count=1,
+    )
+    aidx = _aidx(obs)
+    batch = _mini_batch(aidx, obs=obs)
+    tm = torch.zeros_like(batch["type_mask"])
+    tm[0, TYPE_TO_IDX["sell"]] = True
+    batch["type_mask"] = tm
+    net = AlphaLiteNet()
+    net.train()
+    h = torch.zeros(1, HIDDEN_DIM)
+    actions = {
+        "type": torch.tensor([TYPE_TO_IDX["sell"]]),
+        "unit_slot": torch.tensor([1]),
+        "cell_flat": torch.tensor([0]),
+        "item_slot": torch.tensor([0]),
+        "had_item": torch.tensor([False]),
+    }
+    lp, ent, val = net.evaluate_actions(batch, h, actions)
+    assert lp.shape == (1,)
+    assert torch.isfinite(lp).all()
+    lp.sum().backward()
+    g_b = net.building_scorer[0].weight.grad
+    g_u = net.unit_scorer[0].weight.grad
+    assert g_b is not None and float(g_b.abs().sum()) > 0
+    # unit scorer should not receive grad for pure building action
+    assert g_u is None or float(g_u.abs().sum()) == 0.0
+
+
+def test_old_ckpt_soft_adds_building_head():
+    """Simulate land ckpt without building_*: load_state_dict soft-adds."""
+    import tempfile, os
+    fresh = AlphaLiteNet()
+    # Drop building_* keys to mimic old land checkpoint
+    raw = {k: v.clone() for k, v in fresh.state_dict().items()
+           if not k.startswith("building_")}
+    assert not any(k.startswith("building_") for k in raw)
+    net = AlphaLiteNet()
+    adapted = adapt_v2_state_dict(net, raw)
+    incompat = net.load_state_dict(adapted, strict=False)
+    missing = [k for k in incompat.missing_keys if k.startswith("building_")]
+    assert missing, "expected soft-add missing building_* keys"
+    # Still runnable
+    obs = _Obs(units=[_U(actor_id=1, type="1tnk")],
+               buildings=[_B("proc", aid=50, sell_value=100)], harv_count=1)
+    aidx = _aidx(obs)
+    batch = _mini_batch(aidx, obs=obs)
+    tm = torch.zeros_like(batch["type_mask"])
+    tm[0, TYPE_TO_IDX["repair"]] = True
+    batch["type_mask"] = tm
+    h = torch.zeros(1, HIDDEN_DIM)
+    out = net.act(batch, h, temperature=1.0)
+    assert int(out["type"]) == TYPE_TO_IDX["repair"]
+    # Also via tempfile + load_checkpoint path
+    blob = {"net": raw, "iter": 0, "vocab": {}}
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "fake_land.pt")
+        torch.save(blob, p)
+        net2 = AlphaLiteNet()
+        load_checkpoint(p, net2, opt=None, vocab=None)
+        out2 = net2.act(batch, h, temperature=1.0)
+        assert int(out2["type"]) == TYPE_TO_IDX["repair"]
 
 
 def test_command_to_indices_building_actor():
@@ -288,13 +422,14 @@ def test_command_to_indices_building_actor():
 
 
 def test_guard_still_disabled_in_enabled_types():
-    """Guard is documented as P2 — must NOT sneak into ENABLED_TYPES here."""
+    """Guard is documented as P2 ? must NOT sneak into ENABLED_TYPES here."""
     assert "guard" in ACTION_TYPES
     assert "guard" not in ENABLED_TYPES
 
 
 if __name__ == "__main__":
     test_building_types_enabled_append_only()
+    test_building_tokens_shape_and_flags()
     test_building_slot_masked_without_buildings()
     test_building_slot_legal_with_buildings()
     test_sell_repair_power_primary_use_building_slot()
@@ -302,8 +437,11 @@ if __name__ == "__main__":
     test_building_oob_slot_falls_back_to_first()
     test_land_path_macros_still_work()
     test_partial_load_unchanged_n_types()
-    test_slot_legal_switches_to_building_valid()
+    test_building_head_params_present()
+    test_building_slot_legal_kind_soft()
     test_act_samples_building_slot_beyond_unit_own()
+    test_evaluate_actions_uses_building_head()
+    test_old_ckpt_soft_adds_building_head()
     test_command_to_indices_building_actor()
     test_guard_still_disabled_in_enabled_types()
-    print("OK ra-completo-p1 usable tests")
+    print("OK ra-completo-p1 dedicated building_head tests")

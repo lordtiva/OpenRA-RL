@@ -37,7 +37,7 @@ ENABLED_TYPES = {
     "sell", "repair", "set_rally_point", "power_down", "set_primary",
 }
 
-# Types that pick a building actor via unit_slot -> building_ids.
+# Types that pick a building actor via building_head -> building_ids.
 BUILDING_SLOT_TYPES = {
     "sell", "repair", "set_rally_point", "power_down", "set_primary",
 }
@@ -736,7 +736,7 @@ class ActionIndex:
         for i in range(len(self.unit_ids)):
             self.unit_valid[i] = True
 
-        # P1 scaffold: building slots (same MAX_UNITS cap; unit_slot remapped)
+        # P1: building slots (MAX_BUILDINGS==MAX_UNITS; building_head index)
         blds = list(getattr(obs, "buildings", None) or [])[:MAX_UNITS]
         self.building_ids = [
             int(getattr(b, "actor_id", 0) or 0) for b in blds
