@@ -207,3 +207,12 @@ Detalle historico de cortes: docs `13`–`21`. Regla practica ahora:
 * Filosofia / pilares: `06-filosofia-rl.md`
 * Reward: `rl/reward_shaping.py` (`eradicate_v4`)
 * Red: `rl/network.py` (arch v2 completa; v1.1 = XF 2x64 + U-Net full-96)
+
+## P3 map pools
+
+- Catalog: rl/map_catalog.py (official OpenRA titles / display_name).
+- Default train / auto_train: a_short (lakes OK; navy gated).
+- Small curated pool: --map-pool official_2p_small
+  (a_short + Doughnut / Bombardment Islands / Tournament Island / X-Lake).
+- Also: land | mixed | water (water = naval-viable mixed land-water, not pure-water).
+- Details: 23-ra-completo-todo.md.

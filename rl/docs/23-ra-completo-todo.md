@@ -66,29 +66,33 @@ P0 (rama `exp/ra-completo-p0`): path singular harv→celda **existe** (unit head
 
 **Estado:** DONE en `exp/ra-completo-p0`. Tests: `test_ra_completo_p2` (+ p0/p1/alphalite smoke). Type-head crece +3 (`army_stop`/`army_set_stance`/`army_guard`) → partial load. Caveat: engine Guard rango limitado; SFT corto recomendable sobre guard/focus antes de prod.
 
-### P3 — Producción RA completa + mapas agua/aire + spawn variety — IN PROGRESS (first cut)
+### P3 ? Producci?n RA completa + mapas agua/aire + spawn variety ? IN PROGRESS (cleanup)
 
-- [x] Inventario + wire de mapas agua seleccionables sin romper default _short.
-  - 
-l/map_catalog.py: fase2 land + stock water (doughnut, ombardment_islands en 
-l/scenarios/stock_*.oramap).
-  - 	rain --scenario doughnut / --map-pool land|water|mixed|a_short,doughnut.
-  - uto_train sigue con --scenario a_short (sin cambio de default).
-- [x] Máscaras de producción: **forbid naval BUILD/ship TRAIN en land-only**; unmask en mapas has_water.
-  - Airbase/heli siguen legales en land; defense ya sale del gate eco (proc+harv) vía roles.
-  - Combat TRAIN (incl. air/naval units) sigue gated en proc+harv; no se fuerza navy en a_short.
-- [x] Teacher: _optional_naval_air — syrd/spen ligero si mapa water + cash; airbase opcional en water.
+- [x] Inventario + wire de mapas water/mixed seleccionables sin romper default a_short.
+  - rl/map_catalog.py: display_name (titulo original), has_water vs naval_viable.
+  - a_short: has_water=True (lagos) pero naval_viable=False (navy gated).
+  - Preferir paths oficiales OpenRA/mods/ra/maps/<name>.oramap (MAIN o submodule);
+    thin copies en rl/scenarios/ solo como fallback (submodule vacio en este worktree).
+  - Basenames oficiales: doughnut.oramap, bombardment-islands.oramap,
+    tournament-island.oramap, x-lake.oramap, archipelago.oramap (no stock_*).
+  - Junk archivado en rl/scenarios/_archive/ (probe/amin160/a_minus + old stock_*).
+  - Pools: land | mixed | official_2p_small | water (water = naval-viable mixed,
+    NO "pure water").
+  - train --map-pool official_2p_small (o mixed/water/comma keys).
+  - auto_train sigue con --scenario a_short (sin cambio de default).
+- [x] Mascaras de produccion: forbid naval BUILD/ship TRAIN si no naval_viable;
+  unmask en mapas navy-viable. Airbase/heli legales en land; defense ya sale del gate eco.
+- [x] Teacher: _optional_naval_air ? syrd/spen ligero si mapa navy-viable + cash.
   - TODO(P3+): air opcional en land / mapas con airfield start; tapes navy/air aparte.
-- [x] Spawn/layout variety hook: --map-pool (>=2 mapas). **Multi spawn rotation** del engine **no** hookeado (documentado).
-- [ ] Árbol RA *completo* en teacher (tech/defense push sistemático) — aún land-first; solo navy/air light.
-- [ ] Mapas aire dedicados / prebuilt fase2 water con base — blocked on scenario authoring.
-- [ ] Curriculum onboard JSON flag para pool water — hook train listo; onboard/auto_train aún no lo setea.
+- [x] Spawn/layout variety hook: --map-pool (>=2 mapas). Multi spawn rotation del engine no hookeado (documentado).
+- [ ] Arbol RA completo en teacher (tech/defense push sistematico) ? aun land-first; solo navy/air light.
+- [ ] Mapas aire dedicados / prebuilt fase2 water con base ? blocked on scenario authoring.
+- [ ] Curriculum onboard JSON flag para pool water/official_2p_small ? hook train listo; onboard/auto_train aun no lo setea.
 
-**Estado (2026-09-09):** first cut en exp/ra-completo-p0. Tests: 	est_ra_completo_p3.
-Assets MAIN OpenRA/mods/ra/maps/*.oramap (read-only inventory): muchos stock water
-(archipelago, doughnut, bombardment-islands, …). Worktree OpenRA/ submodule vacío —
-por eso stock water se copió a 
-l/scenarios/.
+**Estado (2026-09-09):** cleanup P3 en exp/ra-completo-p0. Tests: test_ra_completo_p3.
+Pool official_2p_small: a_short (A-short/Singles short), Doughnut, Bombardment Islands,
+Tournament Island, X-Lake. Como correr: python -m rl.train --map-pool official_2p_small ...
+(o auto_train sin pool = a_short).
 
 ### P4 — Obs / dash para naval y air
 

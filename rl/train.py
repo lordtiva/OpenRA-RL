@@ -329,7 +329,8 @@ async def amain(args):
           flush=True)
 
     # Maps: --scenario (single) and/or --map-pool (sample per episode).
-    # Default curriculum stays a_short via auto_train; water maps are opt-in.
+    # Default curriculum stays a_short via auto_train; official mixed maps
+    # opt-in via --map-pool official_2p_small|mixed|water.
     reset_kwargs = {}
     map_pool = mapcat.parse_pool_arg(getattr(args, "map_pool", None))
     if map_pool:
@@ -1183,14 +1184,17 @@ def main():
                          "senal entre episodios; 'episode' = centrado grupal "
                          "historico)")
     ap.add_argument("--scenario", default=None,
-                    help="Map/scenario key (catalog): a_short (default land), "
-                         "doughnut / bombardment_islands (water), or legacy "
-                         "fase2_{name}. Vacio = juego completo (singles).")
+                    help="Map/scenario key (catalog): a_short (default; lakes, "
+                         "navy gated), doughnut / bombardment_islands / "
+                         "tournament_island / x_lake (official mixed land-water), "
+                         "or legacy fase2_{name}. Vacio = juego completo (singles).")
     ap.add_argument("--map-pool", default=None,
                     help="P3: sample a map per episode. Named pools: "
-                         "land|water|mixed, or comma keys "
-                         "(e.g. a_short,doughnut). Overrides single --scenario "
-                         "for collection; does not change a_short default when unset.")
+                         "land|mixed|official_2p_small|water "
+                         "(water = naval-viable mixed, not pure-water), "
+                         "or comma keys (e.g. a_short,doughnut). Overrides "
+                         "single --scenario for collection; auto_train default "
+                         "stays a_short when unset.")
     ap.add_argument("--bot-type", default=None,
                     choices=("beginner", "easy", "medium", "hard", "brutal",
                              "dummy"),

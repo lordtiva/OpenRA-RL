@@ -909,8 +909,8 @@ class ActionIndex:
             self.build_slot_mask[slot] = True
         self.pass_grid = None
 
-        # P3: on land-only / puddle maps, forbid naval BUILD + ship TRAIN
-        # (Informe-2 anti-syrd). Water maps (catalog has_water) keep navy.
+        # P3: when not naval_viable, forbid naval BUILD + ship TRAIN
+        # (Informe-2 anti-syrd). Lakes alone (a_short) stay gated; navy maps OK.
         # Airbase / air units stay legal on land. Defense already unmasked
         # once proc stands (not in ECONOMY_BUILD_ROLES-only gate).
         from rl.map_catalog import (

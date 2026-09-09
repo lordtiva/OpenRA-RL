@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""P3 RA-completo: map catalog, naval masks, water map pool hook."""
+"""P3 RA-completo: map catalog, naval masks, official map pool hook."""
 import base64
 from pathlib import Path
 
@@ -70,38 +70,55 @@ def test_catalog_inventory_has_land_and_water():
     assert "a_short" in keys
     assert "doughnut" in keys
     assert "bombardment_islands" in keys
-    assert mapcat.get_entry("a_short").has_water is False
+    assert "tournament_island" in keys
+    assert "x_lake" in keys
+    a = mapcat.get_entry("a_short")
+    assert a.has_water is True  # lakes present
+    assert a.naval_viable is False  # navy still gated
     assert mapcat.get_entry("doughnut").has_water is True
-    assert mapcat.get_entry("bombardment_islands").has_water is True
+    assert mapcat.get_entry("doughnut").naval_viable is True
+    assert mapcat.get_entry("doughnut").display_name == "Doughnut"
+    assert mapcat.get_entry("bombardment_islands").display_name == "Bombardment Islands"
 
 
-def test_stock_water_files_exist():
-    for key in ("doughnut", "bombardment_islands"):
+def test_official_map_files_resolve():
+    for key in ("doughnut", "bombardment_islands", "tournament_island", "x_lake"):
         path = mapcat.resolve_map_path(key)
         assert path.exists(), path
         assert path.stat().st_size > 1000
+        # Prefer official basename (not stock_*)
+        assert "stock_" not in path.name
 
 
 def test_allows_naval_hints():
+    # Lakes on a_short ≠ navy theatre
     assert allows_naval("fase2_a_short.oramap") is False
+    assert allows_naval("a_short") is False
     assert allows_naval("singles.oramap") is False
     assert allows_naval("stock_doughnut.oramap") is True
     assert allows_naval("doughnut.oramap") is True
+    assert allows_naval("bombardment-islands.oramap") is True
     assert allows_naval("archipelago.oramap") is True
+    assert allows_naval("x-lake.oramap") is True
 
 
-def test_named_pools_expose_two_plus_maps():
+def test_named_pools_expose_official_2p_small():
     water = parse_pool_arg("water")
     mixed = parse_pool_arg("mixed")
+    small = parse_pool_arg("official_2p_small")
     assert water is not None and len(water) >= 2
     assert mixed is not None and len(mixed) >= 2
     assert "a_short" in mixed
     assert "doughnut" in mixed
+    assert small is not None and 4 <= len(small) <= 6
+    assert small[0] == "a_short" or "a_short" in small
+    assert "doughnut" in small
+    assert "bombardment_islands" in small
 
 
-def test_reset_payload_doughnut_stable_name():
+def test_reset_payload_doughnut_official_name():
     payload = reset_payload_for("doughnut")
-    assert payload["map_name"] == "stock_doughnut.oramap"
+    assert payload["map_name"] == "doughnut.oramap"
     raw = base64.b64decode(payload["map_data"])
     assert raw[:2] == Path(mapcat.resolve_map_path("doughnut")).read_bytes()[:2]
 
@@ -128,7 +145,7 @@ def test_naval_build_masked_on_land_a_short():
 
 def test_naval_build_unmasked_on_water_doughnut():
     avail = ["powr", "proc", "tent", "weap", "syrd", "hpad", "e1", "harv", "dd"]
-    obs = _Obs(map_name="stock_doughnut.oramap", available=avail,
+    obs = _Obs(map_name="doughnut.oramap", available=avail,
                buildings=[_B("proc"), _B("powr", aid=2), _B("tent", aid=3)],
                units=[_U("harv"), _U("e1", aid=2)])
     aidx = _aidx(obs)
@@ -162,7 +179,7 @@ def test_teacher_optional_naval_on_water():
             return item_type in (obs.available_production or [])
 
     t = _T(verbose=False)
-    obs = _Obs(map_name="stock_doughnut.oramap",
+    obs = _Obs(map_name="doughnut.oramap",
                available=["syrd", "spen", "hpad", "tent"],
                buildings=[_B("proc"), _B("tent", aid=2)],
                units=[_U("harv")])
@@ -171,4 +188,3 @@ def test_teacher_optional_naval_on_water():
     assert len(out) == 1
     assert out[0].action == ActionType.BUILD
     assert out[0].item_type in ("syrd", "spen")
-
