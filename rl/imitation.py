@@ -17,7 +17,9 @@ from pathlib import Path
 
 import torch
 
-from rl.action_adapter import ENABLED_TYPES, TYPE_TO_IDX, n_combat_total
+from rl.action_adapter import (
+    ENABLED_TYPES, TYPE_TO_IDX, BUILDING_SLOT_TYPES, n_combat_total,
+)
 from rl.network import ACTION_TYPES
 from rl.roles import role_of
 from openra_env.models import ActionType, CommandModel
@@ -325,7 +327,11 @@ def command_to_indices(obs, cmd: CommandModel, aidx) -> tuple[int, int, int, int
 
     unit_slot = 0
     actor_id = int(getattr(cmd, "actor_id", 0) or 0)
-    if actor_id and actor_id in aidx.unit_ids:
+    if name in BUILDING_SLOT_TYPES:
+        bids = getattr(aidx, "building_ids", None) or []
+        if actor_id and actor_id in bids:
+            unit_slot = int(bids.index(actor_id))
+    elif actor_id and actor_id in aidx.unit_ids:
         unit_slot = int(aidx.unit_ids.index(actor_id))
 
     cx = int(getattr(cmd, "target_x", 0) or 0)

@@ -1,14 +1,18 @@
-# -*- coding: utf-8 -*-
-"""P1 RA-completo scaffold: building-slot sell/repair/rally/power_down/set_primary."""
-from openra_env.models import ActionType
+﻿# -*- coding: utf-8 -*-
+"""P1 RA-completo: building-slot sell/repair/rally/power_down/set_primary (usable)."""
+import torch
+from openra_env.models import ActionType, CommandModel
 from rl.network import (
     ACTION_TYPES, TYPE_TO_IDX, TYPES_USE_CELL, TYPES_USE_UNIT,
     TYPES_USE_BUILDING, N_ACTION_TYPES, adapt_v2_state_dict, AlphaLiteNet,
+    HIDDEN_DIM, _slot_legal_for_types,
 )
 from rl.action_adapter import (
     ActionIndex, Vocab, ENABLED_TYPES, BUILDING_SLOT_TYPES,
     index_to_command, index_to_command_effective,
 )
+from rl.imitation import command_to_indices
+from rl.obs_encoding import MAX_UNITS, MAX_TOKENS, UNIT_FEAT_DIM, SCALAR_DIM
 
 
 class _U:
@@ -67,6 +71,33 @@ def _aidx(obs):
     v = Vocab()
     v.seed_roles()
     return ActionIndex(obs, v)
+
+
+def _mini_batch(aidx, h=8, w=8):
+    """Minimal act() batch with building_valid for P1 sampling tests."""
+    B, U = 1, MAX_TOKENS
+    own = torch.zeros(B, U, dtype=torch.bool)
+    own[0, 0] = True  # only 1 own unit slot
+    bvalid = aidx.building_valid.unsqueeze(0).clone()
+    # building_valid is MAX_UNITS; pad to MAX_TOKENS like unit masks
+    if bvalid.size(-1) < U:
+        pad = torch.zeros(B, U - bvalid.size(-1), dtype=torch.bool)
+        bvalid = torch.cat([bvalid, pad], dim=-1)
+    return {
+        "spatial": torch.zeros(B, 9, h, w),
+        "scalars": torch.zeros(B, SCALAR_DIM),
+        "unit_feats": torch.zeros(B, U, UNIT_FEAT_DIM),
+        "unit_valid": own.clone(),
+        "unit_own_mask": own.clone(),
+        "unit_role_ids": torch.zeros(B, U, dtype=torch.long),
+        "type_mask": aidx.type_mask.unsqueeze(0).clone(),
+        "cell_mask": torch.ones(B, h * w, dtype=torch.bool),
+        "item_indices": aidx.item_indices.unsqueeze(0),
+        "item_mask": aidx.item_mask.unsqueeze(0),
+        "train_slot_mask": aidx.train_slot_mask.unsqueeze(0),
+        "build_slot_mask": aidx.build_slot_mask.unsqueeze(0),
+        "building_valid": bvalid,
+    }
 
 
 def test_building_types_enabled_append_only():
@@ -179,6 +210,89 @@ def test_partial_load_unchanged_n_types():
     assert adapted["head_type.weight"].shape[0] == N_ACTION_TYPES
 
 
+def test_slot_legal_switches_to_building_valid():
+    """With 1 unit and 3 buildings, sell must legalize 3 slots not 1."""
+    obs = _Obs(
+        units=[_U(actor_id=1, type="1tnk")],
+        buildings=[_B("proc", aid=50), _B("powr", aid=51), _B("weap", aid=52)],
+        harv_count=1,
+    )
+    aidx = _aidx(obs)
+    B, U = 1, MAX_UNITS
+    own = torch.zeros(B, U, dtype=torch.bool)
+    own[0, 0] = True
+    bv = aidx.building_valid.unsqueeze(0)
+    t_sell = torch.tensor([TYPE_TO_IDX["sell"]])
+    t_move = torch.tensor([TYPE_TO_IDX["move"]])
+    legal_sell = _slot_legal_for_types(t_sell, own, bv)
+    legal_move = _slot_legal_for_types(t_move, own, bv)
+    assert int(legal_sell[0].sum()) == 3
+    assert bool(legal_sell[0, 2])
+    assert int(legal_move[0].sum()) == 1
+    assert bool(legal_move[0, 0]) and not bool(legal_move[0, 1])
+
+
+def test_act_samples_building_slot_beyond_unit_own():
+    """Force-mask types to sell; sampled unit_slot must be in building_valid."""
+    torch.manual_seed(0)
+    obs = _Obs(
+        units=[_U(actor_id=1, type="1tnk")],
+        buildings=[_B("proc", aid=50), _B("powr", aid=51), _B("weap", aid=52),
+                   _B("barr", aid=53)],
+        harv_count=1,
+    )
+    aidx = _aidx(obs)
+    batch = _mini_batch(aidx)
+    # Only sell legal
+    tm = torch.zeros_like(batch["type_mask"])
+    tm[0, TYPE_TO_IDX["sell"]] = True
+    batch["type_mask"] = tm
+    net = AlphaLiteNet()
+    net.eval()
+    h = torch.zeros(1, HIDDEN_DIM)
+    seen = set()
+    for _ in range(40):
+        out = net.act(batch, h, temperature=1.0)
+        assert int(out["type"]) == TYPE_TO_IDX["sell"]
+        slot = int(out["unit_slot"])
+        assert slot < len(aidx.building_ids), slot
+        assert bool(aidx.building_valid[slot])
+        seen.add(slot)
+        action, eff = index_to_command_effective(
+            obs, int(out["type"]), slot, int(out["cell_flat"]),
+            int(out["item_slot"]), aidx)
+        assert action.commands[0].action == ActionType.SELL
+        assert action.commands[0].actor_id in (50, 51, 52, 53)
+        assert eff[1] == slot
+    # With 4 buildings and only 1 own unit, must not be stuck on slot 0 only
+    assert len(seen) >= 2, seen
+
+
+def test_command_to_indices_building_actor():
+    obs = _Obs(
+        units=[_U(actor_id=1, type="1tnk")],
+        buildings=[_B("proc", aid=50), _B("powr", aid=51)],
+        harv_count=1,
+    )
+    aidx = _aidx(obs)
+    cmd = CommandModel(action=ActionType.REPAIR, actor_id=51)
+    t, u, c, i = command_to_indices(obs, cmd, aidx)
+    assert ACTION_TYPES[t] == "repair"
+    assert u == 1
+    cmd2 = CommandModel(action=ActionType.SET_RALLY_POINT, actor_id=50,
+                        target_x=3, target_y=4)
+    t2, u2, c2, _ = command_to_indices(obs, cmd2, aidx)
+    assert ACTION_TYPES[t2] == "set_rally_point"
+    assert u2 == 0
+    assert c2 == 4 * aidx.w + 3
+
+
+def test_guard_still_disabled_in_enabled_types():
+    """Guard is documented as P2 — must NOT sneak into ENABLED_TYPES here."""
+    assert "guard" in ACTION_TYPES
+    assert "guard" not in ENABLED_TYPES
+
+
 if __name__ == "__main__":
     test_building_types_enabled_append_only()
     test_building_slot_masked_without_buildings()
@@ -188,4 +302,8 @@ if __name__ == "__main__":
     test_building_oob_slot_falls_back_to_first()
     test_land_path_macros_still_work()
     test_partial_load_unchanged_n_types()
-    print("OK ra-completo-p1 scaffold tests")
+    test_slot_legal_switches_to_building_valid()
+    test_act_samples_building_slot_beyond_unit_own()
+    test_command_to_indices_building_actor()
+    test_guard_still_disabled_in_enabled_types()
+    print("OK ra-completo-p1 usable tests")

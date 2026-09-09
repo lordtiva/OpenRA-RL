@@ -12,8 +12,8 @@ handler"):
     - ATTACK sin enemigo visible cerca -> target_actor_id=0 -> NRE en C# ->
       se degrada a ATTACK_MOVE hacia la celda (siempre seguro)
     - Acciones de EDIFICIO (sell/repair/rally/power_down/set_primary):
-      P1 scaffold — unit_slot indexa ActionIndex.building_ids (append-only,
-      masked hasta que haya edificios). Cabeza dedicada puede venir después.
+      P1 usable — unit_slot indexa ActionIndex.building_ids; act/eval usan
+      building_valid (no unit_own). Cabeza dedicada puede venir después.
 """
 
 import numpy as np
@@ -998,12 +998,15 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         if m_id and m_id in aidx.unit_ids:
             eff_unit_slot = aidx.unit_ids.index(m_id)
     elif t_name in BUILDING_SLOT_TYPES and aidx.building_ids:
-        # unit_slot indexes building_ids (scaffold; dedicated head later).
+        # unit_slot indexes building_ids (act masks via building_valid).
         if 0 <= unit_slot < len(aidx.building_ids):
             eff_unit_slot = unit_slot
         else:
             eff_unit_slot = 0
         actor_id = aidx.building_ids[eff_unit_slot]
+        if actor_id <= 0:
+            t_name = "no_op"
+            eff_type = TYPE_TO_IDX.get("no_op", chosen_type)
 
     cmd = None
     group_cmds = None  # v2: multi CommandModel for role-group macros
@@ -1072,11 +1075,17 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         cmd = CommandModel(action=t, item_type=item_type)
     elif t in (ActionType.SELL, ActionType.REPAIR, ActionType.POWER_DOWN,
                ActionType.SET_PRIMARY):
-        # P1 stub: actor_id = selected building slot.
-        cmd = CommandModel(action=t, actor_id=actor_id)
+        # P1: actor_id = selected building (no cell/item fields needed).
+        if actor_id <= 0:
+            cmd = CommandModel(action=ActionType.NO_OP)
+        else:
+            cmd = CommandModel(action=t, actor_id=actor_id)
     elif t == ActionType.SET_RALLY_POINT:
-        cmd = CommandModel(action=t, actor_id=actor_id,
-                           target_x=cx, target_y=cy)
+        if actor_id <= 0:
+            cmd = CommandModel(action=ActionType.NO_OP)
+        else:
+            cmd = CommandModel(action=t, actor_id=actor_id,
+                               target_x=cx, target_y=cy)
     else:
         cmd = CommandModel(action=ActionType.NO_OP)
     if group_cmds:

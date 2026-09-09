@@ -115,6 +115,7 @@ def build_combat_type_mask(base_mask: torch.Tensor) -> torch.Tensor | None:
 _USE_U = torch.tensor([n in TYPES_USE_UNIT for n in ACTION_TYPES])
 _USE_C = torch.tensor([n in TYPES_USE_CELL for n in ACTION_TYPES])
 _USE_I = torch.tensor([n in TYPES_USE_ITEM for n in ACTION_TYPES])
+_USE_B = torch.tensor([n in TYPES_USE_BUILDING for n in ACTION_TYPES])
 
 # fp16 max ≈ 65504. masked_fill(-1e9) bajo AMP crashea (Half overflow).
 _ILLEGAL_FP16 = -1.0e4
@@ -140,6 +141,32 @@ def _heads_used(t_idx: torch.Tensor, device=None) -> tuple:
     return (_USE_U.to(dev, non_blocking=True)[t],
             _USE_C.to(dev, non_blocking=True)[t],
             _USE_I.to(dev, non_blocking=True)[t])
+
+
+def _slot_legal_for_types(t_idx, own, building_valid):
+    """Unit-head legality: building_valid for TYPES_USE_BUILDING, else own.
+
+    P1: sell/repair/rally/power_down/set_primary index ActionIndex.building_ids
+    via the shared unit_slot head — mask with building_valid so sampling does
+    not collapse onto unit-own slots when #buildings != #units.
+    Missing building_valid (old traj / tests) falls back to own.
+    """
+    if building_valid is None:
+        return own
+    t = t_idx.long().reshape(-1)
+    use_b = _USE_B.to(device=t.device, non_blocking=True)[t]
+    bv = building_valid.bool().to(device=own.device, non_blocking=True)
+    own_b = own.bool()
+    if bv.shape != own_b.shape:
+        B, U = own_b.shape
+        if bv.dim() == 1:
+            bv = bv.unsqueeze(0).expand(B, -1)
+        if bv.size(-1) < U:
+            pad = bv.new_zeros(B, U - bv.size(-1))
+            bv = torch.cat([bv, pad], dim=-1)
+        elif bv.size(-1) > U:
+            bv = bv[..., :U]
+    return torch.where(use_b.unsqueeze(-1), bv, own_b)
 
 
 def build_type_masks(obs) -> torch.Tensor:
@@ -683,7 +710,9 @@ class AlphaLiteNet(nn.Module):
         t_idx = lt.argmax(dim=-1) if greedy else \
             self._categorical(lt / temperature).sample()
 
-        ls_u = self._scores_unit(new_hidden, t_idx, feats, own, role_ids)
+        slot_legal = _slot_legal_for_types(
+            t_idx, own, batch.get("building_valid"))
+        ls_u = self._scores_unit(new_hidden, t_idx, feats, slot_legal, role_ids)
         dist_u = self._categorical(ls_u)
         u_idx = ls_u.argmax(dim=-1) if greedy else \
             self._categorical(ls_u / temperature).sample()
@@ -795,7 +824,9 @@ class AlphaLiteNet(nn.Module):
         )
         t_idx = actions["type"]
         dist_t = self.dist_type(new_hidden, batch["type_mask"])
-        dist_u = self.dist_unit(new_hidden, t_idx, feats, own, role_ids)
+        slot_legal = _slot_legal_for_types(
+            t_idx, own, batch.get("building_valid"))
+        dist_u = self.dist_unit(new_hidden, t_idx, feats, slot_legal, role_ids)
         dist_c = self.dist_cell(
             fmap, t_idx, batch["cell_mask"], new_hidden,
             tokens, feats, valid, actions["unit_slot"],
@@ -864,7 +895,9 @@ class AlphaLiteNet(nn.Module):
             tok_f = tokens.float()
             feats_f = feats.float()
             dist_t = self.dist_type(h_f, batch["type_mask"])
-            dist_u = self.dist_unit(h_f, t_idx, feats_f, own, role_ids)
+            slot_legal = _slot_legal_for_types(
+                t_idx, own, batch.get("building_valid"))
+            dist_u = self.dist_unit(h_f, t_idx, feats_f, slot_legal, role_ids)
             u_idx = actions["unit_slot"].reshape(-1)
             dist_c = self.dist_cell(
                 fmap_f, t_idx, batch["cell_mask"], h_f,
@@ -994,7 +1027,7 @@ def _stack_steps(steps, device):
             "type_mask", "cell_mask", "item_indices", "item_mask")
     batch = {k: _cat_field(steps, bget(k), device) for k in keys}
     for k in ("train_slot_mask", "build_slot_mask",
-              "unit_role_ids", "unit_own_mask"):
+              "unit_role_ids", "unit_own_mask", "building_valid"):
         if all(s["batch"].get(k) is not None for s in steps):
             batch[k] = _cat_field(steps, bget(k), device)
         elif k in ("train_slot_mask", "build_slot_mask"):

@@ -44,18 +44,21 @@ P0 (rama `exp/ra-completo-p0`): path singular harv→celda **existe** (unit head
 
 **Estado:** cerrado en `exp/ra-completo-p0` (rebase sobre `alphalite-v2` / AMP `dfb2b02`). Tip: `fe02a7c`. Tests: `test_ra_completo_p0`, `test_alphalite_v2`, `test_onboard`.
 
-### P1 — Building slot head (sell / repair / rally / power_down / set_primary) — IN PROGRESS
+### P1 — Building slot head (sell / repair / rally / power_down / set_primary) — USABLE (reusa unit head)
 
-- [~] Path de **building slot** (scaffold): `sell`, `repair`, `set_rally_point`, `power_down`, `set_primary` en `ENABLED_TYPES`; `ActionIndex.building_ids` + máscara hasta que haya edificios; `index_to_command` emite `CommandModel` con `actor_id` del slot (unit_slot → building_ids). Sin cabeza neural dedicada aún (reusa unit head).
-- [ ] Cabeza neural dedicada / `building_valid` en sampling (hoy unit_valid).
-- [x] No mezclar con el mismo corte que crece type-head + maps (un régimen por vez) — P1 reusa filas ya existentes en `ACTION_TYPES` (sin crecer type-head).
+- [x] Path de **building slot**: `sell`, `repair`, `set_rally_point`, `power_down`, `set_primary` en `ENABLED_TYPES`; `ActionIndex.building_ids` + máscara de tipo si no hay edificios; `index_to_command` emite `CommandModel` correcto (`actor_id`; rally + `target_x/y`).
+- [x] Sampling/act/eval: la unit head usa **`building_valid`** cuando el tipo ∈ `TYPES_USE_BUILDING` (batch en `_batch_of`, `_sample_ar` / `evaluate_actions` / BPTT). Así el slot no colapsa al own-mask de unidades.
+- [x] `command_to_indices` mapea `actor_id` → slot de `building_ids` (SIL/teacher).
+- [ ] Cabeza neural **dedicada** a edificios (hoy reusa unit feats/scorer sobre el mismo slot index).
+- [x] No mezclar con el mismo corte que crece type-head + maps — P1 reusa filas ya existentes en `ACTION_TYPES` (sin crecer type-head).
 
-**Estado:** scaffold en `exp/ra-completo-p0`. Tests: `test_ra_completo_p1`. Land macros intactos.
+**Estado:** usable en `exp/ra-completo-p0` (sin cabeza dedicada). Tests: `test_ra_completo_p1`. Land macros intactos.
 
-### P2 — Micro: group stance / stop, focus fire
+### P2 — Micro: group stance / stop, focus fire (+ guard)
 
 - [ ] Stance / stop a nivel **grupo** (no solo unidad suelta).
 - [ ] Focus fire (elegir target actor con intención de foco, no solo attack-move a celda).
+- [ ] Habilitar RL **`guard`** (OpenRA Guard-on-actor = escoltar harvesters/MCV). Ya está en ActionType / proto / MCP / `guard_target`; falta en `ENABLED_TYPES` + `index_to_command`. Escolta clásica C&C; limitaciones del engine (rango). (P0.5/P2 micro.)
 
 ### P3 — Producción RA completa + mapas agua/aire + spawn variety
 

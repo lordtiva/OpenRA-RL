@@ -36,6 +36,20 @@ from rl.economy_race import EconomyRace
 from rl.auto_support import apply_dest_credit, support_commands
 
 
+
+def _pad_building_valid(building_valid, width: int) -> torch.Tensor:
+    """Pad/truncate ActionIndex.building_valid (MAX_UNITS) to unit mask width."""
+    bv = building_valid if torch.is_tensor(building_valid) else torch.as_tensor(
+        building_valid, dtype=torch.bool)
+    bv = bv.bool().reshape(-1)
+    w = int(width)
+    if bv.numel() == w:
+        return bv
+    if bv.numel() < w:
+        return torch.cat([bv, bv.new_zeros(w - bv.numel())], dim=0)
+    return bv[:w]
+
+
 def _batch_of(obs, vocab, device, belief: EnemyBeliefStore | None = None):
     """Observación del env -> dict de tensores para la red (+ActionIndex)."""
     h = max(obs.map_info.height, 1)
@@ -67,6 +81,9 @@ def _batch_of(obs, vocab, device, belief: EnemyBeliefStore | None = None):
         "item_mask": aidx.item_mask.unsqueeze(0).to(device),
         "train_slot_mask": aidx.train_slot_mask.unsqueeze(0).to(device),
         "build_slot_mask": aidx.build_slot_mask.unsqueeze(0).to(device),
+        # P1: pad to unit_valid width (MAX_TOKENS); act masks via building_valid
+        "building_valid": _pad_building_valid(
+            aidx.building_valid, unit_valid.shape[-1]).unsqueeze(0).to(device),
     }, aidx
 
 
