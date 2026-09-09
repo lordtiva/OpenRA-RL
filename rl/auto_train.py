@@ -34,6 +34,8 @@ Uso:  .venv/Scripts/python.exe rl/auto_train.py
       .venv/Scripts/python.exe rl/auto_train.py --scratch --onboard --onboard-rush 8
       .venv/Scripts/python.exe rl/auto_train.py --onboard --onboard-rewind 24
       .venv/Scripts/python.exe rl/auto_train.py --onboard --onboard-collect-only
+      .venv/Scripts/python.exe rl/auto_train.py --onboard --onboard-map-pool official_2p_small
+      .venv/Scripts/python.exe rl/auto_train.py --map-pool official_2p_small
       .venv/Scripts/python.exe rl/auto_train.py --no-collapse
 Ctrl+C para parar todo.
 
@@ -44,6 +46,11 @@ Flags del launcher (no van a rl.train):
   --onboard-rewind N
                   Una vez, en B: latest <- best/iterN, trunca metrics/race.
                   λ_bc se queda en el piso (no reinicia a 1.0).
+  --onboard-map-pool NAME
+                  P3: pool de mapas para curriculum (ej. official_2p_small).
+                  Default vacio = --scenario a_short (sin pool).
+  --map-pool NAME  Igual que --onboard-map-pool; tambien aplica sin --onboard
+                  (inyecta --map-pool en TRAIN_ARGS).
   --collapse / --no-collapse
                   watchdog COLAPSO (politica muerta) + SEQUIA wr20
                   que restaura best.pt (default: --collapse). Fase A
@@ -70,6 +77,27 @@ _collect_only = False
 _collect_target = 40
 # Seed de emergencia si ckpts_v2 no tiene latest/iter (sigue en el árbol v1.1).
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
+
+
+def apply_map_pool_arg(pool: str | None) -> None:
+    """Inject --map-pool into TRAIN_ARGS when set (non-empty).
+
+    Empty/None leaves default --scenario a_short alone (MAIN C resume safe).
+    """
+    global TRAIN_ARGS
+    pool = (pool or "").strip()
+    if not pool:
+        return
+    from rl import map_catalog as mapcat
+    parsed = mapcat.parse_pool_arg(pool)
+    if not parsed:
+        raise SystemExit(f"invalid --map-pool / --onboard-map-pool: {pool!r}")
+    args = list(TRAIN_ARGS)
+    if "--map-pool" in args:
+        args[args.index("--map-pool") + 1] = pool
+    else:
+        args.extend(["--map-pool", pool])
+    TRAIN_ARGS = args
 
 
 def apply_ckpt_dir(rel: str) -> None:
@@ -672,6 +700,15 @@ def parse_auto_args(argv=None):
              "metrics y economy_race a iter<=N. λ_bc sigue en el piso "
              "(no reinicia a 1.0). Desde C vuelve a B. Una vez.")
     ap.add_argument(
+        "--onboard-map-pool", default=None, metavar="NAME",
+        help="P3 curriculum map pool (official_2p_small|mixed|water|land "
+             "or comma keys). Default unset = a_short only. "
+             "Persisted in curriculum.json; resume without key stays land.")
+    ap.add_argument(
+        "--map-pool", default=None, metavar="NAME",
+        help="Alias of --onboard-map-pool. Without --onboard, injects "
+             "--map-pool into TRAIN_ARGS (default a_short unchanged).")
+    ap.add_argument(
         "--collapse", action=argparse.BooleanOptionalAction, default=True,
         help="Watchdog de politica muerta / sequia wr20 que restaura best.pt "
              "(default: on). Fase A lo ignora. Usa --no-collapse para "
@@ -737,6 +774,8 @@ def _init_onboard(args) -> None:
         _replay_tapes = False
         return
     _replay_tapes = False
+    pool_cli = (getattr(args, "onboard_map_pool", None)
+                or getattr(args, "map_pool", None) or "").strip()
     overrides = {
         "sft_iters": int(args.onboard_sft_iters),
         "a_promote_wr20": float(args.onboard_a_promote_wr20),
@@ -748,6 +787,9 @@ def _init_onboard(args) -> None:
         "bc_games": int(args.onboard_bc_games),
         "a_eval_games": int(args.onboard_eval_games),
     }
+    # Only overwrite stored curriculum map_pool when CLI explicitly sets it.
+    if pool_cli:
+        overrides["map_pool"] = pool_cli
     existing = ob.load_curriculum(CURRICULUM)
     if existing and not args.scratch:
         _onboard = existing
@@ -846,7 +888,21 @@ def main():
         apply_ckpt_dir(args.ckpt_dir)
     else:
         apply_ckpt_dir(CKPT_DIR_REL)  # sync TRAIN_ARGS with default
+    pool = (getattr(args, "onboard_map_pool", None)
+            or getattr(args, "map_pool", None) or "")
+    # Non-onboard: inject into TRAIN_ARGS. Onboard: curriculum map_pool
+    # is applied via build_train_argv; still inject so plain launches see it.
+    apply_map_pool_arg(pool)
     _init_onboard(args)
+    if _onboard is not None:
+        cur_pool = str(_onboard.get("map_pool") or "").strip()
+        if cur_pool and not str(pool or "").strip():
+            apply_map_pool_arg(cur_pool)
+            log(f"onboard map_pool from curriculum: {cur_pool}")
+        elif str(pool or "").strip():
+            _onboard["map_pool"] = str(pool).strip()
+            ob.save_curriculum(CURRICULUM, _onboard)
+            log(f"onboard map_pool: {pool}")
     if args.scratch and not args.onboard:
         os.environ["FORCE_SCRATCH"] = "1"
     collapse_watch = bool(args.collapse)

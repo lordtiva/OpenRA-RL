@@ -47,6 +47,8 @@ DEFAULTS = {
     "c_mix_from": "beginner",
     "c_mix_warmup": 40,
     "c_mix_start": 0.25,
+    # P3 opt-in: named pool or comma keys ("" = a_short via TRAIN_ARGS --scenario).
+    "map_pool": "",
 }
 
 # Flags that TRAIN_ARGS may set and that a phase must replace or drop.
@@ -69,6 +71,7 @@ _STRIP = {
     "--lr", "--adv-mode",
     "--mix-from", "--mix-warmup", "--mix-start", "--mix-start-iter",
     "--amp-init-scale", "--no-amp",
+    "--map-pool",
 }
 
 
@@ -156,6 +159,7 @@ def save_curriculum(path: str | Path, cfg: dict) -> None:
         "c_mix_from": str(cfg.get("c_mix_from") or DEFAULTS["c_mix_from"]),
         "c_mix_warmup": int(cfg.get("c_mix_warmup", DEFAULTS["c_mix_warmup"])),
         "c_mix_start": float(cfg.get("c_mix_start", DEFAULTS["c_mix_start"])),
+        "map_pool": str(cfg.get("map_pool") or DEFAULTS.get("map_pool") or ""),
         "a_launched": bool(cfg.get("a_launched")),
         "c_reset_opt_done": bool(cfg.get("c_reset_opt_done")),
         "phase_started_iter": int(cfg.get("phase_started_iter") or 0),
@@ -288,8 +292,15 @@ def build_train_argv(base: list[str], phase: str, cfg: dict) -> list[str]:
     """TRAIN_ARGS minus opponent/imitation flags, plus phase overlay.
 
     Last flag wins for duplicated keys that we re-add (macro-ticks, etc.).
+    Opt-in map pool via cfg["map_pool"] / --onboard-map-pool; empty keeps
+    TRAIN_ARGS --scenario a_short (C resume / MAIN land patterns unchanged).
     """
-    return strip_flags(list(base)) + phase_flags(phase, cfg)
+    argv = strip_flags(list(base)) + phase_flags(phase, cfg)
+    pool = str((cfg or {}).get("map_pool") or "").strip()
+    if pool:
+        argv = strip_flags(argv, {"--map-pool"})
+        argv.extend(["--map-pool", pool])
+    return argv
 
 
 def should_resume(cfg: dict | None) -> bool:

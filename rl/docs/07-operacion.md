@@ -211,8 +211,10 @@ Detalle historico de cortes: docs `13`–`21`. Regla practica ahora:
 ## P3 map pools
 
 - Catalog: rl/map_catalog.py (official OpenRA titles / display_name).
-- Default train / auto_train: a_short (lakes OK; navy gated).
-- Small curated pool: --map-pool official_2p_small
-  (a_short + Doughnut / Bombardment Islands / Tournament Island / X-Lake).
+- Default train / auto_train: a_short (lakes OK; navy gated). Long `fase2_a` archived.
+- Small curated pool: `--map-pool official_2p_small` or
+  `--onboard-map-pool official_2p_small` (a_short + Doughnut / Bombardment Islands /
+  Tournament Island / X-Lake).
 - Also: land | mixed | water (water = naval-viable mixed land-water, not pure-water).
+- Onboard persists `map_pool` in curriculum.json; unset resume stays a_short.
 - Details: 23-ra-completo-todo.md.

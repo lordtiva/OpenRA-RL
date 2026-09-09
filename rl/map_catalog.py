@@ -65,10 +65,12 @@ class MapEntry:
 
 # Explicit inventory (CLI keys). fase2_* keep legacy --scenario names.
 MAP_CATALOG: dict[str, MapEntry] = {
+    # Soft-deprecated: long fase2_a.oramap lives in rl/scenarios/_archive/.
+    # Key "a" aliases a_short so old CLIs keep working.
     "a": MapEntry(
-        "a", "fase2_a.oramap", True, "fase2",
-        display_name="Singles (fase2_a prebuilt)",
-        notes="legacy prebuilt; lakes possible; navy gated",
+        "a", "fase2_a_short.oramap", True, "fase2",
+        display_name="DEPRECATED alias of a_short",
+        notes="use a_short; long fase2_a.oramap archived under _archive/",
         naval_viable=False,
     ),
     "a_short": MapEntry(
@@ -166,9 +168,9 @@ def normalize_key(raw: str | None) -> str:
         s = s[len("stock_") :]
     # Official hyphenated basenames → catalog keys
     s = s.replace("-", "_")
-    # Legacy CLI: --scenario A / a
+    # Legacy CLI: --scenario A / a → a_short (long fase2_a archived)
     if s == "a":
-        return "a"
+        return "a_short"
     return s
 
 

@@ -154,17 +154,22 @@ class ScriptedTeacher(ScriptedBot):
         return commands
 
     def _optional_naval_air(self, obs: OpenRAObservation, existing: List[CommandModel] | None = None) -> List[CommandModel]:
-        """P3 light optional navy/air when the map supports it.
+        """P3 light optional navy/air + production on water maps.
 
         Land/a_short: no-op (catalog forbids navy). Water maps: after barracks,
-        queue one shipyard if available and cash allows. Air: one helipad if
-        available and we already have a war factory (or barracks) and cash.
-        Does not force navy on land-only maps.
+        queue one shipyard if available and cash allows; once a yard exists,
+        TRAIN one light ship. Air: one helipad after war factory/barracks, then
+        TRAIN one heli. Does not force navy on land-only maps.
         """
         from rl.map_catalog import allows_naval, allows_airbase_optional
         if any(getattr(c, 'action', None) == ActionType.BUILD for c in (existing or [])):
             return []
+        # Avoid stacking another TRAIN on the same decide tick.
+        if any(getattr(c, 'action', None) == ActionType.TRAIN for c in (existing or [])):
+            return []
         map_name = str(getattr(getattr(obs, "map_info", None), "map_name", "") or "")
+        if not allows_naval(map_name):
+            return []
         out: List[CommandModel] = []
         own = {str(getattr(b, "type", "") or "").lower() for b in (obs.buildings or [])}
         queued = {
@@ -177,20 +182,29 @@ class ScriptedTeacher(ScriptedBot):
             and float(getattr(p, "progress", 0) or 0) < 0.99
             for p in (obs.production or [])
         )
+        ship_busy = any(
+            str(getattr(p, "queue_type", "") or "").lower() in
+            ("ship", "ships", "naval", "boat", "boats")
+            and float(getattr(p, "progress", 0) or 0) < 0.99
+            for p in (obs.production or [])
+        )
+        air_busy = any(
+            str(getattr(p, "queue_type", "") or "").lower() in
+            ("aircraft", "plane", "planes", "heli", "helicopter")
+            and float(getattr(p, "progress", 0) or 0) < 0.99
+            for p in (obs.production or [])
+        )
         cash = int(getattr(obs.economy, "cash", 0) or 0)
-        # Naval: one syrd/spen on water maps.
-        if allows_naval(map_name) and not building_busy and cash >= 1700:
+        # Naval yard: one syrd/spen.
+        if not building_busy and cash >= 1500:
             if not (own & {"syrd", "spen"}) and not (queued & {"syrd", "spen"}):
                 for item in ("syrd", "spen"):
                     if self._can_produce_item(obs, item):
                         out.append(CommandModel(action=ActionType.BUILD, item_type=item))
                         self._log(f"P3 optional naval BUILD {item} ({map_name})")
                         return out
-        # Air: light helipad/airfield after basic production exists.
-        if (allows_airbase_optional(map_name) and allows_naval(map_name)
-                and not building_busy and cash >= 1500):
-            # Gate air optional on water curriculum for now (avoid land SFT drift).
-            # TODO(P3+): optional air on land when --teacher-air or airfield maps exist.
+        # Airbase after basic production exists.
+        if allows_airbase_optional(map_name) and not building_busy and cash >= 1500:
             if not (own & {"hpad", "afld"}) and not (queued & {"hpad", "afld"}):
                 has_prod = bool(own & ({"weap"} | self.BARRACKS_TYPES))
                 if has_prod:
@@ -199,6 +213,20 @@ class ScriptedTeacher(ScriptedBot):
                             out.append(CommandModel(action=ActionType.BUILD, item_type=item))
                             self._log(f"P3 optional airbase BUILD {item} ({map_name})")
                             return out
+        # Production: one light ship once a yard is up.
+        if (own & {"syrd", "spen"}) and not ship_busy and cash >= 500:
+            for item in ("dd", "pt", "ss", "ca", "msub"):
+                if self._can_produce_item(obs, item):
+                    out.append(CommandModel(action=ActionType.TRAIN, item_type=item))
+                    self._log(f"P3 optional naval TRAIN {item} ({map_name})")
+                    return out
+        # Production: one heli once a pad is up.
+        if (own & {"hpad", "afld"}) and not air_busy and cash >= 900:
+            for item in ("heli", "hind", "yak", "mig"):
+                if self._can_produce_item(obs, item):
+                    out.append(CommandModel(action=ActionType.TRAIN, item_type=item))
+                    self._log(f"P3 optional air TRAIN {item} ({map_name})")
+                    return out
         return out
 
     def _refresh_contact(self, obs: OpenRAObservation) -> None:

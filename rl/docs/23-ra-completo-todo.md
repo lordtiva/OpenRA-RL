@@ -87,12 +87,29 @@ P0 (rama `exp/ra-completo-p0`): path singular harv→celda **existe** (unit head
 - [x] Spawn/layout variety hook: --map-pool (>=2 mapas). Multi spawn rotation del engine no hookeado (documentado).
 - [ ] Arbol RA completo en teacher (tech/defense push sistematico) ? aun land-first; solo navy/air light.
 - [ ] Mapas aire dedicados / prebuilt fase2 water con base ? blocked on scenario authoring.
-- [ ] Curriculum onboard JSON flag para pool water/official_2p_small ? hook train listo; onboard/auto_train aun no lo setea.
+- [x] Curriculum onboard / auto_train map-pool flag.
+  - `--onboard-map-pool official_2p_small` (o `mixed` / `water` / comma keys).
+  - Alias `--map-pool` (con o sin `--onboard`): inyecta en TRAIN_ARGS.
+  - Default unset = `--scenario a_short` (C resume / MAIN land intacto).
+  - Persistido en `curriculum.json` como `map_pool`; resume sin key = land.
+- [x] `fase2_a.oramap` archivado en `rl/scenarios/_archive/`; activo solo
+  `fase2_a_short`. Catalog key `a` soft-alias → `a_short`.
+- [x] Teacher: optional TRAIN ship/heli after syrd/hpad on navy-viable maps.
 
-**Estado (2026-09-09):** cleanup P3 en exp/ra-completo-p0. Tests: test_ra_completo_p3.
-Pool official_2p_small: a_short (A-short/Singles short), Doughnut, Bombardment Islands,
-Tournament Island, X-Lake. Como correr: python -m rl.train --map-pool official_2p_small ...
-(o auto_train sin pool = a_short).
+**Estado (2026-09-09):** P3 map-pool + archive cleanup en exp/ra-completo-p0.
+Tests: test_ra_completo_p3 (+ onboard map_pool argv).
+Pool official_2p_small: a_short, Doughnut, Bombardment Islands,
+Tournament Island, X-Lake.
+
+Como correr:
+```
+# train directo
+python -m rl.train --map-pool official_2p_small ...
+# auto_train / onboard (default sigue a_short si no pasas pool)
+.venv/Scripts/python.exe rl/auto_train.py --map-pool official_2p_small
+.venv/Scripts/python.exe rl/auto_train.py --scratch --onboard --onboard-map-pool official_2p_small
+```
+
 
 ### P4 — Obs / dash para naval y air
 

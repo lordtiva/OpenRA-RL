@@ -1,9 +1,11 @@
-﻿# Archived scenarios
+# Archived scenarios
 
 Moved out of the active `rl/scenarios/` pool (P3 cleanup):
 
 - `fase2_probe*.oramap`, `fase2_amin160*`, `fase2_a_minus_short` — unused
   curriculum probes; kept for archaeology only.
+- `fase2_a.oramap` — long Singles prebuilt; active pool keeps only `fase2_a_short`.
+  Catalog key `a` soft-aliases to `a_short`.
 - `stock_doughnut.oramap`, `stock_bombardment_islands.oramap` — old vendored
   renames. Active catalog prefers official OpenRA basenames
   (`doughnut.oramap`, `bombardment-islands.oramap`) from

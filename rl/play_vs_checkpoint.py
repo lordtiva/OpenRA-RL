@@ -24,12 +24,12 @@ Uso (PowerShell, desde la raiz del repo):
 
     # Opciones útiles:
     python -m rl.play_vs_checkpoint --ckpt rl/ckpts/iter0010.pt --bot-type hard --episodes 3 --greedy
-    python -m rl.play_vs_checkpoint --ckpt rl/ckpts/latest.pt --scenario a --bot-type beginner
+    python -m rl.play_vs_checkpoint --ckpt rl/ckpts/latest.pt --scenario a_short --bot-type beginner
     python -m rl.play_vs_checkpoint --ckpt rl/ckpts/latest.pt --temperature 0.0  # greedy
     python -m rl.play_vs_checkpoint --ckpt rl/ckpts/latest.pt --url http://localhost:8000 --verbose
 
 Notas:
-  - --scenario a usa rl/scenarios/fase2_a.oramap (tiene slot enemigo; el mapa
+  - --scenario a_short usa rl/scenarios/fase2_a_short.oramap (slot enemigo; el mapa
     por defecto del contenedor NO spawna bot C# -> partida vacía).
   - --greedy equivale a --temperature 0 (determinístico, mejor para ver qué
     sabe hacer el checkpoint).
@@ -208,7 +208,7 @@ def main():
     ap.add_argument("--ckpt", default="rl/ckpts/latest.pt", help="ruta al .pt (default: rl/ckpts/latest.pt)")
     ap.add_argument("--url", default="http://localhost:8000", help="URL del server (default: http://localhost:8000)")
     ap.add_argument("--bot-type", default="beginner", help="dificultad rival: beginner/easy/hard/brutal/rush/turtle (default: beginner, ''=deshabilitar)")
-    ap.add_argument("--scenario", default=None, help="escenario fase2 (ej: a, a_short, amin160_short). Usa rl/scenarios/fase2_<X>.oramap con slot enemigo")
+    ap.add_argument("--scenario", default=None, help="escenario catalog (ej: a_short, doughnut). Legacy key a → a_short. fase2_a.oramap archived; active = fase2_a_short")
     ap.add_argument("--episodes", type=int, default=1, help="cuántas partidas jugar (default: 1)")
     ap.add_argument("--seed", type=int, default=42, help="seed base (se suma offset por episodio)")
     ap.add_argument("--temperature", type=float, default=1.0, help="temperatura de muestreo (0=greedy)")

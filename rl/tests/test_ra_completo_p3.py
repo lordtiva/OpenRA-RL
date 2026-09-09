@@ -188,3 +188,52 @@ def test_teacher_optional_naval_on_water():
     assert len(out) == 1
     assert out[0].action == ActionType.BUILD
     assert out[0].item_type in ("syrd", "spen")
+
+
+def test_legacy_key_a_aliases_a_short():
+    e = mapcat.get_entry("a")
+    assert e.key == "a_short"
+    assert e.file_name == "fase2_a_short.oramap"
+    assert mapcat.normalize_key("a") == "a_short"
+    assert mapcat.normalize_key("fase2_a") == "a_short"
+
+
+def test_fase2_a_only_in_archive():
+    active = mapcat.SCENARIOS_DIR / "fase2_a.oramap"
+    archived = mapcat.SCENARIOS_DIR / "_archive" / "fase2_a.oramap"
+    assert not active.exists(), "long fase2_a should be archived"
+    assert archived.exists()
+    assert (mapcat.SCENARIOS_DIR / "fase2_a_short.oramap").exists()
+
+
+def test_onboard_map_pool_injects_argv():
+    from rl.onboard import build_train_argv, new_curriculum
+    base = ["python", "-m", "rl.train", "--scenario", "a_short", "--sil"]
+    cfg = new_curriculum({"map_pool": "official_2p_small"})
+    argv = build_train_argv(base, "C", cfg)
+    assert "--map-pool" in argv
+    assert argv[argv.index("--map-pool") + 1] == "official_2p_small"
+    # empty pool: no --map-pool (C resume / MAIN land)
+    cfg2 = new_curriculum({"map_pool": ""})
+    argv2 = build_train_argv(base, "C", cfg2)
+    assert "--map-pool" not in argv2
+
+
+def test_teacher_optional_naval_trains_ship_after_yard():
+    from rl.scripted_teacher import ScriptedTeacher
+    from openra_env.models import ActionType
+
+    class _T(ScriptedTeacher):
+        def _can_produce_item(self, obs, item_type):
+            return item_type in (obs.available_production or [])
+
+    t = _T(verbose=False)
+    obs = _Obs(map_name="doughnut.oramap",
+               available=["dd", "pt", "heli"],
+               buildings=[_B("proc"), _B("tent", aid=2), _B("syrd", aid=3)],
+               units=[_U("harv")])
+    obs.economy.cash = 2000
+    out = t._optional_naval_air(obs, [])
+    assert len(out) == 1
+    assert out[0].action == ActionType.TRAIN
+    assert out[0].item_type in ("dd", "pt", "ss", "ca", "msub")
