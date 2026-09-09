@@ -116,7 +116,7 @@ check("C easy sin reset-opt", fc[fc.index("--bot-type") + 1] == "easy"
       and "--reset-opt" not in fc)
 check("C lr 2e-5 (igual B)", fc[fc.index("--lr") + 1] == "2.0e-5")
 check("C adv-mode global", fc[fc.index("--adv-mode") + 1] == "global")
-check("C amp-init-scale 8", fc[fc.index("--amp-init-scale") + 1] == "8")
+check("C no-amp", "--no-amp" in fc and "--amp-init-scale" not in fc)
 check("C mix-from beginner", fc[fc.index("--mix-from") + 1] == "beginner")
 check("C mix-warmup 40", fc[fc.index("--mix-warmup") + 1] == "40")
 check("C mix-start 0.25", fc[fc.index("--mix-start") + 1] == "0.25")

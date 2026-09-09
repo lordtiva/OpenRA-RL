@@ -222,6 +222,7 @@ async def amain(args):
         clip_eps=args.clip_eps, max_grad_norm=args.max_grad_norm,
         burn_in_len=args.burn_in,
         amp_init_scale=float(getattr(args, "amp_init_scale", 0) or 0) or None,
+        use_amp=False if getattr(args, "no_amp", False) else None,
     )
 
     start_iter = 0
@@ -1185,8 +1186,10 @@ def main():
     ap.add_argument("--mix-start-iter", type=int, default=0,
                     help="Iter donde P=mix-start (0 = primer iter de este run).")
     ap.add_argument("--amp-init-scale", type=float, default=0.0,
-                    help="GradScaler init. 0 = default PyTorch (65536). "
-                         "Fase C usa 8 para no skipear el primer PPO.")
+                    help="GradScaler init. 0 = default PyTorch (65536).")
+    ap.add_argument("--no-amp", action="store_true",
+                    help="Disable CUDA AMP (fp32). Phase C must not use AMP: "
+                         "skip_frac=1.0 killed learning.")
     ap.add_argument("--roles-vocab", action="store_true",
                     help="Traductor universal: sembrar la cabeza de items con "
                          "ROLES funcionales estables (rl.roles) en vez de "

@@ -376,7 +376,7 @@ Al promover B→C se copia `best.pt` → `best_B.pt`. C **no** pisa ese best con
 - Mismos pesos, **mismos knobs que B**: `--lr 2.0e-5`, `--adv-mode global`, Adam de B (**sin** `--reset-opt`).
 - **Sin BC.** El teacher no es experto vs easy; clonarías perder. El ancla es SIL (elite persistido en `elite.pt`) + mix de rival.
 - **Rampa suave** `--mix-from beginner`: P(easy) sube de **0.25 → 1.0** en 40 iters. wr20 / best.pt / promote **solo vs easy**. Beginner wins llenan SIL al arrancar.
-- AMP arranca en scale **8** (no 65536). Si `amp_skip_frac` ≥ 0.5 el log avisa; tras 2 floors AMP off (fp32).
+- **C must not use AMP** (--no-amp): skip_frac=1.0 killed learning. Do not pass --amp-init-scale on C.
 - Sequía: ignora el pico wr20 de B. En C no restaura hasta `min_iters` **y** un pico propio vs easy. H=0 de PPO skipped no cuenta como política muerta si el rollout sigue entrenando/raseando.
 
 El wr vs easy se cae al principio. Es normal (Run 11: salto a easy = 0/140). Lo que **no** es normal es H=clip=gn=0 durante decenas de iters — eso es PPO skipeado, no transferencia.

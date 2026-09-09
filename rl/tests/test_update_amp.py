@@ -151,6 +151,8 @@ check("ppo batched n samples", st.get("n") == 3)
 check("ppo reporta amp_skip_frac", st.get("amp_skip_frac") is not None)
 tr8 = PPOTrainer(AlphaLiteNet(), lr=1e-4, device="cpu", amp_init_scale=8)
 check("amp_init_scale no crashea en cpu", tr8.scaler is not None)
+tr_off = PPOTrainer(AlphaLiteNet(), lr=1e-4, device="cpu", use_amp=False)
+check("use_amp=False fuerza amp off", tr_off.use_amp is False)
 
 print("=== GradScaler collapse reset ===")
 

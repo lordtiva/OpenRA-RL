@@ -54,7 +54,7 @@ DEFAULTS = {
 _STORE_TRUE = {
     "--pfsp", "--pfsp-rl", "--bc", "--bc-only", "--sil",
     "--reset-opt", "--bc-keep-incomplete", "--bc-replay",
-    "--bc-collect-only",
+    "--bc-collect-only", "--no-amp",
 }
 _STRIP = {
     "--bot-type", "--pfsp", "--pfsp-rl", "--pfsp-pool", "--pfsp-anchor-prob",
@@ -68,7 +68,7 @@ _STRIP = {
     "--iters", "--reset-opt", "--onboard-phase",
     "--lr", "--adv-mode",
     "--mix-from", "--mix-warmup", "--mix-start", "--mix-start-iter",
-    "--amp-init-scale",
+    "--amp-init-scale", "--no-amp",
 }
 
 
@@ -270,7 +270,8 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             # Same knobs as B: 1e-4 + Adam fresco + episode adv killed C.
             "--lr", "2.0e-5",
             "--adv-mode", "global",
-            "--amp-init-scale", "8",
+            # C must not use AMP: skip_frac=1.0 killed learning.
+            "--no-amp",
             "--mix-from", str(cfg.get("c_mix_from") or DEFAULTS["c_mix_from"]),
             "--mix-warmup", str(int(
                 cfg.get("c_mix_warmup", DEFAULTS["c_mix_warmup"]))),

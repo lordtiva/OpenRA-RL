@@ -175,7 +175,8 @@ class PPOTrainer:
                  clip_eps: float = 0.2, vf_coef: float = 0.5,
                  ent_lo: float = 0.01, ent_hi: float = 0.04,
                  max_grad_norm: float = 0.5, bptt_len: int = 32,
-                 burn_in_len: int = 0, amp_init_scale: float | None = None):
+                 burn_in_len: int = 0, amp_init_scale: float | None = None,
+                 use_amp: bool | None = None):
         self.net = net.to(device)
         self.opt = torch.optim.Adam(self.net.parameters(), lr=lr)
         self.device = device
@@ -186,11 +187,14 @@ class PPOTrainer:
         self.max_grad_norm = max_grad_norm
         self.bptt_len = bptt_len  # longitud de segmento para BPTT truncado
         self.burn_in_len = max(0, int(burn_in_len))
+        if use_amp is None:
+            self.use_amp = device == "cuda" and torch.cuda.is_available()
+        else:
+            self.use_amp = bool(use_amp) and device == "cuda" and torch.cuda.is_available()
         init_scale = None
         if amp_init_scale is not None and float(amp_init_scale) > 0:
             init_scale = float(amp_init_scale)
-        self.scaler = _make_scaler(device, init_scale=init_scale)
-        self.use_amp = device == "cuda" and torch.cuda.is_available()
+        self.scaler = _make_scaler(device, init_scale=init_scale, enabled=self.use_amp)
         self._amp_floor_hits = 0
         self._mb_seen = 0
         self._mb_applied = 0
