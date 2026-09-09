@@ -3,7 +3,7 @@
 > **Para quién:** cuando quieras ampliar el action set / mapas más allá del land-only
 > de Phase A/B (naval, air, buildings UI, micro).
 >
-> **Fecha:** 2026-09-08.
+> **Fecha:** 2026-09-08 (P0 cerrado 2026-09-09 en `exp/ra-completo-p0` @ fe02a7c).
 >
 > **Relacionado:** onboarding land `22-onboard.md`; operación diaria `07-operacion.md`;
 > índice `README.md`.
@@ -28,19 +28,21 @@ cerrar gaps de RA completo:
 
 | Cosa | Qué hace de verdad |
 |------|--------------------|
-| \harvesters_move\ | **Todas** las harvs MOVE a la **misma** celda (macro de grupo). |
-| Una sola harv + celda | Via **unit head**: \move\ / \ttack_move\ / \ttack\ sobre un harv emite **MOVE** a \(cx,cy)\ para **ese** \ctor_id\ (ya no se reescribe a \harvest\ sin celda). |
-| \harvest\ | Usa el harvester **seleccionado** si es válido; pasa \	arget_x/y\ (CommandModel/HARVEST lo acepta). Si la cabeza no apunta a un harv, fallback \_any_harvester\. |
+| `harvesters_move` | **Todas** las harvs MOVE a la **misma** celda (macro de grupo). |
+| Una sola harv + celda | Via **unit head**: `move` / `attack_move` / `attack` sobre un harv emite **MOVE** a `(cx,cy)` para **ese** `actor_id` (ya no se reescribe a `harvest` sin celda). |
+| `harvest` | Usa el harvester **seleccionado** si es válido; pasa `target_x/y` (CommandModel/HARVEST lo acepta). Si la cabeza no apunta a un harv, fallback `_any_harvester`. |
 
-P0 (rama \exp/ra-completo-p0\): path singular harv→celda **existe** (unit head + \harvest\+cell). El macro de grupo sigue siendo all→same cell.
+P0 (rama `exp/ra-completo-p0`): path singular harv→celda **existe** (unit head + `harvest`+cell). El macro de grupo sigue siendo all→same cell.
 
 ## TODO priorizado (P0 → P4)
 
-### P0 — Naval / air macros + bucket vehículo; harvest por harv (opcional)
+### P0 — Naval / air macros + bucket vehículo; harvest por harv (opcional) — DONE
 
-- [ ] Macros de grupo **naval** y **air** (análogos a `army_*` / `infantry_*` / `vehicle_*`).
-- [ ] Separar el bucket **vehicle** (hoy mezcla tierra; no alcanza para navy/air).
-- [ ] (Opcional) `harvest` / move con **celda por harvester** (no solo `harvesters_move` all→same cell).
+- [x] Macros de grupo **naval** y **air** (análogos a `army_*` / `infantry_*` / `vehicle_*`).
+- [x] Separar el bucket **vehicle** (hoy mezcla tierra; no alcanza para navy/air).
+- [x] (Opcional) `harvest` / move con **celda por harvester** (no solo `harvesters_move` all→same cell).
+
+**Estado:** cerrado en `exp/ra-completo-p0` (rebase sobre `alphalite-v2` / AMP `dfb2b02`). Tip: `fe02a7c`. Tests: `test_ra_completo_p0`, `test_alphalite_v2`, `test_onboard`.
 
 ### P1 — Building slot head (sell / repair / rally / power_down / set_primary)
 
