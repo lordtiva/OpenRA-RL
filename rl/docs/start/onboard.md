@@ -32,21 +32,13 @@ Comando: `.\.venv\Scripts\python.exe rl\auto_train.py --scratch --onboard` (desp
 
 El camino más corto que **viaja con el git** (sin pesos) es:
 
+1. **A** — clonar al `ScriptedTeacher` **rush** vs `beginner` (SFT, sin PPO)
+2. **B** — PPO + SIL + BC rifle vs `beginner` hasta wr20 ~50%
+3. **C** — teacher **expand** (weap + `1tnk` + mix `e3`) + PPO vs `easy` (mix beginner→easy)
+4. **D** — lo mismo vs `medium` (mix easy→medium)
+5. **E** — lo mismo vs `hard` (OpenRA `normal`; mix medium→hard) hasta wr20 ~50%
 
-
-1. **A** — clonar al `ScriptedTeacher` vs `beginner` (SFT, sin PPO)
-
-2. **B** — PPO + SIL + BC del teacher vs `beginner` hasta que wr20 se sostenga ~50%
-
-3. **C** — los mismos pesos vs `easy` hasta wr20 ~45% (sin teacher)
-
-
-
-Eso es lo que hace `auto_train.py --scratch --onboard`. No clona un best viejo. El experto es código (`rl/scripted_teacher.py`).
-
-
-
-Run 46 (~45% wr20 vs easy) **no** nació así: venía de una cadena de resumes. El onboarding mide *otro* reloj: horas desde un clone vacío hasta un agente que le gana a easy la mitad de las veces.
+Eso es lo que hace `auto_train.py --scratch --onboard`. Un solo comando. El experto es código (`rl/scripted_teacher.py`). `hard` en este repo es el bot **normal** de OpenRA, no un ModularBot llamado hard.
 
 
 
@@ -142,7 +134,7 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 
 | `--onboard-promote-wr20` | 0.50 | wr20 vs beginner para pasar B→C (× streak) |
 
-| `--onboard-done-wr20` | 0.45 | wr20 vs easy para marcar DONE |
+| `--onboard-done-wr20` | 0.50 | wr20 vs hard para marcar DONE |
 
 | `--onboard-streak` | 10 | Iters **seguidos** sobre el umbral (B y C; A no usa streak) |
 
@@ -156,7 +148,7 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 | `--onboard-collect` | — | Suma teacher games aunque ya haya tapes. |
 | `--onboard-collect-only` | — | Solo acumula `teacher_wins` hasta `--onboard-collect-target` (default 40); sin SFT/eval; no borra `latest.pt`; no requiere `--scratch`. |
 
-`--scratch --onboard` y el **resume** `--onboard` (sin `--scratch`) **reusan** `teacher_wins/` si el schema coincide (`eco_and_combat_mental_v4`) y hay eps; `launch_train` pasa `--bc-replay` (fases **A y B**; no C). Log: `reusando teacher_wins/ … resume no re-juega al teacher` y en train `[bc] replay tapes … (no collect)`. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas viejas (`eco_and_combat_v1` / hunt_v2 / sin schema) se ignoran y se vuelven a recolectar **una vez**.
+`--scratch --onboard` y el **resume** `--onboard` **reusan** `teacher_wins/` si el schema coincide con la fase: A/B `eco_and_combat_mental_v4`, C/D/E `eco_and_combat_expand_v1`. Al promover B→C (y C→D, D→E) se **borran** las cintas: el rifle teacher no se clona vs easy. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas con schema distinto se ignoran.
 
 
 
@@ -351,27 +343,26 @@ Si el seed que querés es `iter0140.pt` y no el `best@24`: `--onboard-rewind 140
 
 
 
-### Fase C — PPO vs easy (rampa, sin BC)
+### Fase C — PPO + expand BC vs easy
 
+Al promover B→C se copia `best.pt` → `best_B.pt`, se **wipea** `teacher_wins/` (schema expand) y λ_bc vuelve a warmup desde el start de C.
 
+- Teacher **expand**: mismo opening que A/B, después del blob (`n_combat≥8`) FORCE `weap` → `1tnk` (luego `2tnk`), mix `e3`, un pbox. No mill 3ª proc. No APC.
+- `--bc --bc-teacher-bot easy --bc-teacher-mode expand`. Wins-only. El rifle teacher **no** entra acá.
+- Mix `--mix-from beginner` 0.25→1.0 en 40 iters. wr20 / best / promote **solo vs easy**.
+- `--no-amp`. Sequía bloqueada hasta `min_iters`.
 
-Al promover B→C se copia `best.pt` → `best_B.pt`. C **no** pisa ese best con un 0-win vs easy.
+Criterio: wr20 vs **easy** ≥ 0.45 × 10 iters, mínimo 20 iters → D.
 
+### Fase D — vs medium
 
+Igual que C con expand BC vs `medium`, mix easy→medium. Snapshot `best_C.pt`. Criterio wr20 ≥ 0.45 × 10, min 20 → E.
 
-- Mismos pesos, **mismos knobs que B**: `--lr 2.0e-5`, `--adv-mode global`, Adam de B (**sin** `--reset-opt`).
-- **Sin BC.** El teacher no es experto vs easy; clonarías perder. El ancla es SIL (elite persistido en `elite.pt`) + mix de rival.
-- **Rampa suave** `--mix-from beginner`: P(easy) sube de **0.25 → 1.0** en 40 iters. wr20 / best.pt / promote **solo vs easy**. Beginner wins llenan SIL al arrancar.
-- **C must not use AMP** (--no-amp): skip_frac=1.0 killed learning. Do not pass --amp-init-scale on C.
-- Sequía: ignora el pico wr20 de B. En C no restaura hasta `min_iters` **y** un pico propio vs easy. H=0 de PPO skipped no cuenta como política muerta si el rollout sigue entrenando/raseando.
+### Fase E — vs hard (DONE)
 
-El wr vs easy se cae al principio. Es normal (Run 11: salto a easy = 0/140). Lo que **no** es normal es H=clip=gn=0 durante decenas de iters — eso es PPO skipeado, no transferencia.
+`--bot-type hard` (OpenRA **normal**). Mix medium→hard. Expand BC vs hard: si el teacher gana poco, el buffer se llena lento y manda SIL+mix (igual que el C viejo sin maestro). Criterio: wr20 vs **hard** ≥ 0.50 × 10, min 20.
 
-Criterio: wr20 vs **easy** ≥ 0.45 × 10 iters, mínimo 20 iters en C.
-
-
-
-Log: `ONBOARD DONE`. `auto_train` sale. El agente útil es `rl/ckpts/best.pt` (y `latest.pt`).
+Log: `onboard PROMOTE E -> done`. `auto_train` sale. El agente útil es `rl/ckpts_v2/best.pt`.
 
 
 
@@ -391,11 +382,11 @@ No es un número de paper. Es wall-clock de sótano:
 
 |---|---|---|
 
-| A | 20 iters × 2 partidas teacher | unas horas |
-
-| B | wr20 vs beginner a 50% | de un día a varios (el techo histórico vs beginner es alto) |
-
-| C | recuperar wr vs easy | otro tanto; easy pega en casa |
+| A | 20 iters × teacher + eval | unas horas |
+| B | wr20 vs beginner a 50% | de un día a varios |
+| C | expand + wr20 vs easy 45% | otro tanto; easy tiene weap/cajas |
+| D | vs medium | más; medium rushea a los 5 s |
+| E | vs hard (normal) a 50% | el tramo largo; no es un 50% de beginner |
 
 
 
@@ -413,11 +404,11 @@ Si B no llega a 50% en ~200 iters, el teacher de A no dejó un build order usabl
 
 - `--onboard` con un `latest.pt` de otro experimento y **sin** `curriculum.json`. El launcher se niega: archivá primero (`rl/archive_run.py`) y usá `--scratch --onboard`.
 
-- `--scratch --onboard` a mitad de B/C. Reinicia en A y tira el curriculum.
+- `--scratch --onboard` a mitad de B–E. Reinicia en A y tira el curriculum.
 
-- Meter `--pfsp` / hard / rl en este camino. El wr20 dejaría de ser el reloj de onboarding. El overlay de fase **saca** PFSP de `TRAIN_ARGS`.
+- Meter `--pfsp` / rl en este camino. El overlay de fase **saca** PFSP de `TRAIN_ARGS`. Hard es la fase E, no un flag a mano.
 
-- Activar `--bc` vs easy (fase C). El scripted no es experto vs easy; clonarías perder. A y B clonan vs **beginner**.
+- Clonar el teacher **rush** vs easy/hard. A/B son rifle; C/D/E son expand. El launcher wipea tapes al promover.
 
 - Relanzar `--onboard` sobre un `latest` de wipe sin `--onboard-rewind`. `λ_bc` ya sería 0 y los pesos son el atractor mill.
 

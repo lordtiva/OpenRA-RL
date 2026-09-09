@@ -11,8 +11,15 @@ Uso (PowerShell, UN comando):
     $env:PYTHONPATH=""
     .\.venv\Scripts\python.exe -m rl.play_vs_checkpoint_live
 
+    # una partida, greedy, el visor retiene el frame final:
+    .\.venv\Scripts\python.exe -m rl.play_vs_checkpoint_live `
+      --ckpt rl\ckpts_v2\latest.pt --episodes 1 --step-delay 0.2
+
     # visor:
     http://localhost:8786/
+
+Loop infinito (default --episodes 0) pausa --pause-sec entre partidas
+para que dé tiempo a mirar el canvas. --pause-sec 0 vuelve al turbo.
 
 Al terminar cada partida (win/lose/incomplete) append a
 rl/ckpts_v2/live_games.jsonl y el tape completo a rl/ckpts_v2/live_tape.jsonl.
@@ -35,6 +42,7 @@ if __package__ is None or __package__ == "":
 
 import torch
 from openra_env.client import OpenRAEnv
+from openra_env.mcp_ws_client import OpenRAMCPClient
 from rl.action_adapter import Vocab
 from rl.network import AlphaLiteNet
 from rl.trainer import load_checkpoint
@@ -223,7 +231,104 @@ def _append_live_rows(path: Path, rows: list) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str, status, done, result, episode_id=""):
+_ALLIED_TELLS = {
+    "tent", "pbox", "hbox", "gun", "agun", "gap", "atek", "pdox",
+    "e7", "medi", "mech", "spy", "ctnk", "stnk", "mh60", "apc",
+}
+_SOVIET_TELLS = {
+    "barr", "ftur", "tsla", "sam", "iron", "kenn", "mslo", "stek",
+    "3tnk", "ttnk", "v2rl", "dog", "shok",
+}
+
+
+def _side_from_names(names) -> str:
+    n = {str(x).lower() for x in (names or []) if x}
+    if n & _ALLIED_TELLS:
+        return "allies"
+    if n & _SOVIET_TELLS:
+        return "soviet"
+    return ""
+
+
+def _infer_side(obs) -> str:
+    names = set()
+    for x in getattr(obs, "available_production", None) or []:
+        names.add(str(x).lower())
+    for b in getattr(obs, "buildings", None) or []:
+        names.add(str(getattr(b, "type", "") or "").lower())
+    for u in getattr(obs, "units", None) or []:
+        names.add(str(getattr(u, "type", "") or "").lower())
+    return _side_from_names(names)
+
+
+def _infer_enemy_side(obs) -> str:
+    names = set()
+    for u in getattr(obs, "visible_enemies", None) or []:
+        names.add(str(getattr(u, "type", "") or "").lower())
+    for b in getattr(obs, "visible_enemy_buildings", None) or []:
+        names.add(str(getattr(b, "type", "") or "").lower())
+    return _side_from_names(names)
+
+
+_COUNTRY_FACTIONS = frozenset({
+    "england", "france", "germany", "russia", "ukraine",
+})
+
+
+def _better_faction(old: str, new: str) -> str:
+    """Prefer InternalName (russia) over side guess (soviet) over empty."""
+    new = str(new or "").strip()
+    old = str(old or "").strip()
+    if new in _COUNTRY_FACTIONS:
+        return new
+    if old in _COUNTRY_FACTIONS:
+        return old
+    return new or old
+
+
+def _faction_from_mcp(gs: dict) -> tuple[str, str]:
+    pf = str(gs.get("faction") or gs.get("player_faction") or "")
+    ef = str(gs.get("enemy_faction") or "")
+    if not ef:
+        names = []
+        for row in (gs.get("enemy_summary") or []) + (gs.get("enemy_buildings_summary") or []):
+            if isinstance(row, dict):
+                names.append(row.get("type"))
+        ef = _side_from_names(names)
+    return pf, ef
+
+
+def _faction_pair(obs) -> tuple[str, str]:
+    meta = getattr(obs, "metadata", None) or {}
+    if not isinstance(meta, dict):
+        meta = {}
+    pf = str(getattr(obs, "player_faction", "") or meta.get("player_faction") or "")
+    ef = str(getattr(obs, "enemy_faction", "") or meta.get("enemy_faction") or "")
+    if not pf:
+        pf = _infer_side(obs)
+    if not ef:
+        ef = _infer_enemy_side(obs)
+    return pf, ef
+
+
+async def _mcp_game_state(env) -> dict:
+    """Docker stamps faction on GameState, not always on the step observation."""
+    n = int(getattr(env, "_rpc_n", 0) or 0) + 1
+    env._rpc_n = n
+    req = {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {"name": "get_game_state", "arguments": {}},
+        "id": f"fac{n}",
+    }
+    resp = await env._send_and_receive({"type": "mcp", "data": req})
+    result = (resp.get("data") or {}).get("result", {})
+    if isinstance(result, dict):
+        return OpenRAMCPClient._unwrap_mcp_result(result) or {}
+    return {}
+
+
+def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str, status, done, result, episode_id="", player_faction="", enemy_faction=""):
     """Convierte observación a dict liviano para el visor."""
     H = obs.map_info.height or 64
     W = obs.map_info.width or 64
@@ -260,8 +365,13 @@ def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str,
     except Exception:
         pass
 
+    inf_pf, inf_ef = _faction_pair(obs)
+    player_faction = player_faction or inf_pf
+    enemy_faction = enemy_faction or inf_ef
     return {
         "tick": obs.tick,
+        "player_faction": player_faction,
+        "enemy_faction": enemy_faction,
         "map_w": W, "map_h": H,
         "cash": getattr(obs.economy, "cash", 0),
         "ore": getattr(obs.economy, "ore", 0),
@@ -328,6 +438,22 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
 
     result = await env.reset(**reset_kwargs)
     obs = result.observation
+    pf, ef = _faction_pair(obs)
+    try:
+        gs = await _mcp_game_state(env)
+        mcp_pf, mcp_ef = _faction_from_mcp(gs if isinstance(gs, dict) else {})
+        pf = _better_faction(pf, mcp_pf)
+        ef = _better_faction(ef, mcp_ef)
+    except Exception as e:
+        print(f"  [live] get_game_state falló: {e}")
+    if pf:
+        try:
+            obs.player_faction = pf
+            obs.enemy_faction = ef
+        except Exception:
+            pass
+    print(f"  faction={pf or '?'} enemy={ef or '?'} "
+          f"(lock Aliados = england|france|germany)")
     hidden = torch.zeros(1, HIDDEN_DIM, device=device)
     shaper = ShapedReward(preset=args.shaper_preset)
     shaper.reset(obs)
@@ -356,8 +482,18 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
         "tape": [],
     }
 
+    def _push(obs_, status_, done_, result_=""):
+        nonlocal pf, ef
+        inf_pf, inf_ef = _faction_pair(obs_)
+        pf = _better_faction(pf, inf_pf)
+        ef = _better_faction(ef, inf_ef)
+        broadcaster.update(_obs_to_live_state(
+            obs_, beacon, hist, decs, episode_reward, adv_total, last_action_str,
+            status_, done_, result_, episode_id=ep_id,
+            player_faction=pf, enemy_faction=ef))
+
     # estado inicial
-    broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, "jugando…", done, "", episode_id=ep_id))
+    _push(obs, "jugando…", done, "")
 
     use_macro = args.macro_ticks > 0
     for step in range(args.max_steps):
@@ -550,23 +686,29 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                     "n_ene": (len(obs.visible_enemies or [])
                               + len(obs.visible_enemy_buildings or [])),
                 })
-            broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, f"dec {decs} tick {obs.tick}", done, getattr(obs, "result", "") or macro_final or "", episode_id=ep_id))
+            _push(obs, f"dec {decs} tick {obs.tick}", done, getattr(obs, "result", "") or macro_final or "")
 
         if done:
             break
-        # pequeño yield para que el http server respire
-        await asyncio.sleep(0)
+        # yield al http del visor; --step-delay frena el turbo para poder mirar
+        delay = float(getattr(args, "step_delay", 0.0) or 0.0)
+        await asyncio.sleep(delay if delay > 0 else 0)
 
     r_final = shaper.finalize(truncated=not done, result=str(getattr(obs, "result", "") or macro_final or ""))
     episode_reward += r_final
     final_result = getattr(obs, "result", None) or macro_final or ("incomplete" if not done else "")
-    broadcaster.update(_obs_to_live_state(obs, beacon, hist, decs, episode_reward, adv_total, last_action_str, f"final: {final_result}", True, final_result, episode_id=ep_id))
+    inf_pf, inf_ef = _faction_pair(obs)
+    pf = pf or inf_pf
+    ef = ef or inf_ef
+    _push(obs, f"final: {final_result}", True, final_result)
     xy_end = _combat_centroid(obs.units)
     beacon_xy = list(beacon) if beacon else None
     log_row = {
         "ts": datetime.now().isoformat(timespec="seconds"),
         "ckpt": str(getattr(args, "ckpt", "")),
         "ckpt_iter": int(ckpt_iter),
+        "player_faction": pf,
+        "enemy_faction": ef,
         "bot_type": args.bot_type,
         "scenario": args.scenario,
         "map_name": str(getattr(getattr(obs, "map_info", None), "map_name", "") or ""),
@@ -619,7 +761,8 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                 print(f"  [live log] no pude escribir {log_path}: {e}", flush=True)
     return {"result": final_result, "ticks": obs.tick, "decisions": decs,
             "episode_reward": round(episode_reward, 3), "hist": hist,
-            "advanced_ticks": adv_total, "dist_to_beacon": log_row["dist_to_beacon"]}
+            "advanced_ticks": adv_total, "dist_to_beacon": log_row["dist_to_beacon"],
+            "player_faction": pf, "enemy_faction": ef}
 
 
 async def amain(args):
@@ -685,7 +828,19 @@ async def amain(args):
                 env, net, vocab, device, args, bc, ckpt_iter=it, ep_index=ep)
             print(f"  result={outcome['result']} ticks={outcome['ticks']} "
                   f"decs={outcome['decisions']} rew={outcome['episode_reward']} "
+                  f"faction={outcome.get('player_faction') or '?'} "
+                  f"enemy={outcome.get('enemy_faction') or '?'} "
                   f"dist_beacon={outcome.get('dist_to_beacon')} hist={outcome['hist']}")
+            pause = max(0.0, float(getattr(args, "pause_sec", 15.0) or 0.0))
+            looping = args.episodes <= 0 or ep < args.episodes
+            if pause > 0 and looping:
+                print(f"  pausa {pause:.0f}s — el visor retiene el frame. "
+                      f"--pause-sec 0 para no esperar")
+                bc.update({
+                    "status": f"final {outcome['result']} — pausa {pause:.0f}s",
+                    "done": True,
+                })
+                await asyncio.sleep(pause)
         print(f"\nVisor sigue en http://localhost:{args.port}/  (Ctrl+C para salir)")
         while True:
             await asyncio.sleep(1)
@@ -707,6 +862,10 @@ def main():
     ap.add_argument("--ai-slot", default=None, help='slot IA: "Multi0" (default) o "" para sin enemigo')
     ap.add_argument("--scenario", default="a_short")
     ap.add_argument("--episodes", type=int, default=0, help="0 = loop infinito; recarga latest.pt entre partidas")
+    ap.add_argument("--pause-sec", type=float, default=15.0,
+                    help="segundos a retener el frame final entre partidas (0 = turbo)")
+    ap.add_argument("--step-delay", type=float, default=0.0,
+                    help="segundos extra por decisión (0.2 hace el canvas seguible)")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--temperature", type=float, default=1.0)
     ap.add_argument("--greedy", action=argparse.BooleanOptionalAction, default=True)
@@ -741,7 +900,10 @@ def main():
     # --bot-type "" mantiene "" (dummy), solo None es "no tocar". --ai-slot "" desactiva enemigo.
     if args.bot_type == "__none__":
         args.bot_type = None
-    asyncio.run(amain(args))
+    try:
+        asyncio.run(amain(args))
+    except KeyboardInterrupt:
+        print("\nVisor cerrado.")
 
 if __name__ == "__main__":
     main()

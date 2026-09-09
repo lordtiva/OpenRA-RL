@@ -37,6 +37,12 @@ _BC_COMBAT_CAP_TYPES = frozenset(_BC_LAST)
 _BC_COMBAT_READY_N = 8
 # Manifest de TeacherWinBuffer. Cintas viejas (solo TRAIN) no se hidratan.
 TAPE_SCHEMA = "eco_and_combat_mental_v4"
+# C/D/E expand teacher (weap/1tnk/e3). Rush tapes must not hydrate here.
+TAPE_SCHEMA_EXPAND = "eco_and_combat_expand_v1"
+
+
+def tape_schema_for_mode(mode: str) -> str:
+    return TAPE_SCHEMA_EXPAND if str(mode or "") == "expand" else TAPE_SCHEMA
 
 
 def lambda_bc_at(it: int, start_iter: int, warmup: int = 80,
@@ -512,12 +518,14 @@ class TeacherWinBuffer:
                  prefer_ticks: int = BC_WIN_PREFER_TICKS,
                  path: str | os.PathLike | None = None,
                  keep_incomplete: bool = False,
-                 incomplete_min_ticks: int = 15000):
+                 incomplete_min_ticks: int = 15000,
+                 schema: str | None = None):
         self.cap = int(cap_steps)
         self.prefer_ticks = int(prefer_ticks)
         self.path = Path(path) if path else None
         self.keep_incomplete = bool(keep_incomplete)
         self.incomplete_min_ticks = int(incomplete_min_ticks)
+        self.schema = str(schema or TAPE_SCHEMA)
         self._episodes: list[dict] = []
         self._next_id = 0
         if self.path is not None and self.path.is_dir():
@@ -620,7 +628,7 @@ class TeacherWinBuffer:
             except OSError:
                 pass
         manifest = {
-            "schema": TAPE_SCHEMA,
+            "schema": self.schema,
             "cap": self.cap,
             "prefer_ticks": self.prefer_ticks,
             "episodes": [],
@@ -656,7 +664,7 @@ class TeacherWinBuffer:
         except (OSError, json.JSONDecodeError):
             return 0
         schema = str(manifest.get("schema") or "")
-        if schema != TAPE_SCHEMA:
+        if schema != self.schema:
             # Schema mismatch (beacon tapes / solo TRAIN) no se hidrata: un
             # --scratch las reusaría como miller. Recolectar de nuevo.
             return 0

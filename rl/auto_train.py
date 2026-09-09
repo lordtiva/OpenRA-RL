@@ -41,8 +41,8 @@ Ctrl+C para parar todo.
 
 Flags del launcher (no van a rl.train):
   --scratch       pesos random; ignora latest/seed
-  --onboard       curriculum A→B→C (SFT teacher vs beginner, PPO+BC beginner,
-                  PPO easy). Ver rl/docs/start/onboard.md.
+  --onboard       curriculum A→E (SFT rifle vs beginner, PPO+BC beginner,
+                  expand BC vs easy/medium/hard). Ver rl/docs/start/onboard.md.
   --onboard-rewind N
                   Una vez, en B: latest <- best/iterN, trunca metrics/race.
                   λ_bc se queda en el piso (no reinicia a 1.0).
@@ -224,7 +224,7 @@ def live_game_urls() -> str:
 def hang_threshold() -> int:
     # A: teacher SFT. B: 4 PPO + 2 teacher games; primer iter post-launch
     # puede pasar 540s (THRESHOLD_S) antes de escribir metrics.
-    if _onboard and _onboard.get("phase") in ("A", "B"):
+    if _onboard and _onboard.get("phase") in ("A", "B", "C", "D", "E"):
         return ONBOARD_A_THRESHOLD_S
     return THRESHOLD_S
 
@@ -233,7 +233,7 @@ def collapse_active(phase, collapse_flag: bool) -> bool:
     """Restore best.pt on dead policy / wr20 drought.
 
     Phase A (SFT, no PPO wr) never restores — a lucky eval freezes the clone.
-    B and C follow --collapse / --no-collapse (default on).
+    B–E follow --collapse / --no-collapse (default on).
     """
     if phase == "A":
         return False
@@ -564,8 +564,8 @@ def last_iter_from_metrics() -> int:
 
 
 def try_promote(last_iter: int) -> str | None:
-    """Avanza A→B→C→done. Devuelve la fase nueva, o None."""
-    global _onboard
+    """Avanza A→B→C→D→E→done. Devuelve la fase nueva, o None."""
+    global _onboard, _replay_tapes
     if not _onboard:
         return None
     rows = last_metrics_rows(800)
@@ -576,15 +576,26 @@ def try_promote(last_iter: int) -> str | None:
     log(f"onboard PROMOTE {old} -> {nxt} @ iter {last_iter}")
     _onboard["phase"] = nxt
     _onboard["phase_started_iter"] = int(last_iter)
-    if nxt == "B":
-        ob.append_era_reset(METRICS, "onboard phase B beginner PPO+BC", "beginner")
-    elif nxt == "C":
-        snap = ob.snapshot_phase_best(CKPT_DIR, "B")
+    notes = {
+        "B": ("onboard phase B beginner PPO+BC", "beginner"),
+        "C": ("onboard phase C easy expand BC", "easy"),
+        "D": ("onboard phase D medium expand BC", "medium"),
+        "E": ("onboard phase E hard expand BC", "hard"),
+        "done": ("onboard DONE wr20 vs hard", "hard"),
+    }
+    if nxt in ("C", "D", "E"):
+        snap = ob.snapshot_phase_best(CKPT_DIR, old)
         if snap:
-            log(f"onboard snapshot {snap.name} (best B, no pisa 0-win easy)")
-        # Never --reset-opt on C: Adam de B es el que ganó beginner.
+            log(f"onboard snapshot {snap.name} (best {old})")
         _onboard["c_reset_opt_done"] = True
-        ob.append_era_reset(METRICS, "onboard phase C easy", "easy")
+        # Rifle tapes must not clone into expand BC.
+        tw = CKPT_DIR / "teacher_wins"
+        if tw.is_dir():
+            shutil.rmtree(tw, ignore_errors=True)
+            log(f"  wiped teacher_wins/ (schema {old} → expand {nxt})")
+        _replay_tapes = False
+    if nxt in notes:
+        ob.append_era_reset(METRICS, notes[nxt][0], notes[nxt][1])
     ob.save_curriculum(CURRICULUM, _onboard)
     return nxt
 
@@ -604,8 +615,8 @@ def would_pass_bc_replay(replay_tapes: bool = None, onboard=None,
     if co:
         return False
     phase = (ob_cfg or {}).get("phase")
-    # A offline SFT + B mixed BC reuse teacher_wins/; C has no teacher.
-    return bool(rt and phase in ("A", "B"))
+    # A/B rush tapes; C/D/E expand tapes (schema mismatch refuses load).
+    return bool(rt and phase in ("A", "B", "C", "D", "E"))
 
 
 def launch_train(extra_args=None) -> subprocess.Popen:
@@ -665,8 +676,8 @@ def parse_auto_args(argv=None):
                     help="wr20 vs beginner para pasar A->B (sin streak).")
     ap.add_argument("--onboard-promote-wr20", type=float, default=0.50,
                     help="wr20 vs beginner para pasar a easy.")
-    ap.add_argument("--onboard-done-wr20", type=float, default=0.45,
-                    help="wr20 vs easy para marcar DONE.")
+    ap.add_argument("--onboard-done-wr20", type=float, default=0.50,
+                    help="wr20 vs hard para marcar DONE.")
     ap.add_argument("--onboard-streak", type=int, default=10,
                     help="Iters consecutivos con wr20 sobre el umbral.")
     ap.add_argument("--onboard-min-iters", type=int, default=20,
@@ -736,11 +747,15 @@ def _maybe_set_replay_tapes(args, *, resume: bool = False) -> None:
         man = json.loads(man_p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         man = {}
-    from rl.imitation import TAPE_SCHEMA
+    phase = (_onboard or {}).get("phase") if resume else "A"
+    want = ob.tape_schema_for_phase(phase or "A")
     n_eps = len(man.get("episodes") or [])
-    if str(man.get("schema") or "") != TAPE_SCHEMA or n_eps <= 0:
+    if str(man.get("schema") or "") != want or n_eps <= 0:
         if not resume:
             log("  teacher_wins/ schema viejo o vacío — se re-recolecta")
+        elif str(man.get("schema") or "") != want:
+            log(f"  teacher_wins/ schema {man.get('schema')!r} ≠ {want} "
+                f"(fase {phase}) — se re-recolecta")
         return
     if _collect_only or getattr(args, "onboard_collect", False):
         why = ("--onboard-collect-only" if _collect_only
@@ -748,14 +763,15 @@ def _maybe_set_replay_tapes(args, *, resume: bool = False) -> None:
         log(f"  teacher_wins/ {n_eps} eps — {why} suma más "
             f"(no --bc-replay)")
         return
-    if resume and (_onboard is None or _onboard.get("phase") not in ("A", "B")):
+    if resume and (_onboard is None or _onboard.get("phase") not in (
+            "A", "B", "C", "D", "E")):
         return
     _replay_tapes = True
     if resume:
-        log(f"  reusando teacher_wins/ ({n_eps} eps, schema {TAPE_SCHEMA}; "
+        log(f"  reusando teacher_wins/ ({n_eps} eps, schema {want}; "
             f"resume no re-juega al teacher)")
     else:
-        log(f"  reusando teacher_wins/ ({n_eps} eps, schema {TAPE_SCHEMA}; "
+        log(f"  reusando teacher_wins/ ({n_eps} eps, schema {want}; "
             f"SFT scratch no re-juega al teacher)")
 
 
@@ -801,7 +817,9 @@ def _init_onboard(args) -> None:
                   "b_bc_games", "b_bc_epochs", "b_bc_warmup",
                   "b_bc_lambda_end",
                   "bc_win_cap", "bc_win_prefer_ticks",
-                  "c_mix_from", "c_mix_warmup", "c_mix_start"):
+                  "c_mix_from", "c_mix_warmup", "c_mix_start",
+                  "c_promote_wr20", "d_promote_wr20",
+                  "d_mix_from", "e_mix_from"):
             _onboard[k] = ob.DEFAULTS[k]
         if args.onboard_rewind is not None:
             keep = int(args.onboard_rewind)
@@ -854,7 +872,7 @@ def _init_onboard(args) -> None:
             f"done={_onboard['done_wr20']})")
         return
     if args.onboard_rewind is not None:
-        log("FAIL: --onboard-rewind necesita curriculum.json en fase B o C "
+        log("FAIL: --onboard-rewind necesita curriculum.json en fase B-E "
             "(no uses --scratch).")
         sys.exit(2)
     if existing and args.scratch:

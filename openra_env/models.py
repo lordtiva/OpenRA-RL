@@ -205,6 +205,14 @@ class OpenRAObservation(Observation):
         default_factory=list,
         description="SupportPowerManager keys that are charged (Chronoshift, NukePowerOrder, ...)",
     )
+    player_faction: str = Field(
+        default="",
+        description="Resolved player InternalName (england/france/germany after RandomAllies lock)",
+    )
+    enemy_faction: str = Field(
+        default="",
+        description="Resolved opponent InternalName (Random bot may be any country)",
+    )
     result: str = Field(default="", description="Game result: 'win', 'lose', 'draw', or ''")
 
     # Spatial map tensor (base64-encoded float32 array for JSON transport)

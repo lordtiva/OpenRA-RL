@@ -41,10 +41,16 @@ from rl.imitation import (
     EliteBuffer, TeacherWinBuffer, SIL_PREFER_TICKS,
     BC_WIN_CAP, BC_WIN_PREFER_TICKS,
     balance_bc_samples, lambda_bc_at, merge_teacher_wins,
+    tape_schema_for_mode,
 )
 from rl.onboard import mix_target_prob
 from rl.scripted_teacher import ScriptedTeacher
 from rl import map_catalog as mapcat
+
+
+def _teacher_mode(args) -> str:
+    m = str(getattr(args, "bc_teacher_mode", "") or "rush").lower().strip()
+    return m if m in ("rush", "expand") else "rush"
 
 
 def pick_device(requested: str) -> str:
@@ -158,7 +164,8 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
                 auto_support=args.auto_support,
                 war_nudge=not args.no_war_nudge,
                 teacher=ScriptedTeacher(
-                    rush_attack_move=int(getattr(args, "bc_rush", 0) or 0) or None))
+                    rush_attack_move=int(getattr(args, "bc_rush", 0) or 0) or None,
+                    mode=_teacher_mode(args)))
         except Exception as e:
             print(f"  [bc] teacher game {i + 1}/{n} fail: {e}", flush=True)
             return None
@@ -607,6 +614,7 @@ async def amain(args):
             prefer_ticks=win_prefer,
             path=win_dir,
             keep_incomplete=bool(getattr(args, "bc_keep_incomplete", False)),
+            schema=tape_schema_for_mode(_teacher_mode(args)),
         )
         print(f"  [bc] TeacherWinBuffer cap={win_cap} prefer_ticks={win_prefer} "
               f"dir={win_dir} loaded eps={teacher_wins.n_episodes} "
@@ -1271,8 +1279,13 @@ def main():
                          "default 8). Fase A lo setea via curriculum a_rush.")
     ap.add_argument("--bc-epochs", type=int, default=1,
                     help="Epochs de NLL BC por iter (default 1).")
-    ap.add_argument("--onboard-phase", default=None, choices=("A", "B", "C"),
-                    help="Marca la fase A/B/C en metrics.jsonl (lo setea auto_train).")
+    ap.add_argument("--onboard-phase", default=None,
+                    choices=("A", "B", "C", "D", "E"),
+                    help="Marca la fase A-E en metrics.jsonl (lo setea auto_train).")
+    ap.add_argument("--bc-teacher-mode", default="rush",
+                    choices=("rush", "expand"),
+                    help="ScriptedTeacher: rush (A/B rifle) o expand "
+                         "(C/D/E weap+1tnk+e3).")
     ap.add_argument("--eval-games", type=int, default=0,
                     help="En --bc-only: partidas del ALUMNO por iter (wr, sin PPO). "
                          "0 = no mide. Fase A usa 4.")
@@ -1305,9 +1318,9 @@ def main():
                     help="Dir del TeacherWinBuffer (default "
                          "{ckpt_dir}/teacher_wins).")
     ap.add_argument("--bc-replay", action="store_true",
-                    help="Fase A/B: no jugar teacher games; BC del ring "
-                         "teacher_wins/. auto_train lo pasa cuando las "
-                         "cintas ya existen (no en fase C).")
+                    help="No jugar teacher games; BC del ring teacher_wins/. "
+                         "auto_train lo pasa cuando el schema coincide "
+                         "con la fase (rush A/B, expand C/D/E).")
     ap.add_argument("--bc-collect-only", action="store_true",
                     help="Solo recolecta teacher wins al buffer y sale "
                          "(sin SFT/eval/ckpt). auto_train --onboard-collect-only.")

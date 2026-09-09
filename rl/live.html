@@ -48,6 +48,7 @@
 
 <div class="bar" id="kpis">
   <div class="kpi"><div class="l">Tick</div><div class="v" id="k-tick">—</div></div>
+  <div class="kpi"><div class="l">Facción</div><div class="v" id="k-fac">—</div></div>
   <div class="kpi"><div class="l">Cash</div><div class="v" id="k-cash">—</div></div>
   <div class="kpi"><div class="l">Ore / cap</div><div class="v" id="k-ore">—</div></div>
   <div class="kpi"><div class="l">Power</div><div class="v" id="k-power">—</div></div>
@@ -321,6 +322,12 @@ async function poll(){
 
 function render(s){
   document.getElementById('k-tick').textContent = fmt(s.tick);
+  const fac = s.player_faction || '—';
+  const ene = s.enemy_faction || '';
+  const facEl = document.getElementById('k-fac');
+  facEl.textContent = ene ? (fac + ' vs ' + ene) : fac;
+  const soviet = /russia|ukraine|soviet/i.test(fac);
+  facEl.style.color = soviet ? '#f85149' : (fac && fac !== '—' ? '#3fb950' : '');
   document.getElementById('k-cash').textContent = fmt(s.cash);
   document.getElementById('k-ore').textContent = s.ore!=null ? `${fmt(s.ore)}/${fmt(s.cap)}` : '—';
   document.getElementById('k-power').textContent = s.power_provided!=null ? `${s.power_provided}/${s.power_drained}` : '—';

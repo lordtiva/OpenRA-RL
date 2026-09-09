@@ -48,6 +48,7 @@ class _Handler(BaseHTTPRequestHandler):
         if parsed.path in ("/", "/live", "/live.html", "/live.html/"):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             html = LIVE_HTML.read_bytes() if LIVE_HTML.exists() else b"<h1>live.html no encontrado</h1>"
             self.wfile.write(html)

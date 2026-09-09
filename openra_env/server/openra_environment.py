@@ -566,6 +566,7 @@ class OpenRAEnvironment(MCPEnvironment):
             game_phase = ""
             game_winner = ""
             game_player_count = 0
+            enemy_faction = getattr(env, "_enemy_faction", "") or ""
             try:
                 bridge_state = asyncio.run_coroutine_threadsafe(
                     env._bridge.get_state(), env._loop
@@ -573,6 +574,11 @@ class OpenRAEnvironment(MCPEnvironment):
                 game_phase = getattr(bridge_state, "phase", "") or ""
                 game_winner = getattr(bridge_state, "winner", "") or ""
                 game_player_count = getattr(bridge_state, "player_count", 0) or 0
+                enemy_faction = (
+                    enemy_faction
+                    or getattr(bridge_state, "enemy_faction", "")
+                    or ""
+                )
             except Exception:
                 if obs.get("done"):
                     game_phase = "game_over"
@@ -589,6 +595,7 @@ class OpenRAEnvironment(MCPEnvironment):
                 "self_slot": getattr(env_config, "rl_slot", ""),
                 "enemy_slot": getattr(env_config, "ai_slot", ""),
                 "faction": getattr(env, "_player_faction", ""),
+                "enemy_faction": enemy_faction,
                 "economy": obs["economy"],
                 "power_balance": power_balance,
                 "military": obs["military"],
@@ -3237,6 +3244,8 @@ class OpenRAEnvironment(MCPEnvironment):
             map_info=MapInfoModel(**obs_dict["map_info"]),
             available_production=obs_dict.get("available_production", []),
             ready_support_powers=obs_dict.get("ready_support_powers", []),
+            player_faction=getattr(self, "_player_faction", "") or "",
+            enemy_faction=getattr(self, "_enemy_faction", "") or "",
             done=obs_dict["done"],
             reward=reward,
             result=obs_dict.get("result", ""),

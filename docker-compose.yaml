@@ -1,8 +1,10 @@
 # Docker Compose for OpenRA-RL development
 #
 # Usage:
-#   Game server only:  docker compose up openra-rl
-#   With LLM agent:    docker compose up agent
+#   Game server only:  docker compose up -d openra-rl
+#   Two daemons (:8000 + :8010):
+#     docker compose -f docker-compose.yaml -f docker-compose.scale.yaml up -d --build
+#   With LLM agent:    docker compose --profile llm up agent
 #   With MCP bot:      docker compose run mcp-bot
 #
 # Build:
@@ -40,6 +42,8 @@ services:
       retries: 3
 
   agent:
+    profiles:
+      - llm
     build:
       context: .
       dockerfile: Dockerfile.agent

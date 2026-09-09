@@ -15,6 +15,7 @@ from rl.imitation import (
     TeacherWinBuffer,
     SIL_PREFER_TICKS,
     TAPE_SCHEMA,
+    TAPE_SCHEMA_EXPAND,
     balance_bc_samples,
     command_to_indices,
     lambda_bc_at,
@@ -569,6 +570,18 @@ try:
         check("TW schema beacon v1 no hidrata", tw_v1.n_episodes == 0)
     finally:
         shutil.rmtree(stale_v1, ignore_errors=True)
+    rush_on_expand = Path(tempfile.mkdtemp(prefix="twexp_"))
+    try:
+        (rush_on_expand / "manifest.json").write_text(
+            json.dumps({"schema": TAPE_SCHEMA, "cap": 50,
+                        "episodes": []}), encoding="utf-8")
+        tw_exp = TeacherWinBuffer(
+            cap_steps=50, path=rush_on_expand, schema=TAPE_SCHEMA_EXPAND)
+        check("TW rush schema no hidrata en expand", tw_exp.n_episodes == 0)
+        check("TW expand schema string",
+              TAPE_SCHEMA_EXPAND == "eco_and_combat_expand_v1")
+    finally:
+        shutil.rmtree(rush_on_expand, ignore_errors=True)
 finally:
     shutil.rmtree(tw_dir, ignore_errors=True)
 

@@ -32,8 +32,8 @@ curl.exe -f http://localhost:8000/health
 * Logs: `docker compose logs -f openra-rl`
 * Por que recrear: el daemon .NET acumula sesiones; un `down`/`up` resetea el heap.
 * Segundo daemon (recomendado en 5600X):  
-  `docker compose -f docker-compose.yaml -f docker-compose.scale.yaml up -d`  
-  -> `:8000` + `:8010` (`openra-rl-2`). `auto_train` detecta los que respondan `/health`.
+  `docker compose -f docker-compose.yaml -f docker-compose.scale.yaml up -d --build`  
+  -> `:8000` + `:8010` (`openra-rl-2`). No levanta `agent` (LLM, profile `llm`) ni un tercer daemon. `auto_train` detecta los que respondan `/health`.
 
 ### 2) Train — canónico = `auto_train` (vos lo lanzas)
 
@@ -51,9 +51,9 @@ Flags del **launcher** (no se reenvian a `rl.train`):
 |------|--------|
 | *(default)* | Resume `rl/ckpts/latest.pt` si existe; si no, seed/`iter*.pt`. |
 | `--scratch` | Pesos random; ignora latest/seed (`FORCE_SCRATCH=1`). |
-| `--onboard` | Curriculum A→B→C para un clone **sin** `.pt`. Primera vez: `--scratch --onboard`. B trae `--bc --bc-teacher-bot beginner`. Doc: [`onboard.md`](onboard.md). |
-| `--onboard-rewind N` | En B o C: `latest` y `best` ← iterN, trunca metrics/race. Desde C vuelve a B. `λ_bc` en el piso. Una vez. |
-| `--collapse` | *(default)* Watchdog politica muerta + sequia wr20 -> copia `best.pt` -> `latest.pt` + `--reset-opt`. En `--onboard`, A lo ignora (siempre off); B y C lo usan. |
+| `--onboard` | Curriculum A→E (rifle vs beginner, expand BC vs easy/medium/hard). Primera vez: `--scratch --onboard`. Doc: [`onboard.md`](onboard.md). |
+| `--onboard-rewind N` | En B–E: `latest` y `best` ← iterN, trunca metrics/race. Dest = fase de esa iter. `λ_bc` en el piso si volvés a B. Una vez. |
+| `--collapse` | *(default)* Watchdog politica muerta + sequia wr20 -> copia `best.pt` -> `latest.pt` + `--reset-opt`. En `--onboard`, A lo ignora (siempre off); B–E lo usan. |
 | `--no-collapse` | Apaga solo ese watchdog (B/C). Siguen cuelgue GPU/daemon y relanzos por crash. |
 
 Ejemplo onboarding (no uses el `TRAIN_ARGS` de PFSP/easy; el overlay de fase lo saca):
@@ -175,7 +175,7 @@ Ckpts viejos (cell `Conv 296->1`, SCALAR 21): cargan con missing keys; **scratch
 5. **Metrica norte:** `wr20` / era WR vs el ancla (`bot-type` / PFSP anchor). Componentes de reward = diagnostico.
 6. **Colapso:** con pesos maduros deja `--collapse`. En scratch temprano suele convenir `--no-collapse` (best@1 con iwr=1.0 pisa aprendizaje; ver [`../design/rl-vs-rl.md`](../design/rl-vs-rl.md)).
 7. **BC:** `--bc-start-iter` nunca `0` (train lo trata como unset y en resume reinicia warmup). Usar `1` en scratch.
-8. **Onboard:** no mezclar con PFSP/hard. No `--scratch --onboard` a mitad de B/C. A no sale a las 20 iters: hace falta wr20 del *alumno*. Un 4/4 no promociona. Collapse **off en A**, on en B/C. Redo A desde SFT: `--onboard --onboard-rewind 20`. Undo C: `--onboard-rewind N` (vuelve a B). Detalle: [`onboard.md`](onboard.md). Gaps RA completo: [`../contract/ra-completo.md`](../contract/ra-completo.md).
+8. **Onboard:** no mezclar con PFSP. No `--scratch --onboard` a mitad de B–E. Collapse **off en A**, on en B–E. Redo A: `--onboard --onboard-rewind 20`. Undo C/D/E: `--onboard-rewind N` (fase de esa iter). Detalle: [`onboard.md`](onboard.md).
 
 ---
 

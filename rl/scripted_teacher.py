@@ -25,6 +25,8 @@ Este teacher:
   - P3 land-first tech/defense AFTER eco/barracks (optional, not BUILD_PRIORITY):
     cheap defense → dome → weap → fix → atek/stek. Gates on rush rolling so
     a_short Allies rush stays intact. Navy/air stays light via _optional_naval_air.
+  - mode=expand (onboard C/D/E): same opening, then FORCE weap → 1tnk,
+    mix e3, one pbox. Does not mill extra proc. A/B keep mode=rush.
 """
 from __future__ import annotations
 
@@ -68,16 +70,26 @@ class ScriptedTeacher(ScriptedBot):
     EARLY_SCOUT_COMBAT = 3  # fog scout away from home once a few rifles exist
     MIN_HARVS = 2
     GUARD_COUNT = 0
+    # Expand (C/D/E): Allies weap 2000, 1tnk 700, pbox 600, e3 300.
+    EXPAND_WEAP_CASH = 2000
+    EXPAND_TANK_CASH = 700
+    EXPAND_PBOX_CASH = 600
     _PROD = frozenset({
         "fact", "afac", "proc", "weap", "tent", "barr", "kenn",
         "hpad", "afld", "syrd",
     })
 
-    def __init__(self, verbose: bool = False, rush_attack_move: int | None = None):
-        """Optional per-instance RUSH override for benches; class default unchanged."""
+    def __init__(self, verbose: bool = False, rush_attack_move: int | None = None,
+                 mode: str = "rush"):
+        """Optional per-instance RUSH override for benches; class default unchanged.
+
+        mode=rush: A/B rifle teacher. mode=expand: C/D/E weap+tank overlay.
+        """
         super().__init__(verbose=verbose)
         if rush_attack_move is not None:
             self.RUSH_ATTACK_MOVE = int(rush_attack_move)
+        m = str(mode or "rush").lower().strip()
+        self.mode = m if m in ("rush", "expand") else "rush"
         # Per-episode fog belief + last visible contact (map-agnostic hunt).
         self.belief = EnemyBeliefStore()
         self._last_contact: Optional[Tuple[int, int]] = None
@@ -137,6 +149,10 @@ class ScriptedTeacher(ScriptedBot):
                 and obs.economy.cash >= 1100):
             commands.append(CommandModel(action=ActionType.TRAIN, item_type="harv"))
             self._log("Training harv (teacher eco)")
+        if self.mode == "expand":
+            commands = self._apply_expand(obs, commands)
+            commands.extend(self._optional_naval_air(obs, commands))
+            return commands
         if self.phase != "attack":
             commands.extend(self._optional_tech_defense(obs, commands))
             commands.extend(self._optional_naval_air(obs, commands))
@@ -158,6 +174,116 @@ class ScriptedTeacher(ScriptedBot):
             self._log("Training e1 (sustain during attack)")
         commands.extend(self._optional_tech_defense(obs, commands))
         commands.extend(self._optional_naval_air(obs, commands))
+        return commands
+
+    def _count_type(self, obs: OpenRAObservation, *names: str) -> int:
+        want = {str(n).lower() for n in names}
+        n = 0
+        for u in obs.units or []:
+            if str(getattr(u, "type", "") or "").lower() in want:
+                n += 1
+        for b in obs.buildings or []:
+            if str(getattr(b, "type", "") or "").lower() in want:
+                n += 1
+        return n
+
+    def _rush_rolling(self, obs: OpenRAObservation) -> bool:
+        return (self.phase == "attack"
+                or n_combat_total(obs) >= self.RUSH_ATTACK_MOVE)
+
+    def _apply_expand(
+        self, obs: OpenRAObservation, commands: List[CommandModel],
+    ) -> List[CommandModel]:
+        """After the rifle blob is out: weap → tanks, mix e3, one pbox.
+
+        Opening (powr/proc/tent/e1) stays parent BUILD_PRIORITY. Do not mill
+        a 3rd proc. Skip optional dome-first tech so weap is the C lesson.
+        """
+        if not self._rush_rolling(obs):
+            return commands
+        cash = int(getattr(obs.economy, "cash", 0) or 0)
+        own = {
+            str(getattr(b, "type", "") or "").lower()
+            for b in (obs.buildings or [])
+        }
+        queued = {
+            str(getattr(p, "item", "") or "").lower()
+            for p in (obs.production or [])
+        }
+        has_weap = "weap" in own or "weap" in queued
+        has_build = any(c.action == ActionType.BUILD for c in commands)
+        has_train = any(c.action == ActionType.TRAIN for c in commands)
+        building_busy = any(
+            str(getattr(p, "queue_type", "") or "").lower() in
+            ("building", "buildings", "structure", "structures")
+            and float(getattr(p, "progress", 0) or 0) < 0.99
+            for p in (obs.production or [])
+        )
+        vehicle_busy = any(
+            str(getattr(p, "queue_type", "") or "").lower() == "vehicle"
+            and float(getattr(p, "progress", 0) or 0) < 0.99
+            for p in (obs.production or [])
+        )
+        infantry_busy = any(
+            str(getattr(p, "queue_type", "") or "").lower() == "infantry"
+            and float(getattr(p, "progress", 0) or 0) < 0.99
+            for p in (obs.production or [])
+        )
+        # Save for weap: drop surplus e1 so the queue actually completes.
+        if not has_weap and cash < self.EXPAND_WEAP_CASH + 100:
+            commands = [
+                c for c in commands
+                if not (c.action == ActionType.TRAIN
+                        and str(c.item_type or "") == "e1")
+            ]
+            has_train = any(c.action == ActionType.TRAIN for c in commands)
+            cash = int(getattr(obs.economy, "cash", 0) or 0)
+
+        if not has_build and not building_busy:
+            if not has_weap and cash >= self.EXPAND_WEAP_CASH:
+                if self._can_produce_item(obs, "weap"):
+                    self._log("Expand BUILD weap")
+                    commands.append(CommandModel(
+                        action=ActionType.BUILD, item_type="weap"))
+                    return commands
+
+        if not has_train and not vehicle_busy and not infantry_busy:
+            n_1tnk = self._count_type(obs, "1tnk")
+            n_e1 = self._count_type(obs, "e1")
+            n_e3 = self._count_type(obs, "e3")
+            if has_weap and cash >= self.EXPAND_TANK_CASH:
+                tank = None
+                if (n_1tnk >= 2 and self._can_produce_item(obs, "2tnk")
+                        and cash >= 1500):
+                    tank = "2tnk"
+                elif self._can_produce_item(obs, "1tnk"):
+                    tank = "1tnk"
+                if tank:
+                    self._log(f"Expand TRAIN {tank}")
+                    commands.append(CommandModel(
+                        action=ActionType.TRAIN, item_type=tank))
+                    return commands
+            if cash >= 100:
+                want_e3 = (n_e1 >= 8 and n_e3 * 2 < n_e1
+                           and self._can_produce_item(obs, "e3")
+                           and cash >= 300)
+                item = "e3" if want_e3 else "e1"
+                if self._can_produce_item(obs, item):
+                    self._log(f"Expand TRAIN {item}")
+                    commands.append(CommandModel(
+                        action=ActionType.TRAIN, item_type=item))
+                    return commands
+
+        has_pbox = bool(own & {"pbox", "hbox", "ftur"}) or bool(
+            queued & {"pbox", "hbox", "ftur"})
+        if (has_weap and not has_pbox and not has_build and not building_busy
+                and cash >= self.EXPAND_PBOX_CASH):
+            for item in ("pbox", "hbox", "ftur"):
+                if self._can_produce_item(obs, item):
+                    self._log(f"Expand BUILD {item}")
+                    commands.append(CommandModel(
+                        action=ActionType.BUILD, item_type=item))
+                    return commands
         return commands
 
     def _optional_tech_defense(

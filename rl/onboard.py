@@ -1,9 +1,12 @@
-"""Onboarding curriculum A → B → C (no .pt required).
+"""Onboarding curriculum A → E (no .pt required).
 
-Phase A: SFT from ScriptedTeacher vs beginner (no PPO).
-Phase B: PPO+SIL+teacher BC vs beginner until wr20 holds.
-Phase C: PPO+SIL vs easy until wr20 holds (no teacher: not an expert vs easy).
+A: SFT rifle teacher vs beginner.
+B: PPO+SIL+rifle BC vs beginner until wr20 holds.
+C: PPO+SIL+expand BC vs easy (mix beginner→easy).
+D: same vs medium (mix easy→medium).
+E: same vs hard/OpenRA normal (mix medium→hard) until wr20 holds.
 
+Expand teacher (weap+1tnk+e3) is the expert vs easy+. Rifle teacher is not.
 auto_train owns promotion (kill + relaunch). train.py only sees the flags
 of the current phase. State lives in rl/ckpts/curriculum.json so a crash
 does not restart SFT.
@@ -17,13 +20,23 @@ from pathlib import Path
 
 from rl.imitation import BC_WIN_CAP, BC_WIN_PREFER_TICKS
 
-PHASES = ("A", "B", "C", "done")
+PHASES = ("A", "B", "C", "D", "E", "done")
+PHASE_BOT = {
+    "A": "beginner", "B": "beginner",
+    "C": "easy", "D": "medium", "E": "hard",
+}
+PHASE_NEXT = {
+    "A": "B", "B": "C", "C": "D", "D": "E", "E": "done",
+}
+EXPAND_PHASES = ("C", "D", "E")
 
 DEFAULTS = {
     "sft_iters": 20,
     "a_promote_wr20": 0.25,
     "promote_wr20": 0.50,
-    "done_wr20": 0.45,
+    "c_promote_wr20": 0.45,
+    "d_promote_wr20": 0.45,
+    "done_wr20": 0.50,
     "streak": 10,
     "min_iters": 20,
     "bc_games": 4,
@@ -42,11 +55,12 @@ DEFAULTS = {
     "b_bc_start_iter": 0,  # 0 = use phase_started_iter
     "bc_win_cap": BC_WIN_CAP,
     "bc_win_prefer_ticks": BC_WIN_PREFER_TICKS,
-    # C: linear P(easy) from c_mix_start → 1.0 over c_mix_warmup iters.
-    # No BC vs easy (teacher is not an expert there). SIL + mix is the ancla.
+    # Mix ramp onto the phase target. C/D/E keep BC (expand teacher).
     "c_mix_from": "beginner",
     "c_mix_warmup": 40,
     "c_mix_start": 0.25,
+    "d_mix_from": "easy",
+    "e_mix_from": "medium",
     # P3 opt-in: named pool or comma keys ("" = a_short via TRAIN_ARGS --scenario).
     "map_pool": "",
 }
@@ -64,7 +78,7 @@ _STRIP = {
     "--bc-games", "--bc-epochs", "--bc-keep-incomplete",
     "--bc-macro-ticks", "--bc-max-steps", "--bc-lambda-end",
     "--bc-rush", "--bc-replay", "--bc-collect-only", "--bc-collect-target",
-    "--bc-win-cap", "--bc-win-prefer-ticks",
+    "--bc-win-cap", "--bc-win-prefer-ticks", "--bc-teacher-mode",
     "--eval-games",
     "--sil", "--lambda-sil",
     "--iters", "--reset-opt", "--onboard-phase",
@@ -136,6 +150,10 @@ def save_curriculum(path: str | Path, cfg: dict) -> None:
         "a_promote_wr20": float(
             cfg.get("a_promote_wr20", DEFAULTS["a_promote_wr20"])),
         "promote_wr20": float(cfg.get("promote_wr20", DEFAULTS["promote_wr20"])),
+        "c_promote_wr20": float(
+            cfg.get("c_promote_wr20", DEFAULTS["c_promote_wr20"])),
+        "d_promote_wr20": float(
+            cfg.get("d_promote_wr20", DEFAULTS["d_promote_wr20"])),
         "done_wr20": float(cfg.get("done_wr20", DEFAULTS["done_wr20"])),
         "streak": int(cfg.get("streak", DEFAULTS["streak"])),
         "min_iters": int(cfg.get("min_iters", DEFAULTS["min_iters"])),
@@ -159,6 +177,8 @@ def save_curriculum(path: str | Path, cfg: dict) -> None:
         "c_mix_from": str(cfg.get("c_mix_from") or DEFAULTS["c_mix_from"]),
         "c_mix_warmup": int(cfg.get("c_mix_warmup", DEFAULTS["c_mix_warmup"])),
         "c_mix_start": float(cfg.get("c_mix_start", DEFAULTS["c_mix_start"])),
+        "d_mix_from": str(cfg.get("d_mix_from") or DEFAULTS["d_mix_from"]),
+        "e_mix_from": str(cfg.get("e_mix_from") or DEFAULTS["e_mix_from"]),
         "map_pool": str(cfg.get("map_pool") or DEFAULTS.get("map_pool") or ""),
         "a_launched": bool(cfg.get("a_launched")),
         "c_reset_opt_done": bool(cfg.get("c_reset_opt_done")),
@@ -194,6 +214,26 @@ def mix_target_prob(it: int, start_iter: int, warmup: int,
     return start_p + (1.0 - start_p) * t
 
 
+def teacher_mode_for_phase(phase: str) -> str:
+    return "expand" if str(phase) in EXPAND_PHASES else "rush"
+
+
+def tape_schema_for_phase(phase: str) -> str:
+    from rl.imitation import tape_schema_for_mode
+    return tape_schema_for_mode(teacher_mode_for_phase(phase))
+
+
+def promote_threshold(cfg: dict, phase: str) -> float:
+    cfg = _cfg(cfg)
+    if phase == "B":
+        return float(cfg["promote_wr20"])
+    if phase == "C":
+        return float(cfg.get("c_promote_wr20", DEFAULTS["c_promote_wr20"]))
+    if phase == "D":
+        return float(cfg.get("d_promote_wr20", DEFAULTS["d_promote_wr20"]))
+    return float(cfg["done_wr20"])
+
+
 def snapshot_phase_best(ckpt_dir: str | Path, phase: str) -> Path | None:
     """Copy best.pt/json aside before a harder bot can overwrite them."""
     d = Path(ckpt_dir)
@@ -217,6 +257,7 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--bot-type", "beginner",
             "--bc", "--bc-only",
             "--bc-teacher-bot", "beginner",
+            "--bc-teacher-mode", "rush",
             "--bc-games", str(int(cfg["bc_games"])),
             "--bc-epochs", str(int(cfg["bc_epochs"])),
             "--bc-rush", str(int(cfg.get("a_rush") or DEFAULTS["a_rush"])),
@@ -246,6 +287,7 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--bot-type", "beginner",
             "--bc",
             "--bc-teacher-bot", "beginner",
+            "--bc-teacher-mode", "rush",
             # wins-only BC (no --bc-keep-incomplete): incompletes = timeout turtle
             "--bc-games", str(int(cfg.get("b_bc_games") or DEFAULTS["b_bc_games"])),
             "--bc-epochs", str(int(cfg.get("b_bc_epochs") or DEFAULTS["b_bc_epochs"])),
@@ -266,26 +308,51 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--iters", str(int(cfg["bc_iters"])),
             "--onboard-phase", "B",
         ]
-    if phase == "C":
-        mix_start_iter = int(cfg.get("phase_started_iter") or 0) + 1
-        return [
-            "--bot-type", "easy",
-            "--sil", "--lambda-sil", "0.5",
-            # Same knobs as B: 1e-4 + Adam fresco + episode adv killed C.
-            "--lr", "2.0e-5",
-            "--adv-mode", "global",
-            # C must not use AMP: skip_frac=1.0 killed learning.
-            "--no-amp",
-            "--mix-from", str(cfg.get("c_mix_from") or DEFAULTS["c_mix_from"]),
-            "--mix-warmup", str(int(
-                cfg.get("c_mix_warmup", DEFAULTS["c_mix_warmup"]))),
-            "--mix-start", "{:.2f}".format(float(
-                cfg.get("c_mix_start", DEFAULTS["c_mix_start"]))),
-            "--mix-start-iter", str(max(1, mix_start_iter)),
-            "--iters", str(int(cfg["bc_iters"])),
-            "--onboard-phase", "C",
-        ]
+    if phase in EXPAND_PHASES:
+        return _expand_phase_flags(phase, cfg)
     return []
+
+
+def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
+    """C/D/E: PPO+SIL+expand BC vs easy/medium/hard with mix ramp."""
+    bot = PHASE_BOT[phase]
+    mix_from = {
+        "C": str(cfg.get("c_mix_from") or DEFAULTS["c_mix_from"]),
+        "D": str(cfg.get("d_mix_from") or DEFAULTS["d_mix_from"]),
+        "E": str(cfg.get("e_mix_from") or DEFAULTS["e_mix_from"]),
+    }[phase]
+    mix_start_iter = int(cfg.get("phase_started_iter") or 0) + 1
+    bc_start = int(cfg.get("phase_started_iter") or 0) or 1
+    return [
+        "--bot-type", bot,
+        "--bc",
+        "--bc-teacher-bot", bot,
+        "--bc-teacher-mode", "expand",
+        "--bc-games", str(int(cfg.get("b_bc_games") or DEFAULTS["b_bc_games"])),
+        "--bc-epochs", str(int(cfg.get("b_bc_epochs") or DEFAULTS["b_bc_epochs"])),
+        "--bc-rush", str(int(cfg.get("a_rush") or DEFAULTS["a_rush"])),
+        "--bc-warmup", str(int(cfg.get("b_bc_warmup") or DEFAULTS["b_bc_warmup"])),
+        "--bc-lambda-end", "{:.2f}".format(float(
+            cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))),
+        "--bc-start-iter", str(bc_start),
+        "--bc-macro-ticks", str(int(cfg.get("a_macro_ticks") or DEFAULTS["a_macro_ticks"])),
+        "--bc-max-steps", str(int(cfg.get("a_max_steps") or DEFAULTS["a_max_steps"])),
+        "--bc-win-cap", str(int(cfg.get("bc_win_cap") or DEFAULTS["bc_win_cap"])),
+        "--bc-win-prefer-ticks", str(int(
+            cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
+        "--lr", "2.0e-5",
+        "--adv-mode", "global",
+        "--sil", "--lambda-sil", "0.5",
+        "--no-amp",
+        "--mix-from", mix_from,
+        "--mix-warmup", str(int(
+            cfg.get("c_mix_warmup", DEFAULTS["c_mix_warmup"]))),
+        "--mix-start", "{:.2f}".format(float(
+            cfg.get("c_mix_start", DEFAULTS["c_mix_start"]))),
+        "--mix-start-iter", str(max(1, mix_start_iter)),
+        "--iters", str(int(cfg["bc_iters"])),
+        "--onboard-phase", phase,
+    ]
 
 
 def build_train_argv(base: list[str], phase: str, cfg: dict) -> list[str]:
@@ -375,9 +442,7 @@ def wr20_streak(results: list[str], threshold: float, streak: int,
 
 
 def phase_bot(phase: str) -> str:
-    if phase == "C":
-        return "easy"
-    return "beginner"
+    return PHASE_BOT.get(str(phase), "beginner")
 
 
 def iters_in_phase(rows: list[dict], bot_type: str, started_iter: int,
@@ -407,13 +472,14 @@ def drought_since_iter(cfg: dict | None, last_restore_iter: int = 0) -> int:
 
 
 def drought_blocked_until_min_iters(cfg: dict | None, rows: list[dict]) -> bool:
-    """C: wr vs easy starts at 0 — that is not a drought. Wait min_iters."""
-    if not cfg or cfg.get("phase") != "C":
+    """C/D/E: wr vs the new bot starts at 0 — that is not a drought."""
+    phase = str((cfg or {}).get("phase") or "")
+    if phase not in EXPAND_PHASES:
         return False
-    min_it = int(cfg.get("min_iters") or DEFAULTS["min_iters"])
+    min_it = int((cfg or {}).get("min_iters") or DEFAULTS["min_iters"])
     n_phase = iters_in_phase(
-        rows, phase_bot("C"), int(cfg.get("phase_started_iter") or 0),
-        onboard_phase="C")
+        rows, phase_bot(phase), int((cfg or {}).get("phase_started_iter") or 0),
+        onboard_phase=phase)
     return n_phase < min_it
 
 
@@ -442,11 +508,11 @@ def should_promote(cfg: dict, rows: list[dict], last_iter: int,
         if wr20(results) >= thr:
             return "B"
         return None
-    if phase not in ("B", "C"):
+    if phase not in ("B", "C", "D", "E"):
         return None
     bot = phase_bot(phase)
     results = outcomes_from_rows(rows, bot, onboard_phase=phase)
-    thr = float(cfg["promote_wr20"] if phase == "B" else cfg["done_wr20"])
+    thr = promote_threshold(cfg, phase)
     need = int(cfg.get("streak") or DEFAULTS["streak"])
     min_it = int(cfg.get("min_iters") or DEFAULTS["min_iters"])
     held = wr20_streak(results, thr, need, games_per_iter=games_per_iter)
@@ -454,7 +520,7 @@ def should_promote(cfg: dict, rows: list[dict], last_iter: int,
         rows, bot, int(cfg.get("phase_started_iter") or 0),
         onboard_phase=phase)
     if held >= need and n_phase >= min_it:
-        return "C" if phase == "B" else "done"
+        return PHASE_NEXT[phase]
     return None
 
 
@@ -530,8 +596,9 @@ def rewind_onboard(ckpt_dir: str | Path, keep_iter: int,
     floor on the next launch.
 
     Also copies src → best.pt (C used to leave a 0-win easy best that
-    collapse would restore). Allowed from B or C; keep_iter after A
-    returns to B.
+    collapse would restore). Allowed from B–E; keep_iter after A
+    returns to B. Dest phase is the onboard_phase of keep_iter when
+    present (rewind E→C stays C, not all the way to B).
     """
     d = Path(ckpt_dir)
     keep_iter = int(keep_iter)
@@ -553,40 +620,64 @@ def rewind_onboard(ckpt_dir: str | Path, keep_iter: int,
         cfg = load_curriculum(d / "curriculum.json") or new_curriculum()
     sft = int(cfg.get("sft_iters") or DEFAULTS["sft_iters"])
     cfg["a_launched"] = True
-    if keep_iter <= sft:
+    dest = _phase_of_iter(d, keep_iter)
+    if keep_iter <= sft or dest == "A":
         # Back to A (SFT seed). Don't pin BC start.
         cfg["phase"] = "A"
         cfg["b_bc_start_iter"] = 0
         cfg["phase_started_iter"] = 0
     else:
-        if cfg.get("phase") not in ("B", "C"):
+        if cfg.get("phase") not in ("B", "C", "D", "E"):
             raise ValueError(
-                f"rewind > sft_iters solo en fase B o C "
+                f"rewind > sft_iters solo en fase B-E "
                 f"(curriculum phase={cfg.get('phase')!r})")
         warmup = int(cfg.get("b_bc_warmup") or DEFAULTS["b_bc_warmup"])
-        from_c = cfg.get("phase") == "C"
+        from_later = cfg.get("phase") in EXPAND_PHASES
         origin = int(cfg.get("b_bc_start_iter") or 0)
         if origin <= 0:
             origin = int(cfg.get("phase_started_iter") or 0)
-        cfg["phase"] = "B"
-        cfg["c_reset_opt_done"] = False
-        if from_c:
-            # Undo a bad C: λ stays at the B floor; min_iters restarts
-            # from keep_iter so wr20 leftover from B no re-promueve ya.
-            if origin > 0:
+        if dest in EXPAND_PHASES:
+            cfg["phase"] = dest
+            cfg["phase_started_iter"] = keep_iter
+        else:
+            cfg["phase"] = "B"
+            cfg["c_reset_opt_done"] = False
+            if from_later:
+                # Undo a bad C/D/E: λ stays at the B floor; min_iters
+                # restarts from keep_iter so leftover wr no re-promueve.
+                if origin > 0:
+                    cfg["b_bc_start_iter"] = origin
+                else:
+                    cfg["b_bc_start_iter"] = max(1, keep_iter + 1 - warmup)
+                cfg["phase_started_iter"] = keep_iter
+            elif origin > 0 and origin <= keep_iter:
                 cfg["b_bc_start_iter"] = origin
             else:
+                cfg["phase_started_iter"] = keep_iter
                 cfg["b_bc_start_iter"] = max(1, keep_iter + 1 - warmup)
-            cfg["phase_started_iter"] = keep_iter
-        elif origin > 0 and origin <= keep_iter:
-            cfg["b_bc_start_iter"] = origin
-        else:
-            cfg["phase_started_iter"] = keep_iter
-            cfg["b_bc_start_iter"] = max(1, keep_iter + 1 - warmup)
     save_curriculum(d / "curriculum.json", cfg)
     info = {"src": src.name, "metrics_kept": n_m, "race_kept": n_r,
             "phase": cfg["phase"]}
     return cfg, info
+
+
+def _phase_of_iter(ckpt_dir: Path, keep_iter: int) -> str | None:
+    """onboard_phase of the metrics row at keep_iter, if any."""
+    metrics = ckpt_dir / "metrics.jsonl"
+    if not metrics.exists():
+        return None
+    try:
+        for line in metrics.read_text(encoding="utf-8").splitlines():
+            try:
+                j = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(j, dict) and j.get("iter") == keep_iter:
+                p = str(j.get("onboard_phase") or "")
+                return p if p in PHASES else None
+    except OSError:
+        return None
+    return None
 
 
 def _write_rewind_best_json(ckpt_dir: Path, keep_iter: int) -> None:
