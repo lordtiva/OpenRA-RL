@@ -73,7 +73,8 @@ def _aidx(obs):
 def test_action_types_append_only():
     assert "naval_attack_move" in ACTION_TYPES and "air_attack_move" in ACTION_TYPES
     assert ACTION_TYPES.index("air_attack_move") == ACTION_TYPES.index("naval_attack_move") + 1
-    assert N_ACTION_TYPES == TYPE_TO_IDX["army_guard"] + 1
+    assert N_ACTION_TYPES == TYPE_TO_IDX["support_power"] + 1
+    assert TYPE_TO_IDX["patrol"] == TYPE_TO_IDX["army_guard"] + 1
     assert "naval_attack_move" in ENABLED_TYPES
     assert "harvest" in TYPES_USE_CELL
 

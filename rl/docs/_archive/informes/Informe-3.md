@@ -1,3 +1,5 @@
+> **Archivado 2026-09-09.** Diagnóstico garrison vs timeout. Índice vivo: [`../../README.md`](../../README.md).
+
 Los nuevos datos de **`metrics2.txt`** (72 iteraciones) y **`live_games2.txt`** revelan el estado exacto del agente tras los cambios:
 
 ### El balance inicial:

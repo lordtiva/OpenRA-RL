@@ -14,7 +14,7 @@ Pools:
 
 Spawn / Multi rotation: OpenRA lobby spawn pick is not hooked here. Variety
 for P3 = map pool (2+ maps). True Multi1/Multi2 spawn rotation needs engine
-or session overrides — see TODO in docs/23.
+or session overrides — see TODO in rl/docs/contract/ra-completo.md.
 """
 from __future__ import annotations
 

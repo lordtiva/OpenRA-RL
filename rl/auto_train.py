@@ -42,7 +42,7 @@ Ctrl+C para parar todo.
 Flags del launcher (no van a rl.train):
   --scratch       pesos random; ignora latest/seed
   --onboard       curriculum A→B→C (SFT teacher vs beginner, PPO+BC beginner,
-                  PPO easy). Ver rl/docs/22-onboard.md.
+                  PPO easy). Ver rl/docs/start/onboard.md.
   --onboard-rewind N
                   Una vez, en B: latest <- best/iterN, trunca metrics/race.
                   λ_bc se queda en el piso (no reinicia a 1.0).
@@ -658,7 +658,7 @@ def parse_auto_args(argv=None):
     ap.add_argument(
         "--onboard", action="store_true",
         help="Curriculum A→B→C para clonar el repo sin .pt. "
-             "Ver rl/docs/22-onboard.md.")
+             "Ver rl/docs/start/onboard.md.")
     ap.add_argument("--onboard-sft-iters", type=int, default=20,
                     help="Iters de SFT (fase A).")
     ap.add_argument("--onboard-a-promote-wr20", type=float, default=0.25,

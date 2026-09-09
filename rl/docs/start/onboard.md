@@ -1,40 +1,26 @@
-﻿# 22 — Onboarding: de 0 a ~50% vs easy, sin un `best.pt`
+# Onboarding: de 0 a ~50% vs easy, sin un `best.pt`
 
+> **Para quién:** clonaste el repo y **no tenés checkpoints**.
+> **Qué no es:** un atajo para medir una arch nueva contra un run viejo. Eso sigue siendo `--scratch` vs 100% easy (sin `--onboard`).
+> **Contrato Aliados:** [`../contract/ra-aliados.md`](../contract/ra-aliados.md). Docker / dash: [`operacion.md`](operacion.md).
 
+Comando: `.\.venv\Scripts\python.exe rl\auto_train.py --scratch --onboard` (después del `--build` de Docker).
 
-> **Para quién:** alguien que clonó el repo y **no tiene checkpoints**. No hace falta un `best.pt` de un run anterior.
+<details>
+<summary>Notas de corte (mental-base / army push / Phase A) — no el hello-world</summary>
 
-> **Qué no es:** un atajo para medir una arquitectura nueva contra Run 46. Eso sigue siendo `--scratch` vs 100% easy (ver más abajo).
+**2026-09-06 — mental base v3:** beacon GPS sigue apagado (`beacon=None` en encode/push). El teacher recuerda un **mental enemy-base** (centroide del cluster denser de edificios enemigos vistos) y empuja ahí cuando no hay leftover visible. Escalares: `has_enemy_base_belief`, rel dx/dy, conf (`SCALAR_DIM=33`, Net2Net pad). Phase A `a_max_steps` **1800**; early fog scout con ≥3 combate. Regenerar `teacher_wins/` (schema `eco_and_combat_mental_v4` / `--onboard-fresh-tapes`). **K=2 eco+push** same macro-tick.
 
-> **Fecha:** 2026-09-04.
+**Army push (runtime adapter, 2026-09-07):** pipeline en `index_to_command_effective` + hysteresis en live/rollout. Live/eval lo toma al **reiniciar el proceso** (sin `--scratch`).
 
+1. `stage_army_attack_cell`: `n_advanced>=8` / `cen.x>35` / attractor guard — flank N/S **solo** en opening choke.
+2. `remap_move_cell`: `nearest_passable` cerca del click — **sin** funnel south-flank/ore.
+3. hysteresis (`should_emit_army_push` / `filter_army_push_hysteresis`, eps=8): no spamea el mismo `army_attack_move`.
+4. `guard_army_push_cell`: no tira al oeste una vanguardia `x>70`; fog-east retarget (beacon/mental/front) si no hay edificios enemigos visibles.
 
-> **2026-09-06 — mental base v3:** beacon GPS sigue apagado (`beacon=None` en
-> encode/push). El teacher recuerda un **mental enemy-base** (centroide del
-> cluster denser de edificios enemigos vistos) y empuja ahí cuando no hay
-> leftover visible. Escalares nuevos: `has_enemy_base_belief`, rel dx/dy, conf
-> (`SCALAR_DIM=33`, Net2Net pad). Phase A `a_max_steps` **1800**; early fog
-> scout con ≥3 combate. Regenerar `teacher_wins/` (schema
-> `eco_and_combat_mental_v4` / `--onboard-fresh-tapes`). **K=2 eco+push** same macro-tick (student dual-emit + BC labels).
-- **Army push (runtime adapter, 2026-09-07):** pipeline en `index_to_command_effective` + hysteresis en live/rollout. Live/eval lo toma al **reiniciar el proceso** (sin `--scratch`). Un live WIN (~40k ticks a base NE) valida el remate; Phase A promotion sigue necesitando wr20 en metrics.
-  1. `stage_army_attack_cell`: `n_advanced>=8` / `cen.x>35` / attractor guard — flank N/S **solo** en opening choke.
-  2. `remap_move_cell`: `nearest_passable` cerca del click — **sin** funnel south-flank/ore.
-  3. hysteresis (`should_emit_army_push` / `filter_army_push_hysteresis`, eps=8): no spamea el mismo `army_attack_move`.
-  4. `guard_army_push_cell`: no tira al oeste una vanguardia `x>70`; fog-east retarget (beacon/mental/front) si no hay edificios enemigos visibles.
+**2026-09-06 — Phase A inactivity:** Phase A / `--onboard` forces `--qsa-topk 0` and `--xf-topk 0` (dense). `balance_bc_samples` defaults **512/512**. Teacher `_push_cell`: visible/leftover/ghost/mental-base first; only when belief empty, `resolve_beacon` is the opening-SFT prior. `bc_only` eval usa **temperature=0.0**. Schema `eco_and_combat_mental_v4`.
 
-
-
-> **2026-09-06 — Phase A inactivity fixes:** Phase A / `--onboard` forces
-> `--qsa-topk 0` and `--xf-topk 0` (dense; sparse topk was masking enemy push
-> cells and dropping attack BC). `balance_bc_samples` defaults **512/512**
-> (was ~96). Teacher `_push_cell`: visible/leftover/ghost/mental-base first;
-> only when belief empty, `resolve_beacon` is the opening-SFT prior, else fog
-> scout. `bc_only` eval uses **temperature=0.0**. Schema
-> `eco_and_combat_mental_v4` — regenerate tapes (`--onboard-fresh-tapes`).
-> Keep `latest.pt` (no arch/SCALAR change).
-
-
-
+</details>
 
 ---
 
@@ -94,7 +80,7 @@ Esperá `200`. El segundo daemon (`docker-compose.scale.yaml`, puerto 8010) es o
 
 
 
-Detalle de Docker / dashboard / cuelgues: `07-operacion.md`.
+Detalle de Docker / dashboard / cuelgues: [`operacion.md`](operacion.md).
 
 
 
@@ -463,9 +449,9 @@ Si B no llega a 50% en ~200 iters, el teacher de A no dejó un build order usabl
 
 
 
-Detalle de operación diaria: `07-operacion.md`. Plan de capas (BC/SIL/self-play): `12-plan-4-capas-siguiente-nivel.md`.
+Detalle de operación diaria: [`operacion.md`](operacion.md). Plan de capas (BC/SIL/self-play): [`../design/plan-4-capas.md`](../design/plan-4-capas.md).
 
-Gaps RA completo (naval/air/buildings/micro): `23-ra-completo-todo.md`.
+Gaps RA completo (naval/air/buildings/micro): [`../contract/ra-completo.md`](../contract/ra-completo.md). Contrato Aliados: [`../contract/ra-aliados.md`](../contract/ra-aliados.md).
 
 
 

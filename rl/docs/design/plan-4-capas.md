@@ -1,8 +1,8 @@
 # Plan 4 capas — Siguiente nivel en tu hardware (2070 + 5600X + 32GB)
 
-> **Fuente:** tercera revisión del revisor quisquilloso (2026-08-27), respuesta a "¿cuál es mi siguiente jugada con mi hardware?". Guardado como roadmap de 6-12 meses. Complementa a `10-benchmark-alphastar-openai-five.md` (mapa de familia) y `11-revision-quisquillosa.md` (termómetro).
+> **Fuente:** tercera revisión del revisor quisquilloso (2026-08-27), respuesta a "¿cuál es mi siguiente jugada con mi hardware?". Guardado como roadmap de 6-12 meses. Complementa a [`../_archive/auditorias/10-benchmark-alphastar-openai-five.md`](../_archive/auditorias/10-benchmark-alphastar-openai-five.md) (mapa de familia) y [`../_archive/auditorias/11-revision-quisquillosa.md`](../_archive/auditorias/11-revision-quisquillosa.md) (termómetro).
 > **Tesis:** el cuello no es el algoritmo (PPO ya hace su trabajo: maximiza `garrison`), son **muestras, crédito y que el juego se pueda ganar**. En 1 GPU el stack que rinde es `PPO + BC + self-imitation + self-play chico`.
-> **Estado empírico post-Run8 / Run9 (2026-08-29):** el plan se deja tal cual. Qué de Capa 0 ya está, qué incomplete es este run, y el corte 400–450 → `13-capa0-status-post-run8.md`.
+> **Diario empírico Capa 0 (Runs 8–36):** [`../_archive/runs/13-capa0-status-post-run8.md`](../_archive/runs/13-capa0-status-post-run8.md). El plan se deja tal cual.
 
 ---
 
@@ -81,7 +81,7 @@ La 2070 aguanta esto sin sudar. No agrandes canales a lo loco; cambiá el sesgo 
 |---|---|---|---|
 | **Transformer de entidades** (2 capas, 4 heads, d=64, 48 slots) | Reemplaza la media enmascarada | Focus fire, harv vs tanque, quién está herido. 48 tokens es ridículamente barato. | ~+2-4 ms/step |
 | **Scatter** | Pintar cada unidad (equipo, HP, rol) en el fmap antes de `cell_head` | AlphaStar de verdad. Hoy Ch6/Ch8 son densidad anónima; la cabeza de celda no sabe qué hay en (x,y). | casi 0 |
-| **Condicionar `dist_cell` a la unidad** | Concat del embedding del slot elegido | Ya diagnosticado en `11-revision-quisquillosa.md`. Sin esto el autoregresivo es de mentira. | 0 |
+| **Condicionar `dist_cell` a la unidad** | Concat del embedding del slot elegido | Ya diagnosticado en [`../_archive/auditorias/11-revision-quisquillosa.md`](../_archive/auditorias/11-revision-quisquillosa.md). Sin esto el autoregresivo es de mentira. | 0 |
 | **GRU 416 → 512** | Opcional, al final | Solo si el transformer ya está y el crítico sigue ciego a planes de 30+ steps. | irrelevante |
 
 No pongas un ViT sobre el mapa. La U-Net lite de RF ~40 celdas está bien para mapas de RA. El agujero es el set de unidades, no el terreno.

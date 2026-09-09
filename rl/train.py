@@ -1146,7 +1146,7 @@ def main():
                     help="env.steps por episodio (x2 ticks c/u; 6000≈8min juego). "
                          "En modo macro cuenta DECISIONES. Régimen 2-B: 208 "
                          "decisiones — sonda de horizonte midió que ninguna "
-                         "declaración cabe en 104 (docs/sonda-horizonte.md)")
+                         "declaración cabe en 104 (rl/docs/_archive/eras/sonda-horizonte.md)")
     ap.add_argument("--macro-ticks", type=int, default=0,
                     help=">0 activa modo v4-macro: presupuesto de ticks por "
                          "decisión vía advance() (ej. 160); 0 = frame-skip viejo")

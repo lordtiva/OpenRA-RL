@@ -102,9 +102,11 @@ def test_group_helpers():
     assert "infantry_attack_move" in ENABLED_TYPES
     assert "infantry_attack_move" in MOVE_CELL_TYPES
     assert "infantry_attack_move" in TYPES_USE_CELL
-    assert TYPE_TO_IDX["army_guard"] == N_ACTION_TYPES - 1
-    assert TYPE_TO_IDX["air_attack_move"] == N_ACTION_TYPES - 4
-    assert TYPE_TO_IDX["naval_attack_move"] == N_ACTION_TYPES - 5
+    assert TYPE_TO_IDX["support_power"] == N_ACTION_TYPES - 1
+    assert TYPE_TO_IDX["patrol"] == N_ACTION_TYPES - 2
+    assert TYPE_TO_IDX["army_guard"] == N_ACTION_TYPES - 3
+    assert TYPE_TO_IDX["air_attack_move"] == N_ACTION_TYPES - 6
+    assert TYPE_TO_IDX["naval_attack_move"] == N_ACTION_TYPES - 7
     assert "naval_attack_move" in ENABLED_TYPES
     assert "air_attack_move" in TYPES_USE_CELL
 

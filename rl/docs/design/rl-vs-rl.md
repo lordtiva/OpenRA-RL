@@ -1,4 +1,4 @@
-﻿# 16 — RL-vs-RL (dual bridge) + Run 42
+﻿# RL-vs-RL (dual bridge) + Run 42
 
 > **Fecha:** 2026-09-03 · **Branch:** `exp/rl-2026-08-28-grok` · **Seed:** `best.pt` iter 1141 (easy, wr~33.8%, r20 0.5)
 
@@ -76,7 +76,7 @@ Smoke: reset con `bot_type=rl` + `fase2_a_short.oramap` (map_data); step con `pe
 
 ## Relación con el plan
 
-Cierra el bloqueo de **Capa 3** en `12-plan-4-capas-siguiente-nivel.md` (“sesiones RL vs RL en el bridge”). PFSP de bots (Run 41) queda como ancla; el pool `rl` es self-play chico de checkpoints.
+Cierra el bloqueo de **Capa 3** en [`plan-4-capas.md`](plan-4-capas.md) (“sesiones RL vs RL en el bridge”). PFSP de bots (Run 41) queda como ancla; el pool `rl` es self-play chico de checkpoints.
 
 ## Watchdog sequía (post-mortem Run 42)
 

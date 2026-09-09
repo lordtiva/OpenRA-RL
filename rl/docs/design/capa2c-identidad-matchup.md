@@ -1,6 +1,6 @@
 # Capa 2c — Identidad de entidad y matchup (spec de implementación)
 
-> **Fecha:** 2026-08-31 · **No reemplaza** `12-plan-4-capas-siguiente-nivel.md` ni `13-capa0-status-post-run8.md`.
+> **Fecha:** 2026-08-31 · **No reemplaza** [`plan-4-capas.md`](plan-4-capas.md) ni el diario [`../_archive/runs/13-capa0-status-post-run8.md`](../_archive/runs/13-capa0-status-post-run8.md).
 > **Qué es:** deuda de Capa 2 que el corte 1010 no cerró: el transformer ve 48 propias anónimas; Ch8 es densidad; `attack` pega al más cercano. Este doc es el PR plan para implementarlo **sin tabula rasa**.
 > **No es Capa 3.** Capa 3 = sparring (`easy` → `hard` → RL-vs-RL). 2c es el sesgo inductivo para que ese sparring *pueda* enseñar “e3 vs tanque”.
 > **No es Capa 2b.** 2b = QSA / GDN / GRU 512 (mapa / memoria). Otro corte, después.

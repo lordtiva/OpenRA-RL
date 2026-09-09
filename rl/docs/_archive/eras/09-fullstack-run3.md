@@ -110,7 +110,7 @@ Combinación `auto_support` + `SCALAR 21` (Lanchester + tech tier) + `w_raze 2.0
 * Iter 83 Ep4: Propio **`$68,800` vs Rival `$7,100`**
 * Iter 93 Ep3/4: Propio **`$44,350 / $47,975` vs Rival `$14,200 / $15,133`**
 
-Ver `08-avance-run2.md` §2 para la progresión económica y `12-plan-4-capas-siguiente-nivel.md` Capa 0 para el contexto de victoria.
+Ver [`08-avance-run2.md`](08-avance-run2.md) §2 para la progresión económica y [`../../design/plan-4-capas.md`](../../design/plan-4-capas.md) Capa 0 para el contexto de victoria.
 
 ### 6.4 Diagnóstico fundamental: ¿por qué sigue `winrate 0.0`?
 
@@ -127,8 +127,8 @@ El entrenamiento demostró que la red **sabe cosechar, sabe guarnecerse y sabe a
 1.  **Declaración temprana de victoria en C#/Bridge:** si el enemigo no tiene edificios de producción vivos (`n_buildings_production == 0`) o su patrimonio cae por debajo del 10% del tuyo durante 500 ticks → declarar `win` inmediato.
 2.  **Barrido de asalto sostenido:** cuando el `beacon` principal sea destruido, redirigir `army_attack_move` a esquinas/celdas no exploradas para limpiar restos.
 
-Una vez habilitado el cierre de partida en el motor, este mismo agente debería pasar de **0% a 60-70% de victorias** sin tocar hiperparámetros ni red. Ver `12-plan-4-capas-siguiente-nivel.md` Capa 0 para el detalle.
+Una vez habilitado el cierre de partida en el motor, este mismo agente debería pasar de **0% a 60-70% de victorias** sin tocar hiperparámetros ni red. Ver [`../../design/plan-4-capas.md`](../../design/plan-4-capas.md) Capa 0 para el detalle.
 
 ## 8. Congelado
 
-`SCALAR_DIM=21` es definitivo. Próximos cambios solo por `w_*` (sin romper `scalar_mlp`) o por `--bot-type`. Ver `08-avance-run2.md` §3 para el diagnóstico que motiva este preset y `12-plan-4-capas-siguiente-nivel.md` para el roadmap post-Run3.
+`SCALAR_DIM=21` es definitivo **en este corte** (hoy el vivo es 33). Próximos cambios solo por `w_*` (sin romper `scalar_mlp`) o por `--bot-type`. Ver [`08-avance-run2.md`](08-avance-run2.md) §3 para el diagnóstico que motiva este preset y [`../../design/plan-4-capas.md`](../../design/plan-4-capas.md) para el roadmap post-Run3.

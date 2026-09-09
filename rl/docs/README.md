@@ -1,66 +1,86 @@
-# RL — Documentación de la competencia
+# RL — documentación
 
-Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite → ONNX → Flutter). Todo lo que estaba disperso en `docs/*.md` se consolidó acá. `docs/` en la raíz queda solo con `banner.png` y `architecture.png` del proyecto original.
+Fuente de verdad del agente PPO (AlphaLiteNet v2) para OpenRA mod **RA Aliados**.
 
-## Índice
+`docs/` en la raíz del repo son **imágenes** del proyecto original (`banner.png`, `architecture.png`). Todo el texto técnico vive acá.
 
-| # | Documento | Qué cubre | Estado |
-|---|-----------|-----------|--------|
-| 00 | `roadmap-agente.md` | Roadmap vivo por fases (v3.1 → v4-macro → Fase 5 ONNX) | Actualizado 2026-08-27 |
-| 01 | `diseno-advance-macro.md` | Diseño `advance()` con interrupciones (52 decisiones / ~10s por episodio) | Implementado y activo |
-| 02 | `auditoria-pipeline-2026-08-24.md` | Auditoría F1-F10 del pipeline (bugs A1-B6 verficados contra fuente) | Cerrada, tests verdes |
-| 03 | `revision-externa-rl.md` | Revisión externa 1 (previa a la auditoría) | Cerrada |
-| 04 | `era-economica.md` | Era económica: medición `earned` vs pendiente OLS, cierre en iter 1969 | Cerrada (FALLO documentado) |
-| 05 | `fix-endgame-multisesion.md` | Fix `MissionObjectives → EndGame` directo (winrate 0 por `RunAfterDelay`) | Aplicado |
-| 06 | `fase2-curriculum.md` | Curriculum militar Escenario A (base pre-construida→juego completo) + escalera A→D | Diseño verificado |
-| 07 | `sonda-horizonte.md` | Sonda: ¿cuánto tarda un `win/lose` declarado en Escenario A? + `horizonte 624` | Medido |
-| 08 | `parche-grande-2026-08.md` | Parche grande 2026-08: fin de partida + `RlGlobalSummary.earned` + CoordConv/U-Net + BPTT + `eradicate_v3` | Aplicado 2026-08-26 |
-| **09** | `08-avance-run2.md` | **Avance Run2: salto Run1→Run2 (U-Net/BPTT/máscaras), tabla comparativa, diagnóstico coloso pacifista** | **Congela Run2 (2026-08-27)** |
-| **10** | `09-fullstack-run3.md` | **Full-stack Run3: SCALAR 21 + auto_support + eradicate_v4 (w_raze 2.0, w_timeout 1.0) — coloso con remate** | **Run3 listo para lanzar (2026-08-27)** |
-| **11** | `10-benchmark-alphastar-openai-five.md` | **Benchmark: dónde estás vs AlphaStar/OpenAI Five — qué ya tenés y las 3 brechas (self-play, imitation, annealing)** | **Posicionamiento — mapa de familia** |
-| **12** | `11-revision-quisquillosa.md` | **Contra-benchmark quisquilloso: dónde infla la tabla, 6 brechas no contadas y veredicto recalibrado (chasis vs motor)** | **Termómetro de nivel** |
-| **13** | `12-plan-4-capas-siguiente-nivel.md` | **Plan 4 capas para tu hardware (2070+5600X): Capa 0 win posible + Capa 1 BC/SIL + Capa 2 transformer/scatter + Capa 3 self-play + throughput** | **Roadmap 6-12 meses (orden por ROI) — no se modifica** |
-| **13b** | `13-capa0-status-post-run8.md` | **Resume 1141. Run 36 archivado (pack-12 1142-1334). Higiene PLACE `role_of` + concat vacío. Pack-12+AMP se quedan. Remate/asalto FULL off.** | **Companion del 12 — 2026-09-02** |
-| **13c** | `14-capa2c-identidad-matchup.md` | **Capa 2c: A+B shipped. C smoke falló, revertido. Nudge sin beacon. No 128/256.** | **Spec — 2026-09-01** |
-| **13d** | `15-facciones-mods-roles.md` | **No reentrenar cada país. Un train RA Aliados; soviet=mismo ckpt; otro mod=otro ckpt** | **Contrato — 2026-08-31** |
-| **14** | `06-filosofia-rl.md` | **Filosofía de traducción bot→RL: 4 pilares + crítica a sobre-ingeniería de reward** | **Consolida análisis `ai.yaml` + teoría RL** |
-| **15** | `07-operacion.md` | **Comandos PowerShell (contenedor / train / dashboard / skirmish vs PPO), reglas de run limpio, criterios de promoción** | **Nuevo** |
-| **16** | `16-rl-vs-rl-run42.md` | **RL-vs-RL dual bridge + Run 42 (PFSP-RL, era iter 1, seed best-1141, BC off)** | **Capa 3 self-play — 2026-09-03** |
-| **17** | 17-run43-no-war-nudge.md | **Run 43: seed best@79, war nudge OFF, PFSP medium+rl** | **2026-09-03** |
-| **18** | 18-run44-pack-total-lr.md | **Run 44: PACK_ARMY total>=12 + LR 1e-4, seed best@80** | **2026-09-03** |
-| **19** | `19-run45-reseed-best80.md` | **Run 45: reseed seed-best80 post Run44 plateau** | **2026-09-04** |
-| **20** | `20-run46-burnin-topk.md` | **Run 46: burn-in 8 + XF top-k 16** | **2026-09-04** |
-| **21** | `21-run47-map-qsa.md` | **Run 47: map QSA block 8 top-8** | **2026-09-04** |
-| **22** | `22-onboard.md` | **De 0 a ~50% vs easy sin un `best.pt`: `--scratch --onboard` (SFT teacher → beginner → easy)** | **Onboarding — 2026-09-04** |
-| **23** | `23-ra-completo-todo.md` | **Gaps RA completo vs train land: naval/air macros, building slots, micro, mapas, obs/dash (P0-P4)** | **P0–P4 DONE - 2026-09-09** |
+Historia de runs, auditorías v1 e informes de revisión: [`_archive/`](_archive/README.md). No son el hello-world.
 
-## Cómo leer esto
+---
 
-1. **Si clonaste el repo y no tenés pesos:** `22-onboard.md` (un comando) + `07-operacion.md` (Docker / dash). El resto de esta lista es historia de runs, no el hello-world.
-1b. **Si entrás por primera vez al diseño:** `roadmap-agente.md` → `parche-grande-2026-08.md` §1-5 → `08-avance-run2.md` → `09-fullstack-run3.md` → `10-benchmark-alphastar-openai-five.md` + `11-revision-quisquillosa.md` + `12-plan-4-capas-siguiente-nivel.md` (mapa + termómetro + plan) + `13-capa0-status-post-run8.md` (qué de Capa 0 ya está) + `14-capa2c-identidad-matchup.md` (deuda de identidad / matchup).
-2. **Si vas a tocar reward:** `08-avance-run2.md` §3 + `09-fullstack-run3.md` §1-2 + `11-revision-quisquillosa.md` §4-5 + `12-plan-4-capas-siguiente-nivel.md` Capa 0 (riesgo garrison/annealing) + `06-filosofia-rl.md` §2-3 + `reward_shaping.py` como fuente.
-3. **Si vas a tocar arquitectura:** `diseno-advance-macro.md` + `parche-grande-2026-08.md` §3 (CoordConv/U-Net/broadcast GRU) + `13-capa0-status-post-run8.md` *Deuda de la cabeza de celda* y *Qué robar de Qwen3.8-Flash-Next* (Capa 2: pointer + QSA al mapa; no GDN/MoE el mismo PR). **Capa 2c (slots / rol / enemigos / attack-actor):** `14-capa2c-identidad-matchup.md` — tres PRs Net2Net, no 128/256, no 2b el mismo corte.
-4. **Si vas a lanzar un run:** `07-operacion.md` (3 comandos). Si es el primer train del clone: `22-onboard.md`.
-4c. **Si vas a ampliar RA completo (naval/air/buildings):** `23-ra-completo-todo.md`.
-4b. **Si vas a self-play / PFSP-RL:** `16-rl-vs-rl-run42.md` (dual bridge, Run 42).
-6. **Si pensás “¿un train por facción?”:** `15-facciones-mods-roles.md` (no: un ckpt `ra` Aliados cubre los 3 países; soviet=mismo ckpt; `cnc`/`d2k`=ckpt nuevo).
-5. **Si vas a tocar el action set** (`sell`/`rally`/`guard`/`APC`/`stance`): `13-capa0-status-post-run8.md` *Órdenes vs scripted* — Capa 0 = support, Capa 2 = pointer, nunca `surrender`. No meter tipos nuevos en `ENABLED_TYPES` el mismo corte que la red.
+## Empezá acá
 
-## Mapa de código ↔ doc
+| Querés | Doc |
+|--------|-----|
+| Clonaste el repo y no tenés pesos | [`start/onboard.md`](start/onboard.md) |
+| Docker, dash, skirmish, reglas de run | [`start/operacion.md`](start/operacion.md) |
+| El agente es RA **Aliados** (lock, catálogo, superpoderes) | [`contract/ra-aliados.md`](contract/ra-aliados.md) |
+| Un train por país / soviet / otro mod | [`contract/facciones-mods-roles.md`](contract/facciones-mods-roles.md) |
+| Qué hay de naval / air / buildings (P0–P4) | [`contract/ra-completo.md`](contract/ra-completo.md) |
 
-| Doc | Código fuente | Proto / Config |
-|-----|---------------|----------------|
-| `advance()` macro | `openra_env/server/bridge_client.py`, `openra_env/server/openra_environment.py`, `openra_env/generated/rl_bridge*` | `proto/rl_bridge.proto` `GlobalSummary` |
-| Auditoría F1-F10 | `rl/rollout.py`, `rl/network.py`, `rl/trainer.py`, `rl/economy_race.py` | `rl/tools/verify_offline.py` (30 checks) |
-| Reward `eradicate_v4` | `rl/reward_shaping.py` (`w_raze 2.0`, `w_timeout 1.0`) + `rl/auto_support.py` | `rl/obs_encoding.py` `SCALAR_DIM=21` |
-| Red | `rl/network.py` `AlphaLiteNet` (CoordConv 11ch, U-Net, GRU 416, 4 cabezas, Capa 2 xf/scatter) | `rl/obs_encoding.py` `SPATIAL_CHANNELS=9` `MAX_UNITS=96` combat-first |
-| Bot rival | `openra_env/server/openra_process.py` `BOT_TYPE_MAP` | `OpenRA/mods/ra/rules/ai.yaml` |
-| RL-vs-RL | `ExternalBotBridge` + `rl/peer_obs.py` + `rl/pfsp.py` `--pfsp-rl` | `rl_bridge.proto` `peer_commands` / `GetObservation` |
+```powershell
+cd C:\Users\lordc\Desktop\OpenRA-RL
+$env:PYTHONPATH=""
+docker compose -f docker-compose.yaml -f docker-compose.scale.yaml up -d --build
+.\.venv\Scripts\python.exe rl\auto_train.py --scratch --onboard
+```
+
+Rebuild C# / Docker es obligatorio después del corte Aliados (lobby + órdenes nuevas). Python solo no cambia el bando.
+
+---
+
+## Contratos (código)
+
+| Doc | Qué fija |
+|-----|----------|
+| [`contract/ra-aliados.md`](contract/ra-aliados.md) | Lobby `RandomAllies`, catálogo, APC, capture/infiltrate, Chronosphere, patrol, Chrono Tank, `IDENTITY_ITEMS` |
+| [`contract/facciones-mods-roles.md`](contract/facciones-mods-roles.md) | Roles agnósticos a país. Un ckpt `ra` Aliados cubre england/france/germany. Soviet = mismo ckpt más adelante. `cnc`/`d2k` = otro ckpt |
+| [`contract/ra-completo.md`](contract/ra-completo.md) | P0–P4 **DONE** (macros navy/air, building slots, micro, mapas, obs/dash). Leftovers = tapes / multi-spawn, no chasis |
+
+---
+
+## Diseño (sigue vigente)
+
+| Doc | Qué cubre |
+|-----|-----------|
+| [`design/filosofia-rl.md`](design/filosofia-rl.md) | Traducción bot→RL: 4 pilares. Reward no es el producto |
+| [`design/plan-4-capas.md`](design/plan-4-capas.md) | Roadmap 6–12 meses en 2070+5600X: entorno → BC/SIL → red → self-play |
+| [`design/capa2c-identidad-matchup.md`](design/capa2c-identidad-matchup.md) | Capa 2c: A+B shipped. Pointer 2c-C revertido |
+| [`design/advance-macro.md`](design/advance-macro.md) | `advance()` con interrupciones |
+| [`design/rl-vs-rl.md`](design/rl-vs-rl.md) | Dual bridge + PFSP-RL (`--pfsp-rl`). El log de Run 42 queda como ejemplo |
+
+Diario empírico de Capa 0 (Runs 8–36, 49 kB): [`_archive/runs/13-capa0-status-post-run8.md`](_archive/runs/13-capa0-status-post-run8.md).
+
+---
+
+## Cómo leer (casos)
+
+1. **Train Aliados:** `start/onboard.md` + `start/operacion.md` + `contract/ra-aliados.md`.
+2. **Tocar reward:** `design/filosofia-rl.md` + `rl/reward_shaping.py` (fuente). El preset vivo es `eradicate_v4`.
+3. **Tocar red / action set:** `design/capa2c-identidad-matchup.md` + `design/plan-4-capas.md`. Un régimen por vez. No crecer `ENABLED_TYPES` el mismo corte que la arch.
+4. **Self-play:** `design/rl-vs-rl.md`.
+5. **Otro mod:** `contract/facciones-mods-roles.md` — no es este run.
+
+---
+
+## Mapa código ↔ doc
+
+| Tema | Código | Proto / config |
+|------|--------|----------------|
+| `advance()` | `openra_env/server/bridge_client.py`, `openra_environment.py` | `proto/rl_bridge.proto` |
+| Red | `rl/network.py` `AlphaLiteNet` | `rl/obs_encoding.py` `SCALAR_DIM=33` `MAX_UNITS=96` |
+| Acciones | `rl/action_adapter.py` | `ActionType` en proto + `openra_env/models.py` |
+| Roles / uniques | `rl/roles.py` `IDENTITY_ITEMS`, `rl/allies.py` | — |
+| Reward `eradicate_v4` | `rl/reward_shaping.py` + `rl/auto_support.py` | — |
+| Lobby Aliados | `RLSessionManager.ResolvePlayerFaction` | `CreateSessionRequest.player_faction` |
+| RL-vs-RL | `ExternalBotBridge` + `rl/peer_obs.py` + `rl/pfsp.py` | `peer_commands` / `GetObservation` |
+
+---
 
 ## Convenciones
 
-- **Un cambio de régimen por vez** (incluye estado latente: no cambiar reward+red+vocab en el mismo resume).
-- **SCALAR_DIM 21** (desde Run3): `has_refinery`, `can_afford_proc`, `garrison_ratio`, `military_ratio`, `tech_tier`. Ckpts con 19/16 son incompatibles — run limpio obligatorio.
-- **Métrica norte:** `winrate` vs `beginner` en Escenario A. Reward medio y `P(win)` son diagnóstico.
-- **Escala:** antes de tocar red, verificar que el cuello no sea señal/entorno (lección de la era económica).
-
+- **Un cambio de régimen por vez** (reward *o* red *o* vocab *o* oponente). Incluye estado latente: no mezclar en el mismo resume.
+- **`SCALAR_DIM = 33`** (P4: + naval/air). Ckpts land `in=29` padan. Los de 21/19/16 son otra era — scratch o adapt explícito.
+- **Métrica norte:** `wr20` vs el ancla (`beginner` / `easy` / PFSP). Reward medio y `P(win)` son diagnóstico.
+- **Type-head append-only:** `patrol` + `support_power` están al final. Resume land = partial load (`adapt_v2_state_dict`).
+- **Escala:** antes de tocar red, verificar que el cuello no sea señal/entorno (lección de la era económica, archivada).

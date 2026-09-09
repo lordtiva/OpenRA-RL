@@ -32,6 +32,8 @@ class GameConfig(BaseModel):
     seed: Optional[int] = None
     max_ticks: int = 0  # 0 = unlimited
     max_wall_time_s: int = 0  # 0 = unlimited
+    # Aliados (rl/docs/contract/ra-aliados.md): empty / omitted → RandomAllies in C#.
+    player_faction: str = "RandomAllies"
 
 
 class OpponentConfig(BaseModel):
@@ -40,6 +42,8 @@ class OpponentConfig(BaseModel):
     # ai_slot: player slot for AI; set to "" to disable enemy spawning
     bot_type: str = "beginner"
     ai_slot: str = "Multi0"
+    # Aliados: scripted rival. Empty → Random (Allies or Soviet).
+    enemy_faction: str = "Random"
 
 
 class PlanningConfig(BaseModel):

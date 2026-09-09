@@ -37,6 +37,9 @@ ENABLED_TYPES = {
     "sell", "repair", "set_rally_point", "power_down", "set_primary",
     # P2 micro: guard (existing ActionType) + group stop/stance/guard macros
     "guard", "army_stop", "army_set_stance", "army_guard",
+    # Aliados: already in ACTION_TYPES; unmask for APC / LST / chinook.
+    "enter_transport", "unload",
+    "patrol", "support_power",
 }
 
 # Types that pick a building actor via building_head -> building_ids.
@@ -45,7 +48,7 @@ BUILDING_SLOT_TYPES = {
 }
 
 UNIT_ACTION_TYPES = {"move", "attack_move", "attack", "stop", "set_stance",
-                     "harvest", "guard"}
+                     "harvest", "guard", "enter_transport", "unload", "patrol"}
 
 
 # Techo del vocabulario de tipos de actor (debe == n_item_types de
@@ -68,11 +71,17 @@ class Vocab:
         self.type_to_id = {}
 
     def seed_roles(self):
-        """Pre-asigna un id estable a cada rol del catálogo RA."""
-        from rl.roles import ROLE_OF_ITEM
+        """Pre-asigna un id estable a cada rol del catálogo RA.
+
+        IDENTITY_ITEMS se agregan al final (append-only) para no reordenar
+        los ids de roles en un scratch nuevo vs un ckpt viejo que no los tenía.
+        """
+        from rl.roles import IDENTITY_ITEMS, ROLE_OF_ITEM
         roles = sorted(set(ROLE_OF_ITEM.values()))
         for rol in roles:
             self.id_of(rol)
+        for it in sorted(IDENTITY_ITEMS):
+            self.id_of(it)
         return self.type_to_id
 
     def id_of(self, type_str: str) -> int:
@@ -103,6 +112,11 @@ BUILDING_ITEM_TYPES = {
     # defensa y navales
     "gun", "ftur", "tsla", "agun", "pbox", "hbox", "sam", "gap",
     "spen", "syrd",
+    # Superweapons (pdox=Chronosphere Allied). Missing → TRAIN crash like sbag.
+    "pdox", "iron", "mslo",
+    # France fakes (Defense queue). Same TRAIN trap if omitted.
+    "fpwr", "tenf", "syrf", "spef", "weaf", "domf", "fixf", "fapw",
+    "atef", "pdof", "mslf", "facf",
     # muros: si faltan, _split_production los manda a TRAIN y el C# los
     # mete en la cola de edificios (visor 985: train:sbag / train:brik,
     # 0 rifles, lose ~10k).
@@ -119,6 +133,8 @@ COMBAT_TRAIN_ROLES = {
     "artillery", "scout", "specialist",
     "air_fighter", "air_bomber", "heli", "transporter",
     "ship_sub", "ship_combat", "ship_amphib",
+    # IDENTITY_ITEMS that are still combat (gated until proc+harv).
+    "e7", "medi", "mech", "spy", "ctnk", "stnk", "mh60",
 }
 ECONOMY_BUILD_ROLES = {"power", "refinery"}  # legal BUILD before proc exists
 MOVE_CELL_TYPES = {
@@ -127,6 +143,7 @@ MOVE_CELL_TYPES = {
     "naval_attack_move", "air_attack_move", "harvest",
     "set_rally_point",
     "guard", "army_guard", "army_set_stance",
+    "patrol", "support_power", "deploy",
 }
 # Combat movement: masked until a refinery stands. Otherwise PPO
 # reward-hacks army_attack_move / attack_move (the 201-309 collapse).
@@ -188,8 +205,9 @@ def n_combat_total(obs) -> int:
     return int(n)
 
 
-_INFANTRY_TYPE_PREFIXES = ("e1", "e2", "e3", "e4", "e6", "dog", "spy", "med",
-                           "shok", "thf", "chan", "delphi")
+_INFANTRY_TYPE_PREFIXES = ("e1", "e2", "e3", "e4", "e6", "e7", "dog", "spy",
+                           "med", "medi", "mech", "shok", "thf", "chan", "delphi")
+_TRANSPORT_TYPES = frozenset({"apc", "lst", "tran", "stnk"})
 # Exact internal names from rl.roles (RA air / navy). Keep vehicle land-only.
 _NAVAL_TYPES = frozenset({"ss", "msub", "dd", "ca", "pt", "lst"})
 _AIR_TYPES = frozenset({
@@ -225,6 +243,138 @@ def _is_vehicle_combat(u) -> bool:
 
 def _is_harvester_unit(u) -> bool:
     return "harv" in _utype(u)
+
+
+def _is_transport_unit(u) -> bool:
+    return _utype(u) in _TRANSPORT_TYPES
+
+
+def _passenger_count(u) -> int:
+    try:
+        return int(getattr(u, "passenger_count", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _unit_by_id(obs, actor_id):
+    try:
+        aid = int(actor_id or 0)
+    except (TypeError, ValueError):
+        return None
+    if aid <= 0:
+        return None
+    for u in getattr(obs, "units", None) or []:
+        try:
+            if int(getattr(u, "actor_id", 0) or 0) == aid:
+                return u
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _is_chrono_tank_unit(u) -> bool:
+    return _utype(u) == "ctnk"
+
+
+def _any_chrono_tank(obs):
+    for u in getattr(obs, "units", None) or []:
+        if _is_chrono_tank_unit(u):
+            try:
+                aid = int(getattr(u, "actor_id", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if aid > 0:
+                return aid
+    return None
+
+
+def _pick_support_power(obs) -> str:
+    ready = [str(x) for x in (getattr(obs, "ready_support_powers", None) or []) if x]
+    ready = [k for k in ready if "gps" not in k.lower()]
+    if not ready:
+        return ""
+    pref = (
+        "Chronoshift", "AdvancedChronoshift", "NukePowerOrder",
+        "GrantExternalConditionPowerOrder", "SovietSpyPlane",
+        "SovietParatroopers", "UkraineParabombs",
+    )
+    for p in pref:
+        if p in ready:
+            return p
+    return ready[0]
+
+
+def _first_infantry_id(obs) -> int:
+    for u in getattr(obs, "units", None) or []:
+        if not _is_infantry_unit(u):
+            continue
+        try:
+            aid = int(getattr(u, "actor_id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if aid > 0:
+            return aid
+    return 0
+
+
+def can_issue_enter_transport(obs) -> bool:
+    """Infantry + a friendly transport (APC / LST / chinook / phase)."""
+    units = list(getattr(obs, "units", None) or [])
+    has_inf = any(_is_infantry_unit(u) for u in units)
+    has_tr = any(_is_transport_unit(u) for u in units)
+    return bool(has_inf and has_tr)
+
+
+def can_issue_unload(obs) -> bool:
+    """A friendly transport with at least one passenger."""
+    for u in getattr(obs, "units", None) or []:
+        if _is_transport_unit(u) and _passenger_count(u) > 0:
+            return True
+    return False
+
+
+def _nearest_own_transport(obs, from_id: int):
+    """Closest own transport actor_id to from_id (or first transport)."""
+    units = list(getattr(obs, "units", None) or [])
+    origin = None
+    for u in units:
+        try:
+            if int(getattr(u, "actor_id", 0) or 0) == int(from_id or 0):
+                origin = (int(u.cell_x), int(u.cell_y))
+                break
+        except (TypeError, ValueError):
+            continue
+    best, best_d = None, None
+    for u in units:
+        if not _is_transport_unit(u):
+            continue
+        try:
+            aid = int(getattr(u, "actor_id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if aid <= 0 or aid == int(from_id or 0):
+            continue
+        if origin is None:
+            return aid
+        try:
+            d = (int(u.cell_x) - origin[0]) ** 2 + (int(u.cell_y) - origin[1]) ** 2
+        except (TypeError, ValueError):
+            d = 0
+        if best_d is None or d < best_d:
+            best, best_d = aid, d
+    return best
+
+
+def _any_loaded_transport(obs):
+    for u in getattr(obs, "units", None) or []:
+        if _is_transport_unit(u) and _passenger_count(u) > 0:
+            try:
+                aid = int(getattr(u, "actor_id", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if aid > 0:
+                return aid
+    return None
 
 
 def n_infantry_total(obs) -> int:
@@ -670,15 +820,17 @@ def _split_production(obs):
     rol->[items concretos disponibles]. Al armar el comando, el adapter elige
     el item concreto de la facción actual para el rol muestreado.
     """
-    available = set(obs.available_production or [])
+    available = set(str(x).lower() for x in (obs.available_production or []) if x)
     buildables = available & BUILDING_ITEM_TYPES
     trainables = available - buildables
-    # roles disponibles + concreto más barato (pbox no agun; ftur no tsla)
+    # roles disponibles + concreto más barato (pbox no agun; ftur no tsla).
+    # IDENTITY_ITEMS keep their internName so Tanya/pdox are not cheapest_of'd.
     def _roles(items):
-        from rl.roles import role_of
+        from rl.roles import IDENTITY_ITEMS, role_of
         por_rol: dict[str, list[str]] = {}
         for it in sorted(items):
-            por_rol.setdefault(role_of(it), []).append(it)
+            key = it if it in IDENTITY_ITEMS else role_of(it)
+            por_rol.setdefault(key, []).append(it)
         return por_rol
 
     from rl.roles import cheapest_of
@@ -1001,6 +1153,15 @@ class ActionIndex:
         # Focus fire: ATTACK only when a visible enemy actor exists.
         if not _any_visible_enemy(obs):
             m[TYPE_TO_IDX["attack"]] = False
+        # Aliados: APC load/unload. Coarse type mask is refined here.
+        if not can_issue_enter_transport(obs):
+            m[TYPE_TO_IDX["enter_transport"]] = False
+        if not can_issue_unload(obs):
+            m[TYPE_TO_IDX["unload"]] = False
+        if n_combat_total(obs) < 1:
+            m[TYPE_TO_IDX["patrol"]] = False
+        if not _pick_support_power(obs):
+            m[TYPE_TO_IDX["support_power"]] = False
         self.type_mask = torch.from_numpy(m)
 
 
@@ -1132,6 +1293,14 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         if not can_issue_guard(obs):
             t_name = "no_op"
     if t_name in ("army_stop", "army_set_stance") and n_combat_total(obs) < 1:
+        t_name = "no_op"
+    if t_name == "enter_transport" and not can_issue_enter_transport(obs):
+        t_name = "no_op"
+    if t_name == "unload" and not can_issue_unload(obs):
+        t_name = "no_op"
+    if t_name == "patrol" and n_combat_total(obs) < 1:
+        t_name = "no_op"
+    if t_name == "support_power" and not _pick_support_power(obs):
         t_name = "no_op"
 
     # Per-harvester cell path (P0): move/attack_move/attack on a selected
@@ -1288,7 +1457,19 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
             _any_harvester(obs) or actor_id)
         cmd = CommandModel(action=t, actor_id=hid, target_x=cx, target_y=cy)
     elif t == ActionType.DEPLOY:
-        cmd = CommandModel(action=t, actor_id=_any_mcv(obs) or actor_id)
+        subj = _unit_by_id(obs, actor_id)
+        if subj is not None and _is_chrono_tank_unit(subj):
+            cmd = CommandModel(action=t, actor_id=int(actor_id),
+                               target_x=cx, target_y=cy)
+        elif _any_mcv(obs):
+            cmd = CommandModel(action=t, actor_id=_any_mcv(obs) or actor_id)
+        elif _any_chrono_tank(obs):
+            cid = int(_any_chrono_tank(obs))
+            if cid in aidx.unit_ids:
+                eff_unit_slot = aidx.unit_ids.index(cid)
+            cmd = CommandModel(action=t, actor_id=cid, target_x=cx, target_y=cy)
+        else:
+            cmd = CommandModel(action=t, actor_id=_any_mcv(obs) or actor_id)
     elif t == ActionType.TRAIN:
         cmd = CommandModel(action=t,
                            item_type=aidx.rol_a_concreto.get(item_type,
@@ -1315,6 +1496,53 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         else:
             cmd = CommandModel(action=t, actor_id=actor_id,
                                target_x=cx, target_y=cy)
+    elif t == ActionType.ENTER_TRANSPORT:
+        subj = _unit_by_id(obs, actor_id)
+        if subj is None or not _is_infantry_unit(subj):
+            actor_id = _first_infantry_id(obs)
+            if actor_id and actor_id in aidx.unit_ids:
+                eff_unit_slot = aidx.unit_ids.index(actor_id)
+        tgt = _nearest_own_transport(obs, actor_id) if actor_id else None
+        if not actor_id or tgt is None:
+            cmd = CommandModel(action=ActionType.NO_OP)
+        else:
+            cmd = CommandModel(action=ActionType.ENTER_TRANSPORT,
+                               actor_id=int(actor_id),
+                               target_actor_id=int(tgt))
+    elif t == ActionType.UNLOAD:
+        subj = _unit_by_id(obs, actor_id)
+        if (subj is None or not _is_transport_unit(subj)
+                or _passenger_count(subj) <= 0):
+            loaded = _any_loaded_transport(obs)
+            if loaded:
+                actor_id = int(loaded)
+                if actor_id in aidx.unit_ids:
+                    eff_unit_slot = aidx.unit_ids.index(actor_id)
+            else:
+                actor_id = 0
+        if not actor_id:
+            cmd = CommandModel(action=ActionType.NO_OP)
+        else:
+            cmd = CommandModel(action=ActionType.UNLOAD, actor_id=int(actor_id))
+    elif t == ActionType.PATROL:
+        if actor_id <= 0:
+            ids = group_actor_ids(obs, "army", limit=1)
+            actor_id = ids[0] if ids else 0
+            if actor_id and actor_id in aidx.unit_ids:
+                eff_unit_slot = aidx.unit_ids.index(actor_id)
+        if actor_id <= 0:
+            cmd = CommandModel(action=ActionType.NO_OP)
+        else:
+            cmd = CommandModel(action=ActionType.PATROL, actor_id=int(actor_id),
+                               target_x=cx, target_y=cy)
+    elif t == ActionType.SUPPORT_POWER:
+        key = _pick_support_power(obs)
+        if not key:
+            cmd = CommandModel(action=ActionType.NO_OP)
+        else:
+            cmd = CommandModel(action=ActionType.SUPPORT_POWER,
+                               actor_id=int(actor_id or 0),
+                               target_x=cx, target_y=cy, item_type=key)
     else:
         cmd = CommandModel(action=ActionType.NO_OP)
     if group_cmds:

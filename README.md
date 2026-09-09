@@ -104,7 +104,7 @@ Then chat: _"Start a game of Red Alert on easy difficulty, build a base, and def
 
 The game runs at ~25 ticks/sec independent of agent speed. Observations use a DropOldest channel so the agent always sees the latest game state, even if it's slower than real time.
 
-> **Competencia RL (PPO AlphaStar-lite):** toda la documentación técnica vive en [`rl/docs/README.md`](rl/docs/README.md) — roadmap, auditoría F1-F10, diseño `advance()`, era económica, curriculum, parche grande y filosofía de traducción bot→RL.
+> **Competencia RL (PPO AlphaStar-lite):** documentación viva en [`rl/docs/README.md`](rl/docs/README.md) (onboard, operación, contrato Aliados). Historia / v1 / informes: [`rl/docs/_archive/`](rl/docs/_archive/README.md).
 
 <details>
 <summary>Full architecture diagram</summary>
@@ -117,17 +117,14 @@ The game runs at ~25 ticks/sec independent of agent speed. Observations use a Dr
 
 ## Documentación técnica
 
-Documentación interna (español), fiel al código del árbol de trabajo:
+Índice: [`rl/docs/README.md`](rl/docs/README.md). Arranque:
 
-- **[Parche grande (2026-08)](docs/parche-grande-2026-08.md)** — terminación de
-  partidas, medición económica (`earned`/`harvest`), encoder espacial
-  (CoordConv + U-Net + broadcast del GRU), BPTT por segmentos, entropía por
-  cabeza y el preset de reward `eradicate_v3`.
-- [Fix endgame multi-sesión](docs/fix-endgame-multisesion.md)
-- [Era económica](docs/era-economica.md)
-- [Auditoría del pipeline (2026-08-24)](docs/auditoria-pipeline-2026-08-24.md)
-- [Diseño advance-macro](docs/diseno-advance-macro.md)
-- [Roadmap del agente](docs/roadmap-agente.md)
+- [Onboard (clone sin pesos)](rl/docs/start/onboard.md)
+- [Operación (Docker / train / dash)](rl/docs/start/operacion.md)
+- [Contrato RA Aliados](rl/docs/contract/ra-aliados.md)
+- [Facciones / roles](rl/docs/contract/facciones-mods-roles.md)
+
+Imágenes de este README: [`docs/`](docs/README.md). Auditorías, era económica, diarios de run: [`rl/docs/_archive/`](rl/docs/_archive/README.md).
 
 ## Example Agents
 

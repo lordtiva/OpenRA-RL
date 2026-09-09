@@ -1,7 +1,7 @@
 ﻿# Operacion — Comandos y reglas de run limpio
 
-> **Actualizado 2026-09-04.** Fuente de verdad de flags del train: `rl/auto_train.py` -> `TRAIN_ARGS`.
-> Este doc describe **como operar**; el detalle de cada run esta en `rl/docs/16-…` … `21-…`.
+> **Actualizado 2026-09-09.** Fuente de verdad de flags del train: `rl/auto_train.py` -> `TRAIN_ARGS`.
+> Este doc describe **como operar**. Contrato Aliados: [`../contract/ra-aliados.md`](../contract/ra-aliados.md). Diarios de runs viejos: [`../_archive/runs/`](../_archive/runs/).
 
 Todo se ejecuta desde `C:\Users\lordc\Desktop\OpenRA-RL` con `PYTHONPATH` limpio (el desktop inyecta el suyo y rompe venvs):
 
@@ -24,6 +24,11 @@ curl.exe -f http://localhost:8000/health
 ```
 
 * Esperar `200` antes de lanzar train. Si apuras, `bridge_client` falla el handshake.
+* **Aliados** ([`../contract/ra-aliados.md`](../contract/ra-aliados.md)): el lock
+  `RandomAllies`, Capture/Infiltrate, patrol, SUPPORT_POWER y Chrono Tank viven
+  en C#. `--build` es obligatorio tras pull de este corte; un hot-patch de
+  Python no cambia el lobby ni esas órdenes. Type-head creció (`patrol` +
+  `support_power`): resume land = partial load.
 * Logs: `docker compose logs -f openra-rl`
 * Por que recrear: el daemon .NET acumula sesiones; un `down`/`up` resetea el heap.
 * Segundo daemon (recomendado en 5600X):  
@@ -46,7 +51,7 @@ Flags del **launcher** (no se reenvian a `rl.train`):
 |------|--------|
 | *(default)* | Resume `rl/ckpts/latest.pt` si existe; si no, seed/`iter*.pt`. |
 | `--scratch` | Pesos random; ignora latest/seed (`FORCE_SCRATCH=1`). |
-| `--onboard` | Curriculum A→B→C para un clone **sin** `.pt`. Primera vez: `--scratch --onboard`. B trae `--bc --bc-teacher-bot beginner`. Doc: `22-onboard.md`. |
+| `--onboard` | Curriculum A→B→C para un clone **sin** `.pt`. Primera vez: `--scratch --onboard`. B trae `--bc --bc-teacher-bot beginner`. Doc: [`onboard.md`](onboard.md). |
 | `--onboard-rewind N` | En B o C: `latest` y `best` ← iterN, trunca metrics/race. Desde C vuelve a B. `λ_bc` en el piso. Una vez. |
 | `--collapse` | *(default)* Watchdog politica muerta + sequia wr20 -> copia `best.pt` -> `latest.pt` + `--reset-opt`. En `--onboard`, A lo ignora (siempre off); B y C lo usan. |
 | `--no-collapse` | Apaga solo ese watchdog (B/C). Siguen cuelgue GPU/daemon y relanzos por crash. |
@@ -130,7 +135,7 @@ cd C:\Users\lordc\Desktop\OpenRA-RL\OpenRA
 * Lobby Skirmish -> oponente **PPO Agent**. gRPC lobby **:10001** (train/Docker en **:9999** — no pisan).
 * Ckpt: `OPENRA_RL_CKPT` (default `best.pt`). Mapa de train: `Singles` / `a_short`.
 * PPO entrenado Allies / spawn SW; pone al agente en SW la primera vez.
-* Detalle facciones/roles: `15-facciones-mods-roles.md`.
+* Detalle facciones/roles: [`../contract/facciones-mods-roles.md`](../contract/facciones-mods-roles.md).
 
 ---
 
@@ -148,7 +153,7 @@ cd C:\Users\lordc\Desktop\OpenRA-RL\OpenRA
 
 | Pieza | Estado |
 |-------|--------|
-| `SCALAR_DIM` | **25** (21 clasicos + AOA `rel_power/health/speed/strong`). Pad Net2Net en load. |
+| `SCALAR_DIM` | **33** (P4: + `own/ene` naval+air; pad Net2Net en load). |
 | `UNIT_FEAT_DIM` | **14** (11 + visible/conf/time_since_seen). Ghosts en slots enemigo ≤32. |
 | Force edge | Reward chico en `eradicate_v4` (`w_force_edge`) si Strong y combate lejos de base. Modulo `rl/force_estimate.py`. |
 | Arch v2 completa | XF 3×96 FF=256; F/E/G fusion; fog ghosts; group macros; U-Net mid64→fmap96. A/B: `rl/ckpts_v2/`. |
@@ -168,22 +173,22 @@ Ckpts viejos (cell `Conv 296->1`, SCALAR 21): cargan con missing keys; **scratch
 3. **`auto_train` lo lanzas vos** (log visible al volver). El asistente no debe lanzarlo en background si queres ver la consola.
 4. **No declarar fracaso con pocas iters** — smoke 20 para “no revienta”; juicio de wr con decenas/cientos.
 5. **Metrica norte:** `wr20` / era WR vs el ancla (`bot-type` / PFSP anchor). Componentes de reward = diagnostico.
-6. **Colapso:** con pesos maduros deja `--collapse`. En scratch temprano suele convenir `--no-collapse` (best@1 con iwr=1.0 pisa aprendizaje; ver Run 42 / doc 16).
+6. **Colapso:** con pesos maduros deja `--collapse`. En scratch temprano suele convenir `--no-collapse` (best@1 con iwr=1.0 pisa aprendizaje; ver [`../design/rl-vs-rl.md`](../design/rl-vs-rl.md)).
 7. **BC:** `--bc-start-iter` nunca `0` (train lo trata como unset y en resume reinicia warmup). Usar `1` en scratch.
-8. **Onboard:** no mezclar con PFSP/hard. No `--scratch --onboard` a mitad de B/C. A no sale a las 20 iters: hace falta wr20 del *alumno*. Un 4/4 no promociona. Collapse **off en A**, on en B/C. Redo A desde SFT: `--onboard --onboard-rewind 20`. Undo C: `--onboard-rewind N` (vuelve a B). Detalle: `22-onboard.md`. Gaps RA completo: `23-ra-completo-todo.md`.
+8. **Onboard:** no mezclar con PFSP/hard. No `--scratch --onboard` a mitad de B/C. A no sale a las 20 iters: hace falta wr20 del *alumno*. Un 4/4 no promociona. Collapse **off en A**, on en B/C. Redo A desde SFT: `--onboard --onboard-rewind 20`. Undo C: `--onboard-rewind N` (vuelve a B). Detalle: [`onboard.md`](onboard.md). Gaps RA completo: [`../contract/ra-completo.md`](../contract/ra-completo.md).
 
 ---
 
 ## Currículum (alto nivel)
 
-Detalle historico de cortes: docs `13`–`21`. Regla practica ahora:
+Detalle historico de cortes: [`../_archive/runs/`](../_archive/runs/). Regla practica ahora:
 
 | Senal | Accion |
 |-------|--------|
 | Smoke 20: H sana, sin NaN, wr no a 0 | Seguir el run |
 | wr20 ancla decente y incomplete bajando | Subir dificultad / abrir PFSP pool |
 | Sequia wr20 con politica **viva** (H ok, no spam) | Revisar si `--collapse` esta matando el run -> `--no-collapse` o endurecer sequia |
-| Otro mod (`cnc`/`d2k`) | Otro ckpt; no mezclar con `ra`. Ver `15-facciones-mods-roles.md` |
+| Otro mod (`cnc`/`d2k`) | Otro ckpt; no mezclar con `ra`. Ver [`../contract/facciones-mods-roles.md`](../contract/facciones-mods-roles.md) |
 | Soviet en `ra` | Mismo ckpt + roles; beacon por **slot**, no por bando |
 
 ---
@@ -202,11 +207,13 @@ Detalle historico de cortes: docs `13`–`21`. Regla practica ahora:
 
 ## Referencias rapidas
 
-* Runs recientes: `16-rl-vs-rl-run42.md` … `21-run47-map-qsa.md`
-* Facciones / roles: `15-facciones-mods-roles.md`
-* Filosofia / pilares: `06-filosofia-rl.md`
+* Aliados: [`../contract/ra-aliados.md`](../contract/ra-aliados.md)
+* RL-vs-RL: [`../design/rl-vs-rl.md`](../design/rl-vs-rl.md)
+* Facciones / roles: [`../contract/facciones-mods-roles.md`](../contract/facciones-mods-roles.md)
+* Filosofia / pilares: [`../design/filosofia-rl.md`](../design/filosofia-rl.md)
 * Reward: `rl/reward_shaping.py` (`eradicate_v4`)
-* Red: `rl/network.py` (arch v2 completa; v1.1 = XF 2x64 + U-Net full-96)
+* Red: `rl/network.py` (arch v2; v1.1 = XF 2x64 + U-Net full-96)
+* Diarios de runs: [`../_archive/runs/`](../_archive/runs/)
 
 ## P3 map pools
 
@@ -217,4 +224,4 @@ Detalle historico de cortes: docs `13`–`21`. Regla practica ahora:
   Tournament Island / X-Lake).
 - Also: land | mixed | water (water = naval-viable mixed land-water, not pure-water).
 - Onboard persists `map_pool` in curriculum.json; unset resume stays a_short.
-- Details: 23-ra-completo-todo.md.
+- Details: [`../contract/ra-completo.md`](../contract/ra-completo.md).

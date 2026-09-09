@@ -1,3 +1,5 @@
+> **Archivado 2026-09-09.** Diagnóstico de un run. Índice vivo: [`../../README.md`](../../README.md).
+
 Hay **noticias excelentes** (la política ha aprendido macro-gestión a un nivel temible), pero también han emergido **tres anomalías críticas** que explican con precisión matemática por qué el winrate está estancado entre el **16% y el 20%** contra `easy`, por qué `medium` te aplasta (1 victoria en 128 partidas), y por qué el modelo sufre de partidas incompletas por *timeout* (53.000 ticks).
 
 A continuación te presento el desglose técnico, contrastado con los puntos de la revisión anterior, y las soluciones concretas.

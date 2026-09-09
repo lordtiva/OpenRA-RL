@@ -72,10 +72,13 @@ ROLE_OF_ITEM: dict[str, str] = {
     "e1": ROLE_INFANTRY_BASIC,
     "e2": ROLE_INFANTRY_ANTIINF,
     "e4": ROLE_INFANTRY_ANTIINF,
-    "med": ROLE_INFANTRY_ANTIINF,   # flame
+    "med": ROLE_INFANTRY_ANTIINF,   # leftover alias; RA flame is e4
+    "medi": ROLE_INFANTRY_BASIC,    # Allied medic. e1 stays cheapest_of.
+    "mech": ROLE_COMMANDO_SPY,      # Allied mechanic. e6 stays cheapest_of.
     "dog": ROLE_INFANTRY_ANTIINF,
     "e3": ROLE_INFANTRY_ANTIARMOR,
     "e6": ROLE_COMMANDO_SPY,
+    "e7": ROLE_COMMANDO_SPY,    # Tanya (Allied). cheapest_of still prefers e6.
     "spy": ROLE_COMMANDO_SPY,
     "delphi": ROLE_COMMANDO_SPY,
     "chan": ROLE_COMMANDO_SPY,
@@ -117,6 +120,7 @@ ROLE_OF_ITEM: dict[str, str] = {
     "barr": ROLE_BARRACKS, "tent": ROLE_BARRACKS, "kenn": ROLE_BARRACKS,
     "weap": ROLE_WARFACTORY,
     "dome": ROLE_TECH, "atek": ROLE_TECH, "stek": ROLE_TECH, "gap": ROLE_TECH,
+    "pdox": ROLE_TECH, "iron": ROLE_TECH, "mslo": ROLE_TECH,  # superweapon bldgs
     "gun": ROLE_DEFENSE_GUN, "agun": ROLE_DEFENSE_GUN,
     "pbox": ROLE_DEFENSE_GUN, "hbox": ROLE_DEFENSE_GUN,
     "ftur": ROLE_DEFENSE_TURRET, "tsla": ROLE_DEFENSE_TURRET,
@@ -125,6 +129,11 @@ ROLE_OF_ITEM: dict[str, str] = {
     "hpad": ROLE_AIRBASE, "afld": ROLE_AIRBASE,
     "spen": ROLE_NAVAL, "syrd": ROLE_NAVAL,
     "fenc": ROLE_CIVIL, "brik": ROLE_CIVIL, "sbag": ROLE_CIVIL,
+    # France fakes (cheap decoys). civic so they never go through TRAIN.
+    "fpwr": ROLE_CIVIL, "tenf": ROLE_CIVIL, "syrf": ROLE_CIVIL,
+    "spef": ROLE_CIVIL, "weaf": ROLE_CIVIL, "domf": ROLE_CIVIL,
+    "fixf": ROLE_CIVIL, "fapw": ROLE_CIVIL, "atef": ROLE_CIVIL,
+    "pdof": ROLE_CIVIL, "mslf": ROLE_CIVIL, "facf": ROLE_CIVIL,
 }
 
 # --------------------------------------------------------------------------
@@ -135,6 +144,16 @@ ROLE_OF_ITEM: dict[str, str] = {
 def role_of(item: str) -> str:
     """Item concreto -> rol funcional. Desconocido -> 'misc'."""
     return ROLE_OF_ITEM.get(str(item or "").lower(), "misc")
+
+
+# Production item-head keys that stay the internName (not folded into a role).
+# cheapest_of would otherwise hide Tanya/medic/Chronosphere behind e1/e6/gap.
+# Entity ROLE_VOCAB is unchanged (xf still sees specialist / tech / heli).
+IDENTITY_ITEMS = frozenset({
+    "e7", "medi", "mech", "spy",
+    "pdox", "iron", "mslo", "gap", "atek", "stek",
+    "ctnk", "stnk", "mh60",
+})
 
 
 # Vocab de ENTIDAD para Capa 2c-B (tokens del xf). Distinto del vocab de

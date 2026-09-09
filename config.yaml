@@ -17,6 +17,7 @@ game:
 #   seed: null                        # RNG seed for reproducibility (null = random)
 #   max_ticks: 0                      # End game after N ticks (0 = unlimited)
 #   max_wall_time_s: 0                # End game after N seconds (0 = unlimited)
+#   player_faction: "RandomAllies"    # Learner bando (rl/docs/contract/ra-aliados.md). Random se reescribe a RandomAllies.
 
 # ── Opponent ──────────────────────────────────────────────────────────
 # Enemy bot always spawns by default. Set ai_slot to "" to disable.
@@ -25,6 +26,7 @@ game:
 opponent:
   bot_type: "beginner"                # Difficulty tier ($BOT_TYPE)
   ai_slot: "Multi0"                   # AI player slot; "" to disable enemy ($AI_SLOT)
+#   enemy_faction: "Random"           # Rival. Random = Allies o Soviet.
 
 # ── Planning Phase ────────────────────────────────────────────────────
 # planning:

@@ -60,6 +60,9 @@ class OpenRAConfig:
     record_replays: bool = False  # Enable .orarep replay recording
     multi_session: bool = False  # Multi-session daemon mode
     extra_args: dict = field(default_factory=dict)
+    # Aliados (rl/docs/contract/ra-aliados.md): empty → C# RandomAllies.
+    player_faction: str = "RandomAllies"
+    enemy_faction: str = "Random"
 
 
 class OpenRAProcessManager:

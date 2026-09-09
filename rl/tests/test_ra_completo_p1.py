@@ -136,7 +136,7 @@ def test_building_types_enabled_append_only():
     assert "naval_attack_move" in ACTION_TYPES and "air_attack_move" in ACTION_TYPES
     assert ACTION_TYPES.index("air_attack_move") == ACTION_TYPES.index("naval_attack_move") + 1
     # P2 appends after air; P0 pair stay contiguous.
-    assert N_ACTION_TYPES == TYPE_TO_IDX["army_guard"] + 1
+    assert N_ACTION_TYPES == TYPE_TO_IDX["support_power"] + 1
 
 
 def test_building_tokens_shape_and_flags():

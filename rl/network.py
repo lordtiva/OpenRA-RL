@@ -43,6 +43,8 @@ ACTION_TYPES = [
     "naval_attack_move", "air_attack_move",
     # P2 micro: append-only group stop/stance/guard (partial type-head load)
     "army_stop", "army_set_stance", "army_guard",
+    # Aliados: proto PATROL already existed; support_power is new.
+    "patrol", "support_power",
 ]
 N_ACTION_TYPES = len(ACTION_TYPES)
 TYPE_TO_IDX = {t: i for i, t in enumerate(ACTION_TYPES)}
@@ -75,14 +77,16 @@ CELL_HEAD_OLD_IN = SPATIAL_CH + 64 + 64  # fmap + tipo + hidden (pre Capa 2)
 # Qué cabeza usa cada tipo de acción (FUENTE ÚNICA para log_prob condicional;
 # action_adapter debe ser coherente con estos conjuntos). Auditoría 2026-08-24.
 TYPES_USE_UNIT = {"move", "attack_move", "attack", "stop", "set_stance",
-                  "harvest", "deploy", "guard"}
+                  "harvest", "deploy", "guard", "enter_transport", "unload",
+                  "patrol", "support_power"}
 TYPES_USE_CELL = {"move", "attack_move", "attack", "place_building",
                   "army_attack_move", "infantry_attack_move",
                   "vehicle_attack_move", "harvesters_move",
                   "naval_attack_move", "air_attack_move",
                   "harvest", "set_rally_point",
                   # P2: cell picks guard escort target / stance bucket
-                  "guard", "army_set_stance", "army_guard"}
+                  "guard", "army_set_stance", "army_guard",
+                  "patrol", "support_power", "deploy"}
 # Role-group macros: cell only (no unit head); adapter multi-commands.
 TYPES_GROUP_MACRO = {"army_attack_move", "infantry_attack_move",
                      "vehicle_attack_move", "harvesters_move",
@@ -236,7 +240,8 @@ def build_type_masks(obs) -> torch.Tensor:
     Aproximaciones documentadas (refinar con feedback real del engine):
       - place_building requiere producción de edificio completada (progress>=1)
       - deploy requiere una unidad tipo MCV propia
-      - enter_transport/unload deshabilitados en v0
+      - enter_transport: infantería propia + transporte (apc/lst/tran/stnk)
+      - unload: transporte con pasajeros
       - surrender nunca legal (la política no aprende a rendirse)
     """
     m = np.zeros(N_ACTION_TYPES, dtype=bool)
@@ -249,9 +254,16 @@ def build_type_masks(obs) -> torch.Tensor:
                   "harvest", "set_stance", "army_attack_move",
                   "infantry_attack_move", "vehicle_attack_move",
                   "harvesters_move", "naval_attack_move", "air_attack_move",
-                  "army_stop", "army_set_stance", "army_guard"):
+                  "army_stop", "army_set_stance", "army_guard",
+                  "enter_transport", "unload"):
             m[TYPE_TO_IDX[t]] = True
-        m[TYPE_TO_IDX["deploy"]] = any("mcv" in u.type.lower() for u in obs.units)
+        m[TYPE_TO_IDX["deploy"]] = any(
+            t in str(getattr(u, "type", "") or "").lower()
+            for u in obs.units for t in ("mcv", "ctnk"))
+        m[TYPE_TO_IDX["patrol"]] = True
+        ready = list(getattr(obs, "ready_support_powers", None) or [])
+        m[TYPE_TO_IDX["support_power"]] = any(
+            "gps" not in str(k).lower() for k in ready)
     if have_buildings:
         for t in ("sell", "repair", "power_down", "set_primary", "set_rally_point"):
             m[TYPE_TO_IDX[t]] = True

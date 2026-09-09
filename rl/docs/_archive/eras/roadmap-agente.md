@@ -1,11 +1,13 @@
 # OpenRA-RL — Roadmap del agente PPO (AlphaStar-lite)
 
+> **Archivado 2026-09-09.** Congelado en iter 1969 / v3.1. Índice vivo: [`../../README.md`](../../README.md).
+
 **Última actualización:** cierre de la **era económica** e inicio del plan de
 reparación (2026-08-24, iter 1969). La era económica quedó CERRADA sin cumplir
 su criterio de salida; una segunda revisión externa verificó bugs en el
 pipeline de gradiente y reordenó prioridades. Estado completo:
-[`docs/auditoria-pipeline-2026-08-24.md`](auditoria-pipeline-2026-08-24.md).
-Historial de la era cerrada: [`docs/era-economica.md`](era-economica.md).
+[`../auditorias/auditoria-pipeline-2026-08-24.md`](../auditorias/auditoria-pipeline-2026-08-24.md).
+Historial de la era cerrada: [`era-economica.md`](era-economica.md).
 
 **Resumen del estado actual:** trainer DETENIDO en iter 1969 (reward negativo,
 cosecha propia ≡ 0 tras ~340 iters de incentivo minero, winrate histórico
@@ -59,7 +61,7 @@ Dashboard: `python -m http.server 8501` → localhost:8501/dashboard.html.
 
 ## Fase 1 — Avance macro con interrupciones (v4-macro) ← IMPLEMENTADA Y ACTIVA
 
-**Diseño completo:** `docs/diseno-advance-macro.md`
+**Diseño completo:** [`../../design/advance-macro.md`](../../design/advance-macro.md)
 
 ### Resultados medidos (2026-08-24)
 

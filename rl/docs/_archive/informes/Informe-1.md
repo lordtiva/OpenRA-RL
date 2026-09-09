@@ -1,3 +1,5 @@
+> **Archivado 2026-09-09.** Review de un snapshot. Índice vivo: [`../../README.md`](../../README.md).
+
 Aquí tienes un análisis exhaustivo y una revisión técnica de tu proyecto.
 
 ---

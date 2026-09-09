@@ -1,6 +1,7 @@
 # Capa 0 — estado empírico post Run 8 / Run 9
 
-> **Fecha:** 2026-08-30 (visor + parche de destino) · **No reemplaza** `12-plan-4-capas-siguiente-nivel.md`. Ese plan se deja tal cual: es realista para 2070+5600X+32GB y el orden (entorno → BC/SIL → red → self-play) sigue siendo el correcto.
+> **Archivado 2026-09-09.** Diario de cortes, no contrato. Índice vivo: [`../../README.md`](../../README.md). Plan: [`../../design/plan-4-capas.md`](../../design/plan-4-capas.md).
+> **Fecha:** 2026-08-30 (visor + parche de destino) · **No reemplaza** el plan 4 capas. Ese plan se deja tal cual: es realista para 2070+5600X+32GB y el orden (entorno → BC/SIL → red → self-play) sigue siendo el correcto.
 > **Qué es esto:** desglose de qué de la Capa 0 ya está, qué no, y qué hacer si el run actual (resume iter 219, `eradicate_v4`, a_short vs beginner) sigue plano a iters 400–450.
 >
 > **Estado actual (2026-09-02, post Run 36):** `best.pt` = **1141** (Run 33 `wwww`, wr20 0.50 vs easy). `latest.pt` restaurado a 1141. Archivo `Run 36 (a_short pack12-policy 1142-1334)`: 193 iters, wr ~23%, lose ~58%, 0 tandas 4/4. AMP cobró (`update_s` 210→~80 s). Pack-12 no levantó el piso. Sequía @1289 restauró 1141; ~15 iters bien, después drift. Régimen: 2c-B + peel + 2 harv + pack-12 política + SIL even-pick <40k + AMP/BPTT-batch. Remate off. Asalto FULL off (**código se queda**; no borrar en este corte). **Este corte = higiene**, no palanca wr: PLACE/cancel `role_of` en `eff_item_slot` + guard `concatenate([])`. Resume 1141, smoke `--iters 1161`. No QSA/hard/128/remate/Lion. Siguiente palanca (otro resume): raid-en-espera / yo-yo de refuerzo / leftover — una sola.

@@ -1,12 +1,12 @@
-﻿# 23 — RA completo: gaps vs el train land actual
+﻿# RA completo: gaps vs el train land actual
 
 > **Para quién:** cuando quieras ampliar el action set / mapas más allá del land-only
 > de Phase A/B (naval, air, buildings UI, micro).
 >
 > **Fecha:** 2026-09-08 (P0–P4 cerrados 2026-09-09 en `exp/ra-completo-p0`; P4 obs/dash naval+air).
 >
-> **Relacionado:** onboarding land `22-onboard.md`; operación diaria `07-operacion.md`;
-> índice `README.md`.
+> **Relacionado:** onboarding [`../start/onboard.md`](../start/onboard.md);
+> operación [`../start/operacion.md`](../start/operacion.md); índice [`../README.md`](../README.md).
 
 ---
 
@@ -147,6 +147,9 @@ Ckpt compat: MAIN / land ckpts `in=29` → pad a 33; no wipe.
 - P3+: multi-spawn rotation del engine; mapas aire dedicados / prebuilts;
   tapes BC navy/air dedicadas; kind-mask caveats P1; SFT corto guard/focus.
 - Spatial domain channels en C# (opcional futuro; no pedido para cerrar P4).
+
+El corte **Aliados** vive en [`ra-aliados.md`](ra-aliados.md) (features de código **cerradas**:
+lock, catálogo, APC, capture, superpoderes, patrol, Chrono Tank, IDENTITY_ITEMS).
 
 ---
 

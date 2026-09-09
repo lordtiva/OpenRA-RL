@@ -2,6 +2,7 @@
 
 > **Fecha:** 2026-08-31 · El train de `a_short` / Singles es **solo `ra`**, ckpt **Aliados**, spawn SW. Este doc es la regla para no romper el resume cuando (si) se toca otro bando o mod.
 > **No** es un plan de entrenar los 3 mods. Es el contrato: la red nunca ve `england` / `russia` / `gdi`.
+> **2026-09-09:** el lobby **traba** el agente a `RandomAllies` (antes `Faction=Random` podía salir soviet). Uniques Aliados (`e7`/`medi`/`pdox`/…) salen por `IDENTITY_ITEMS`, no por `cheapest_of`. Fuente: [`ra-aliados.md`](ra-aliados.md).
 
 ---
 
@@ -13,7 +14,7 @@ La red no aprende “soy england”. Aprende **roles** (`infantry_basic`, `defen
 
 | Qué | ¿Otro train de cero? | Qué hacer |
 |---|---|---|
-| **País** (england / france / germany, o russia / ukraine) | **No** | Mismo ckpt. El árbol es el del bando; la unidad especial es un ítem más del rol. |
+| **País** (england / france / germany, o russia / ukraine) | **No** | Mismo ckpt. El árbol es el del bando. Uniques Aliados (`e7`/`ctnk`/…) salen por `IDENTITY_ITEMS` ([`ra-aliados.md`](ra-aliados.md)), no por un head de país. |
 | **Bando RA** (Allies ↔ Soviet) | **No** de cero | Mismo ckpt y mismos roles (`tent`↔`barr`, `pbox`↔`ftur`). Más adelante **mezclar partidas** soviet para que no se acostumbre solo a Aliados. El beacon es el **spawn**, no el bando. |
 | **Random / RandomAllies / …** | **Nunca** | El lobby elige un país y recién ahí arranca. No son un ejército. |
 | **Otro mod** (`cnc`, `d2k`) | **Sí, otro ckpt** | Otro catálogo de actores. Se reusa la red (mismos heads) y se amplía `ROLE_OF_ITEM`. No se pega el 999 de RA y a entrenar Nod. |
@@ -44,10 +45,11 @@ Los Random no se entrenan ni se listan en `ROLE_OF_ITEM`. Si el server recibe `R
 
 ## Lo que ya hace el código (no rehacer)
 
-1. **`rl.roles.ROLE_OF_ITEM`** — `e1` y el rifle soviético son `infantry_basic`; `pbox`/`gun`/`hbox`/`agun` son `defense_gun`; `ftur`/`tsla`/`sam` son `defense_turret`. La cabeza de ítems indexa **roles**.
+1. **`rl.roles.ROLE_OF_ITEM`** — `e1` y el rifle soviético son `infantry_basic`; `pbox`/`gun`/`hbox`/`agun` son `defense_gun`; `ftur`/`tsla`/`sam` son `defense_turret`. La cabeza de ítems indexa **roles**, salvo `IDENTITY_ITEMS` ([`ra-aliados.md`](ra-aliados.md)) que indexan internName.
 2. **`available_production`** — el engine ya filtra por facción. El adapter solo ve lo construible *ahora*.
 3. **Concreto más barato** (corte 1002): `cheapest_of` usa el costo de `openra_env/game_data.py`. Allies con tent → `pbox` $600, no `agun`. Soviet con barr → `ftur`, no `tsla`.
-4. **PLACE Building + Defense** (mismo corte): las torretas viven en la cola `Defense`. PLACE las planta. Antes se encolaba `gun` y se plantaba `tent`.
+4. **`IDENTITY_ITEMS` ([`ra-aliados.md`](ra-aliados.md)):** Tanya / medic / mech / spy / Chronosphere / Allied tech / Chrono Tank / Phase / MH60 **no** se pliegan al rol barato en el item-head. El xf sigue viendo el rol de entidad (`ROLE_VOCAB` intacto). El resto del árbol sigue `cheapest_of`.
+5. **PLACE Building + Defense** (mismo corte 1002): las torretas viven en la cola `Defense`. PLACE las planta. Antes se encolaba `gun` y se plantaba `tent`.
 
 Spawn / beacon **no** son facción: son geometría del mapa. En A-short el SW tiene mineral en casa y el NE es `(95,11)`. Invertir el slot = el dest mira tu fact. Eso se arregla con beacon-por-spawn, no con un embedding de `ukraine`.
 
@@ -58,7 +60,7 @@ Spawn / beacon **no** son facción: son geometría del mapa. En A-short el SW ti
 | Querés | Qué hacer | Qué no |
 |---|---|---|
 | Jugar **soviet** en el mismo mapa | Mismo ckpt (roles). Beacon según **slot**, no según bando. Visor: PPO en SW. | Un `faction_id` en los escalares. |
-| País (england vs germany) | Ignorar. El árbol aliado es el mismo; la unidad especial es un ítem más del rol. | Un head de 5 países. |
+| País (england vs germany) | Ignorar. El árbol aliado es el mismo; uniques van por `IDENTITY_ITEMS` ([`ra-aliados.md`](ra-aliados.md)). | Un head de 5 países. |
 | **cnc** o **d2k** | Nuevo `ROLE_OF_ITEM` (gdi/nod, casas). Mismo `AlphaLiteNet` si los roles caben. Ckpt **aparte** (Net2Net solo de módulos iguales). | Mezclar `ra`+`cnc` en un resume. |
 | `ts` | No. Fuera del bundle, incompleto. | — |
 | Liga multi-mod | Capa 3 self-play **dentro de ra** primero. | 3 mods × 7 facciones tabula rasa. |
@@ -79,4 +81,5 @@ Un régimen = un mod + un mapa + un bot. El traductor de roles es el que hace qu
 
 Hoy: **1** de esas 10 (`ra` Allies, da igual england/france/germany).
 
-*Guardado: 2026-08-31 — corte PLACE Defense + `cheapest_of`. Rama `exp/rl-2026-08-28-grok`.*
+*Guardado: 2026-08-31 — corte PLACE Defense + `cheapest_of`. Rama `exp/rl-2026-08-28-grok`.
+Actualizado 2026-09-09: lock `RandomAllies` + `IDENTITY_ITEMS` ([`ra-aliados.md`](ra-aliados.md)).*

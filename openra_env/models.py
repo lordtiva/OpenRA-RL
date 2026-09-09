@@ -51,6 +51,7 @@ class ActionType(str, Enum):
     ARMY_STOP = "army_stop"
     ARMY_SET_STANCE = "army_set_stance"
     ARMY_GUARD = "army_guard"
+    SUPPORT_POWER = "support_power"
 
 
 class CommandModel(Action):
@@ -199,6 +200,10 @@ class OpenRAObservation(Observation):
     map_info: MapInfoModel = Field(default_factory=MapInfoModel, description="Map metadata")
     available_production: List[str] = Field(
         default_factory=list, description="Actor types available for production"
+    )
+    ready_support_powers: List[str] = Field(
+        default_factory=list,
+        description="SupportPowerManager keys that are charged (Chronoshift, NukePowerOrder, ...)",
     )
     result: str = Field(default="", description="Game result: 'win', 'lose', 'draw', or ''")
 

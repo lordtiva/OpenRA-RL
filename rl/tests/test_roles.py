@@ -22,15 +22,17 @@ def check(name, cond):
 print("=== traductor universal rl.roles ===")
 
 # 1) catálogo completo no debe tener huecos críticos: los items medidas
-catalogo = ["e1", "e2", "e3", "e4", "e6", "dog", "spy", "med", "mcv", "harv",
+catalogo = ["e1", "e2", "e3", "e4", "e6", "e7", "dog", "spy", "med", "medi",
+            "mech", "mcv", "harv",
             "v2rl", "1tnk", "2tnk", "3tnk", "4tnk", "qtnk", "stnk", "ctnk",
             "ttnk", "mgg", "arty", "apc", "truk", "mnly", "dtrk", "ftrk",
             "jeep", "mrj", "mig", "yak", "u2", "badr", "heli", "hind", "mh60",
             "tran", "ss", "msub", "dd", "ca", "pt", "lst",
             "proc", "silo", "powr", "apwr", "barr", "tent", "kenn", "weap",
-            "dome", "atek", "stek", "gap", "gun", "agun", "pbox", "hbox",
+            "dome", "atek", "stek", "gap", "pdox", "iron", "mslo",
+            "gun", "agun", "pbox", "hbox",
             "ftur", "tsla", "sam", "fix", "hpad", "afld", "spen", "syrd",
-            "fenc", "brik"]
+            "fenc", "brik", "fpwr", "tenf", "facf"]
 no_huecos = all(R.role_of(it) != "misc" for it in catalogo)
 check(f"{len(catalogo)} items del catalogo mapean (sin 'misc')", no_huecos)
 
@@ -70,6 +72,12 @@ check("pbox más barato que gun/agun",
       R.cheapest_of(["gun", "agun", "pbox"]) == "pbox")
 check("ftur más barato que tsla",
       R.cheapest_of(["tsla", "ftur", "sam"]) == "ftur")
+check("e7 Tanya es specialist (no misc)", R.role_of("e7") == R.ROLE_COMMANDO_SPY)
+check("medi no pisa cheapest e1",
+      R.cheapest_of(["e1", "medi"]) == "e1")
+check("mech/e7 no pisan cheapest e6",
+      R.cheapest_of(["e6", "mech", "e7", "spy"]) == "e6")
+check("pdox es tech (no misc)", R.role_of("pdox") == R.ROLE_TECH)
 
 print("\n" + ("TODOS LOS TESTS OK" if ok else "HAY FALLAS ❌"))
 sys.exit(0 if ok else 1)

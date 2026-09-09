@@ -260,6 +260,8 @@ class OpenRAEnvironment(MCPEnvironment):
             record_replays=cfg.game.record_replays,
             headless=cfg.game.headless,
             seed=cfg.game.seed,
+            player_faction=getattr(cfg.game, "player_faction", "RandomAllies"),
+            enemy_faction=getattr(cfg.opponent, "enemy_faction", "Random"),
         )
         if not multi_session:
             self._process = OpenRAProcessManager(self._config)
@@ -3119,6 +3121,8 @@ class OpenRAEnvironment(MCPEnvironment):
                 map_name=self._config.map_name,
                 bots=bots,
                 seed=self._config.seed or 0,
+                player_faction=getattr(self._config, "player_faction", "") or "RandomAllies",
+                enemy_faction=getattr(self._config, "enemy_faction", "") or "Random",
             )
             logger.info(f"Session created: {session_id}")
 
@@ -3232,6 +3236,7 @@ class OpenRAEnvironment(MCPEnvironment):
             visible_enemy_buildings=[BuildingInfoModel(**b) for b in obs_dict.get("visible_enemy_buildings", [])],
             map_info=MapInfoModel(**obs_dict["map_info"]),
             available_production=obs_dict.get("available_production", []),
+            ready_support_powers=obs_dict.get("ready_support_powers", []),
             done=obs_dict["done"],
             reward=reward,
             result=obs_dict.get("result", ""),

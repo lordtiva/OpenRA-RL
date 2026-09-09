@@ -84,8 +84,9 @@ def _aidx(obs):
 
 
 def test_p2_types_append_only_and_enabled():
-    assert ACTION_TYPES[-3:] == ["army_stop", "army_set_stance", "army_guard"]
-    assert N_ACTION_TYPES == TYPE_TO_IDX["army_guard"] + 1
+    assert ACTION_TYPES[-5:-2] == ["army_stop", "army_set_stance", "army_guard"]
+    assert ACTION_TYPES[-2:] == ["patrol", "support_power"]
+    assert N_ACTION_TYPES == TYPE_TO_IDX["support_power"] + 1
     for name in ("guard", "army_stop", "army_set_stance", "army_guard"):
         assert name in ENABLED_TYPES
         assert name in ACTION_TYPES
@@ -240,8 +241,8 @@ def test_partial_load_expands_type_head_for_p2():
     """Old ckpt (pre army_stop) soft-expands type head under strict=False."""
     net = AlphaLiteNet()
     raw = {k: v.clone() for k, v in net.state_dict().items()}
-    # Shrink type head to pre-P2 size (drop last 3 rows/cols)
-    n_old = N_ACTION_TYPES - 3
+    # Shrink type head to pre-P2 size (before army_stop; patrol/support after P2)
+    n_old = TYPE_TO_IDX["army_stop"]
     assert ACTION_TYPES[n_old] == "army_stop"
     w = raw["head_type.weight"]
     raw["head_type.weight"] = w[:n_old].clone()
@@ -278,7 +279,8 @@ def test_partial_load_expands_type_head_for_p2():
 
 
 def test_p0_naval_air_still_last_before_p2():
-    assert ACTION_TYPES[-5:-3] == ["naval_attack_move", "air_attack_move"]
+    i = TYPE_TO_IDX["army_stop"]
+    assert ACTION_TYPES[i - 2:i] == ["naval_attack_move", "air_attack_move"]
 
 
 if __name__ == "__main__":

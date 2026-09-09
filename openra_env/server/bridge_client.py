@@ -158,19 +158,24 @@ class BridgeClient:
         request = rl_bridge_pb2.StateRequest(session_id=self.session_id)
         return self._stub.GetState(request, timeout=self.timeout_s)
 
-    def create_session(self, map_name: str, bots: str, seed: int = 0) -> str:
+    def create_session(self, map_name: str, bots: str, seed: int = 0,
+                       player_faction: str = "", enemy_faction: str = "") -> str:
         """Create a new game session (multi-session mode).
 
         Returns the session_id assigned by the server.
+        player_faction empty → C# default RandomAllies on the rl-agent slot.
         """
         if not self._connected or self._stub is None:
             self.connect()
 
-        request = rl_bridge_pb2.CreateSessionRequest(
-            map_name=map_name,
-            bots=bots,
-            seed=seed,
-        )
+        kwargs = dict(map_name=map_name, bots=bots, seed=seed)
+        # Proto3 fields added 2026-09-09; tolerate older generated stubs.
+        fields = rl_bridge_pb2.CreateSessionRequest.DESCRIPTOR.fields_by_name
+        if "player_faction" in fields:
+            kwargs["player_faction"] = player_faction or ""
+        if "enemy_faction" in fields:
+            kwargs["enemy_faction"] = enemy_faction or ""
+        request = rl_bridge_pb2.CreateSessionRequest(**kwargs)
         response = self._stub.CreateSession(request, timeout=60.0, wait_for_ready=True)
         self.session_id = response.session_id
         logger.info(f"Created session {self.session_id} (map={map_name})")
@@ -345,6 +350,7 @@ def observation_to_dict(obs: rl_bridge_pb2.GameObservation) -> dict:
             "map_name": obs.map_info.map_name,
         },
         "available_production": list(obs.available_production),
+        "ready_support_powers": list(getattr(obs, "ready_support_powers", None) or []),
         "done": obs.done,
         "reward": obs.reward,
         "result": obs.result,
@@ -402,6 +408,7 @@ def commands_to_proto(commands: list[dict]) -> rl_bridge_pb2.AgentAction:
         "patrol": rl_bridge_pb2.PATROL,
         "fast_advance": rl_bridge_pb2.FAST_ADVANCE,
         "army_attack_move": rl_bridge_pb2.ARMY_ATTACK_MOVE,
+        "support_power": getattr(rl_bridge_pb2, "SUPPORT_POWER", rl_bridge_pb2.NO_OP),
     }
 
     proto_commands = []
