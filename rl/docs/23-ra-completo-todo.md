@@ -3,7 +3,7 @@
 > **Para quién:** cuando quieras ampliar el action set / mapas más allá del land-only
 > de Phase A/B (naval, air, buildings UI, micro).
 >
-> **Fecha:** 2026-09-08 (P0 cerrado 2026-09-09; P1 building_head DONE 2026-09-09; P2 micro DONE 2026-09-09 en `exp/ra-completo-p0`).
+> **Fecha:** 2026-09-08 (P0–P3 cerrados 2026-09-09 en `exp/ra-completo-p0`; P3 teacher tech/defense + map-pool).
 >
 > **Relacionado:** onboarding land `22-onboard.md`; operación diaria `07-operacion.md`;
 > índice `README.md`.
@@ -66,7 +66,7 @@ P0 (rama `exp/ra-completo-p0`): path singular harv→celda **existe** (unit head
 
 **Estado:** DONE en `exp/ra-completo-p0`. Tests: `test_ra_completo_p2` (+ p0/p1/alphalite smoke). Type-head crece +3 (`army_stop`/`army_set_stance`/`army_guard`) → partial load. Caveat: engine Guard rango limitado; SFT corto recomendable sobre guard/focus antes de prod.
 
-### P3 ? Producci?n RA completa + mapas agua/aire + spawn variety ? IN PROGRESS (cleanup)
+### P3 — Producción RA completa + mapas agua/aire + spawn variety — DONE
 
 - [x] Inventario + wire de mapas water/mixed seleccionables sin romper default a_short.
   - rl/map_catalog.py: display_name (titulo original), has_water vs naval_viable.
@@ -82,33 +82,46 @@ P0 (rama `exp/ra-completo-p0`): path singular harv→celda **existe** (unit head
   - auto_train sigue con --scenario a_short (sin cambio de default).
 - [x] Mascaras de produccion: forbid naval BUILD/ship TRAIN si no naval_viable;
   unmask en mapas navy-viable. Airbase/heli legales en land; defense ya sale del gate eco.
-- [x] Teacher: _optional_naval_air ? syrd/spen ligero si mapa navy-viable + cash.
-  - TODO(P3+): air opcional en land / mapas con airfield start; tapes navy/air aparte.
-- [x] Spawn/layout variety hook: --map-pool (>=2 mapas). Multi spawn rotation del engine no hookeado (documentado).
-- [ ] Arbol RA completo en teacher (tech/defense push sistematico) ? aun land-first; solo navy/air light.
-- [ ] Mapas aire dedicados / prebuilt fase2 water con base ? blocked on scenario authoring.
+- [x] Teacher: _optional_naval_air — syrd/spen + TRAIN ship/heli ligero si mapa
+  navy-viable + cash. Land/a_short: no-op.
+- [x] Teacher: _optional_tech_defense — arbol land-first **después** de eco/barracks
+  (roles ya existentes): cheap defense (pbox/hbox/ftur) → powr cushion → dome →
+  weap → fix → atek/stek → adv defense. **No** mete weap/dome en BUILD_PRIORITY
+  (sigue powr → proc → barracks); gate = phase attack o 
+_combat >= RUSH_ATTACK_MOVE
+  para no romper el rush Allies en a_short.
+- [x] Spawn/layout variety hook: --map-pool (>=2 mapas).
+- [ ] **P3+ optional / leftover:** multi-spawn rotation del engine (no hookeado).
 - [x] Curriculum onboard / auto_train map-pool flag.
-  - `--onboard-map-pool official_2p_small` (o `mixed` / `water` / comma keys).
-  - Alias `--map-pool` (con o sin `--onboard`): inyecta en TRAIN_ARGS.
-  - Default unset = `--scenario a_short` (C resume / MAIN land intacto).
-  - Persistido en `curriculum.json` como `map_pool`; resume sin key = land.
-- [x] `fase2_a.oramap` archivado en `rl/scenarios/_archive/`; activo solo
-  `fase2_a_short`. Catalog key `a` soft-alias → `a_short`.
-- [x] Teacher: optional TRAIN ship/heli after syrd/hpad on navy-viable maps.
+  - --onboard-map-pool official_2p_small (o mixed / water / comma keys).
+  - Alias --map-pool (con o sin --onboard): inyecta en TRAIN_ARGS.
+  - Default unset = --scenario a_short (C resume / MAIN land intacto).
+  - Persistido en curriculum.json como map_pool; resume sin key = land.
+- [x] ase2_a.oramap archivado en 
+l/scenarios/_archive/; activo solo
+  ase2_a_short. Catalog key  soft-alias → _short.
 
-**Estado (2026-09-09):** P3 map-pool + archive cleanup en exp/ra-completo-p0.
-Tests: test_ra_completo_p3 (+ onboard map_pool argv).
+**Out of scope / P3+ skip (no bloquean cerrar P3):**
+- Mapas aire **dedicados** / prebuilts fase2 water con base preconstruida
+  (scenario authoring). Air sigue disponible vía **hpad** en mapas mixed /
+  navy-viable cuando el teacher/agent construye dome→hpad.
+- Tapes BC navy/air dedicadas (grabar aparte cuando haga falta SFT).
+- Multi-spawn rotation del engine (opcional; pool de mapas ya da variety).
+
+**Estado (2026-09-09):** P3 DONE en exp/ra-completo-p0.
+Tests: 	est_ra_completo_p3 (catalog/masks/onboard + teacher naval + tech/defense).
 Pool official_2p_small: a_short, Doughnut, Bombardment Islands,
 Tournament Island, X-Lake.
+Listo para **P4** (obs/dash naval+air).
 
 Como correr:
-```
+`
 # train directo
 python -m rl.train --map-pool official_2p_small ...
 # auto_train / onboard (default sigue a_short si no pasas pool)
 .venv/Scripts/python.exe rl/auto_train.py --map-pool official_2p_small
 .venv/Scripts/python.exe rl/auto_train.py --scratch --onboard --onboard-map-pool official_2p_small
-```
+`
 
 
 ### P4 — Obs / dash para naval y air

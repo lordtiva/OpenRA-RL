@@ -237,3 +237,108 @@ def test_teacher_optional_naval_trains_ship_after_yard():
     assert len(out) == 1
     assert out[0].action == ActionType.TRAIN
     assert out[0].item_type in ("dd", "pt", "ss", "ca", "msub")
+
+def test_teacher_build_priority_still_rush_land():
+    """Critical path stays powr→proc→barracks; weap not on BUILD_PRIORITY."""
+    from rl.scripted_teacher import ScriptedTeacher
+    t = ScriptedTeacher(verbose=False)
+    assert t.BUILD_PRIORITY == ["powr", "proc", "barracks"]
+    assert "weap" not in t.BUILD_PRIORITY
+    assert "dome" not in t.BUILD_PRIORITY
+
+
+def test_teacher_tech_defense_noop_before_rush():
+    """Before rush threshold, optional tech must not divert cash from rifles."""
+    from rl.scripted_teacher import ScriptedTeacher
+
+    class _T(ScriptedTeacher):
+        def _can_produce_item(self, obs, item_type):
+            return item_type in (obs.available_production or [])
+
+    t = _T(verbose=False)
+    t.phase = "train_army"
+    avail = ["pbox", "hbox", "ftur", "dome", "weap", "powr", "atek"]
+    # 2 combat << RUSH_ATTACK_MOVE(8)
+    units = [_U("harv"), _U("e1", aid=2), _U("e1", aid=3)]
+    obs = _Obs(map_name="fase2_a_short.oramap", available=avail,
+               buildings=[_B("proc"), _B("powr", aid=2), _B("tent", aid=3)],
+               units=units)
+    obs.economy.cash = 5000
+    out = t._optional_tech_defense(obs, [])
+    assert out == []
+
+
+def test_teacher_tech_defense_builds_pbox_after_rush():
+    from rl.scripted_teacher import ScriptedTeacher
+    from openra_env.models import ActionType
+
+    class _T(ScriptedTeacher):
+        def _can_produce_item(self, obs, item_type):
+            return item_type in (obs.available_production or [])
+
+    t = _T(verbose=False)
+    t.phase = "attack"
+    avail = ["pbox", "hbox", "dome", "weap", "powr", "atek", "fix"]
+    units = [_U("harv")] + [_U("e1", aid=10 + i) for i in range(8)]
+    obs = _Obs(map_name="fase2_a_short.oramap", available=avail,
+               buildings=[_B("proc"), _B("powr", aid=2), _B("tent", aid=3)],
+               units=units)
+    obs.economy.cash = 5000
+    obs.economy.power_provided = 100
+    obs.economy.power_drained = 50
+    out = t._optional_tech_defense(obs, [])
+    assert len(out) == 1
+    assert out[0].action == ActionType.BUILD
+    assert out[0].item_type in ("pbox", "hbox", "ftur")
+
+
+def test_teacher_tech_defense_dome_after_cheap_defense():
+    from rl.scripted_teacher import ScriptedTeacher
+    from openra_env.models import ActionType
+
+    class _T(ScriptedTeacher):
+        def _can_produce_item(self, obs, item_type):
+            return item_type in (obs.available_production or [])
+
+    t = _T(verbose=False)
+    t.phase = "attack"
+    avail = ["pbox", "dome", "weap", "powr", "atek", "fix"]
+    units = [_U("harv")] + [_U("e1", aid=10 + i) for i in range(8)]
+    obs = _Obs(map_name="fase2_a_short.oramap", available=avail,
+               buildings=[_B("proc"), _B("powr", aid=2), _B("tent", aid=3),
+                          _B("pbox", aid=4)],
+               units=units)
+    obs.economy.cash = 5000
+    obs.economy.power_provided = 100
+    obs.economy.power_drained = 50
+    out = t._optional_tech_defense(obs, [])
+    assert len(out) == 1
+    assert out[0].action == ActionType.BUILD
+    assert out[0].item_type == "dome"
+
+
+def test_teacher_tech_defense_atek_after_dome_weap():
+    from rl.scripted_teacher import ScriptedTeacher
+    from openra_env.models import ActionType
+
+    class _T(ScriptedTeacher):
+        def _can_produce_item(self, obs, item_type):
+            return item_type in (obs.available_production or [])
+
+    t = _T(verbose=False)
+    t.phase = "attack"
+    avail = ["atek", "stek", "fix", "agun", "gun"]
+    units = [_U("harv")] + [_U("e1", aid=10 + i) for i in range(8)]
+    obs = _Obs(map_name="fase2_a_short.oramap", available=avail,
+               buildings=[_B("proc"), _B("powr", aid=2), _B("tent", aid=3),
+                          _B("pbox", aid=4), _B("dome", aid=5), _B("weap", aid=6),
+                          _B("fix", aid=7)],
+               units=units)
+    obs.economy.cash = 5000
+    obs.economy.power_provided = 200
+    obs.economy.power_drained = 80
+    out = t._optional_tech_defense(obs, [])
+    assert len(out) == 1
+    assert out[0].action == ActionType.BUILD
+    assert out[0].item_type in ("atek", "stek")
+

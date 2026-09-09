@@ -22,6 +22,9 @@ Este teacher:
     (tapes eco_and_combat_mental_v4).
   - early fog scout away from home once a few combat exist (relative fog).
   - peel de raid; TRAIN e1 durante el push; 2 harvs; 0 guards / 0 APC
+  - P3 land-first tech/defense AFTER eco/barracks (optional, not BUILD_PRIORITY):
+    cheap defense → dome → weap → fix → atek/stek. Gates on rush rolling so
+    a_short Allies rush stays intact. Navy/air stays light via _optional_naval_air.
 """
 from __future__ import annotations
 
@@ -135,10 +138,13 @@ class ScriptedTeacher(ScriptedBot):
             commands.append(CommandModel(action=ActionType.TRAIN, item_type="harv"))
             self._log("Training harv (teacher eco)")
         if self.phase != "attack":
+            commands.extend(self._optional_tech_defense(obs, commands))
             commands.extend(self._optional_naval_air(obs, commands))
             return commands
         already_train = any(c.action == ActionType.TRAIN for c in commands)
         if already_train:
+            # Still allow land tech BUILD (does not stack TRAIN).
+            commands.extend(self._optional_tech_defense(obs, commands))
             return commands
         has_barracks = any(b.type in self.BARRACKS_TYPES for b in obs.buildings)
         infantry_training = any(
@@ -150,8 +156,128 @@ class ScriptedTeacher(ScriptedBot):
                 and obs.economy.cash >= 100):
             commands.append(CommandModel(action=ActionType.TRAIN, item_type="e1"))
             self._log("Training e1 (sustain during attack)")
+        commands.extend(self._optional_tech_defense(obs, commands))
         commands.extend(self._optional_naval_air(obs, commands))
         return commands
+
+    def _optional_tech_defense(
+        self, obs: OpenRAObservation, existing: List[CommandModel] | None = None,
+    ) -> List[CommandModel]:
+        """P3 land-first radar/tech/defense after eco/barracks (roles).
+
+        Keeps BUILD_PRIORITY = powr→proc→barracks (rush critical path). Once
+        barracks+proc exist and the rush is rolling (phase attack or enough
+        combat), queue one next structure from the roles catalog:
+          cheap defense_gun/turret → powr (if tight) → dome → weap → fix → tech.
+        One BUILD per decide; skips if a BUILD is already queued this tick.
+        """
+        if any(getattr(c, "action", None) == ActionType.BUILD for c in (existing or [])):
+            return []
+        own = {
+            str(getattr(b, "type", "") or "").lower()
+            for b in (obs.buildings or [])
+        }
+        if not (own & self.BARRACKS_TYPES) or "proc" not in own:
+            return []
+        n_combat = n_combat_total(obs)
+        # Do not divert cash from the a_short rifle rush.
+        if not (self.phase == "attack" or n_combat >= self.RUSH_ATTACK_MOVE):
+            return []
+        queued = {
+            str(getattr(p, "item", "") or "").lower()
+            for p in (obs.production or [])
+        }
+        building_busy = any(
+            str(getattr(p, "queue_type", "") or "").lower() in
+            ("building", "buildings", "structure", "structures")
+            and float(getattr(p, "progress", 0) or 0) < 0.99
+            for p in (obs.production or [])
+        )
+        defense_busy = any(
+            str(getattr(p, "queue_type", "") or "").lower() in
+            ("defense", "defences", "defenses")
+            and float(getattr(p, "progress", 0) or 0) < 0.99
+            for p in (obs.production or [])
+        )
+        cash = int(getattr(obs.economy, "cash", 0) or 0)
+        try:
+            power_bal = (
+                int(getattr(obs.economy, "power_provided", 0) or 0)
+                - int(getattr(obs.economy, "power_drained", 0) or 0)
+            )
+        except (TypeError, ValueError):
+            power_bal = 0
+
+        def _try(items, min_cash: int, *, defense_queue: bool = False):
+            if cash < min_cash:
+                return None
+            if defense_queue and defense_busy:
+                return None
+            if (not defense_queue) and building_busy:
+                return None
+            for item in items:
+                if item in own or item in queued:
+                    return None  # category already owned/queued (first hit)
+            for item in items:
+                if self._can_produce_item(obs, item):
+                    return item
+            return None
+
+        # 1) Cheap base defense (roles defense_gun / defense_turret).
+        if not (own & {"pbox", "hbox", "gun", "agun", "ftur", "tsla", "sam"}):
+            item = _try(("pbox", "hbox", "ftur"), 700, defense_queue=True)
+            if item:
+                self._log(f"P3 tech/defense BUILD {item} (cheap defense)")
+                return [CommandModel(action=ActionType.BUILD, item_type=item)]
+
+        # 2) Power cushion before radar/tech drains (extra powr OK).
+        if power_bal < 40 and "powr" not in queued and "apwr" not in queued:
+            n_powr = sum(
+                1 for b in (obs.buildings or [])
+                if str(getattr(b, "type", "") or "").lower() in ("powr", "apwr")
+            )
+            if (n_powr < 3 and cash >= 350 and not building_busy
+                    and self._can_produce_item(obs, "powr")):
+                self._log("P3 tech/defense BUILD powr (power cushion)")
+                return [CommandModel(action=ActionType.BUILD, item_type="powr")]
+
+        # 3) Radar (dome) — ROLE_TECH entry point.
+        if "dome" not in own and "dome" not in queued:
+            item = _try(("dome",), 1600)
+            if item:
+                self._log(f"P3 tech/defense BUILD {item} (radar)")
+                return [CommandModel(action=ActionType.BUILD, item_type=item)]
+
+        # 4) War factory — still off BUILD_PRIORITY critical path.
+        if "weap" not in own and "weap" not in queued:
+            item = _try(("weap",), 2100)
+            if item:
+                self._log(f"P3 tech/defense BUILD {item} (warf)")
+                return [CommandModel(action=ActionType.BUILD, item_type=item)]
+
+        # 5) Service depot.
+        if "weap" in own and "fix" not in own and "fix" not in queued:
+            item = _try(("fix",), 1300)
+            if item:
+                self._log(f"P3 tech/defense BUILD {item} (repair)")
+                return [CommandModel(action=ActionType.BUILD, item_type=item)]
+
+        # 6) Tech center (Allied atek / Soviet stek).
+        if ("dome" in own and "weap" in own
+                and not (own & {"atek", "stek"})
+                and not (queued & {"atek", "stek"})):
+            item = _try(("atek", "stek"), 1600)
+            if item:
+                self._log(f"P3 tech/defense BUILD {item} (tech)")
+                return [CommandModel(action=ActionType.BUILD, item_type=item)]
+
+        # 7) One advanced defense once radar or weap unlocks it.
+        if not (own & {"gun", "agun", "tsla", "sam"}):
+            item = _try(("agun", "sam", "gun", "tsla"), 900, defense_queue=True)
+            if item:
+                self._log(f"P3 tech/defense BUILD {item} (adv defense)")
+                return [CommandModel(action=ActionType.BUILD, item_type=item)]
+        return []
 
     def _optional_naval_air(self, obs: OpenRAObservation, existing: List[CommandModel] | None = None) -> List[CommandModel]:
         """P3 light optional navy/air + production on water maps.
