@@ -32,7 +32,7 @@ Esta carpeta es la **fuente de verdad** de la competencia RL (PPO AlphaStar-lite
 | **20** | `20-run46-burnin-topk.md` | **Run 46: burn-in 8 + XF top-k 16** | **2026-09-04** |
 | **21** | `21-run47-map-qsa.md` | **Run 47: map QSA block 8 top-8** | **2026-09-04** |
 | **22** | `22-onboard.md` | **De 0 a ~50% vs easy sin un `best.pt`: `--scratch --onboard` (SFT teacher → beginner → easy)** | **Onboarding — 2026-09-04** |
-| **23** | `23-ra-completo-todo.md` | **Gaps RA completo vs train land: naval/air macros, building slots, micro, mapas, obs/dash (P0-P4)** | **TODO vivo - 2026-09-08** |
+| **23** | `23-ra-completo-todo.md` | **Gaps RA completo vs train land: naval/air macros, building slots, micro, mapas, obs/dash (P0-P4)** | **P0–P4 DONE - 2026-09-09** |
 
 ## Cómo leer esto
 

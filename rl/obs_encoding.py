@@ -16,8 +16,47 @@ import math
 
 import numpy as np
 
-from rl.roles import role_id_of
+from rl.roles import (
+    role_id_of,
+    role_of,
+    ROLE_AIRBOMBER,
+    ROLE_AIRFIGHTER,
+    ROLE_HELI,
+    ROLE_SHIP_AMPHIB,
+    ROLE_SHIP_ASW,
+    ROLE_SHIP_COMBAT,
+    ROLE_TRANSPORTER,
+)
 from rl.force_estimate import aoa_features
+
+# Domain roles: unit tokens already get these via role_emb; scalars below
+# expose force-composition globally (own + visible enemy).
+_NAVAL_ROLES = frozenset({
+    ROLE_SHIP_ASW, ROLE_SHIP_COMBAT, ROLE_SHIP_AMPHIB,
+})
+_AIR_ROLES = frozenset({
+    ROLE_AIRFIGHTER, ROLE_AIRBOMBER, ROLE_HELI, ROLE_TRANSPORTER,
+})
+
+
+def is_naval_type(type_name: str) -> bool:
+    return role_of(type_name) in _NAVAL_ROLES
+
+
+def is_air_type(type_name: str) -> bool:
+    return role_of(type_name) in _AIR_ROLES
+
+
+def count_domain_units(units) -> tuple[int, int]:
+    """Return (n_naval, n_air) for an iterable of unit-like objects."""
+    n_nav = n_air = 0
+    for u in units or ():
+        t = getattr(u, "type", "") or ""
+        if is_naval_type(t):
+            n_nav += 1
+        elif is_air_type(t):
+            n_air += 1
+    return n_nav, n_air
 
 SPATIAL_CHANNELS = 9
 # Colas que terminan en PLACE (no Infantry/Vehicle). Defense = pbox/gun/ftur.
@@ -118,7 +157,7 @@ def apply_beacon(spatial, cx: int, cy: int, height: int, width: int,
     return spatial
 
 
-SCALAR_DIM = 29  # 25 + has_enemy_base_belief + rel_dx/dy + base_conf
+SCALAR_DIM = 33  # 29 + own/ene naval+air (P4 append-only; soft-pad via adapt_scalar)
 # Scalar layout (indices):
 #  0 cash, 1 ore, 2 silo_full, 3 power_ratio, 4 low_power, 5 harvs,
 #  6 n_units, 7 n_buildings, 8 n_enemies, 9 n_enemy_bldgs,
@@ -127,6 +166,10 @@ SCALAR_DIM = 29  # 25 + has_enemy_base_belief + rel_dx/dy + base_conf
 # 20 tech_tier, 21 aoa_rel_power, 22 aoa_rel_health, 23 aoa_rel_speed, 24 aoa_strong,
 # 25 has_enemy_base_belief, 26 base_rel_dx (vs own CY / map), 27 base_rel_dy,
 # 28 base_conf (count/BASE_STRENGTH_NOM). Mental base from sightings — not GPS.
+# 29 own_naval, 30 own_air, 31 ene_naval (visible), 32 ene_air (visible).
+#    Domain counts /10 clipped — distinguish navy/air from land vehicle globally.
+#    Per-token domain still via role_emb (ROLE_SHIP_* / ROLE_AIR* / heli).
+#    Engine spatial Ch6/Ch8 stay domain-agnostic (no C# channel bump).
 # Mental enemy-base hypothesis from visible enemy buildings (map-agnostic).
 BASE_CLUSTER_RADIUS = 14   # chebyshev radius for local density
 BASE_STRENGTH_NOM = 6.0    # scalar conf = min(count / NOM, 1)
@@ -223,6 +266,11 @@ def scalar_features(obs, belief=None) -> np.ndarray:
             1.0,
         )
 
+    # P4: domain force-composition (append-only; land vehicle stays in n_units)
+    own_naval, own_air = count_domain_units(getattr(obs, "units", None))
+    ene_naval, ene_air = count_domain_units(
+        getattr(obs, "visible_enemies", None))
+
     return np.array([
         cash_norm,
         ore_norm,
@@ -253,6 +301,10 @@ def scalar_features(obs, belief=None) -> np.ndarray:
         base_rel_dx,
         base_rel_dy,
         base_conf,
+        min(own_naval / 10.0, 1.0),
+        min(own_air / 10.0, 1.0),
+        min(ene_naval / 10.0, 1.0),
+        min(ene_air / 10.0, 1.0),
     ], dtype=np.float32)
 
 

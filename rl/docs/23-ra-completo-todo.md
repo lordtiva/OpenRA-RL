@@ -3,7 +3,7 @@
 > **Para quién:** cuando quieras ampliar el action set / mapas más allá del land-only
 > de Phase A/B (naval, air, buildings UI, micro).
 >
-> **Fecha:** 2026-09-08 (P0–P3 cerrados 2026-09-09 en `exp/ra-completo-p0`; P3 teacher tech/defense + map-pool).
+> **Fecha:** 2026-09-08 (P0–P4 cerrados 2026-09-09 en `exp/ra-completo-p0`; P4 obs/dash naval+air).
 >
 > **Relacionado:** onboarding land `22-onboard.md`; operación diaria `07-operacion.md`;
 > índice `README.md`.
@@ -112,7 +112,7 @@ l/scenarios/_archive/; activo solo
 Tests: 	est_ra_completo_p3 (catalog/masks/onboard + teacher naval + tech/defense).
 Pool official_2p_small: a_short, Doughnut, Bombardment Islands,
 Tournament Island, X-Lake.
-Listo para **P4** (obs/dash naval+air).
+P4 (obs/dash naval+air) también DONE — ver sección P4.
 
 Como correr:
 `
@@ -124,10 +124,29 @@ python -m rl.train --map-pool official_2p_small ...
 `
 
 
-### P4 — Obs / dash para naval y air
+### P4 — Obs / dash para naval y air — DONE
 
-- [ ] Canales / escalares / roles en obs para naval y air.
-- [ ] Dashboard: mix de acciones y contadores que no escondan navy/air bajo “vehicle”.
+- [x] Escalares append-only `SCALAR_DIM` 29→**33**: `own_naval`, `own_air`,
+  `ene_naval` (visible), `ene_air` (visible) en `/10` clip. Soft-load via
+  `adapt_scalar_state_dict` (cols nuevas en 0; tronco land intacto).
+- [x] Roles: `role_emb` ya distingue `ROLE_SHIP_*` / air / heli vs land vehicle
+  en unit tokens (own + enemy). Helpers `is_naval_type` / `is_air_type` /
+  `count_domain_units` en `obs_encoding` (alineados a `rl.roles`).
+- [x] **Sin** bump de canales espaciales del engine (Ch6/Ch8 siguen
+  domain-agnostic): evitar Conv2d Net2Net; scalars + roles bastan para P4.
+- [x] Dashboard: `landCombatFrac` / `navalCombatFrac` / `airCombatFrac`;
+  `attackFrac` = land+naval+air (navy/air **no** se esconden bajo vehicle).
+  Mix chart: 5 series (land / naval / air / eco / no_op).
+
+**Estado (2026-09-09):** P4 DONE en `exp/ra-completo-p0`.
+Tests: `test_ra_completo_p4` (+ mental_base / imitation SCALAR_DIM=33).
+Ckpt compat: MAIN / land ckpts `in=29` → pad a 33; no wipe.
+
+**RA-completo TODO:** P0–P4 checklist cerrada. Leftovers / out-of-scope
+(no bloquean “RA completo” de este doc):
+- P3+: multi-spawn rotation del engine; mapas aire dedicados / prebuilts;
+  tapes BC navy/air dedicadas; kind-mask caveats P1; SFT corto guard/focus.
+- Spatial domain channels en C# (opcional futuro; no pedido para cerrar P4).
 
 ---
 

@@ -165,7 +165,9 @@
     <h2>Mix de acciones</h2>
     <canvas id="cAct"></canvas>
     <div class="legend">
-      <span style="--c:var(--bad)">attack* (attack / attack_move / army / infantry / vehicle)</span>
+      <span style="--c:var(--bad)">land combat (attack / *attack_move army/infantry/vehicle)</span>
+      <span style="--c:#38bdf8">naval_attack_move</span>
+      <span style="--c:#c084fc">air_attack_move</span>
       <span style="--c:var(--good)">eco (build/place/harvest/train/harvesters_move)</span>
       <span style="--c:var(--muted)">no_op</span>
     </div>
@@ -196,7 +198,7 @@
 </main>
 <footer>
   Fuentes: <code id="srcMetrics">rl/ckpts_v2/metrics.jsonl</code> · <code id="srcPfsp">…/pfsp_stats.json</code> · <code id="srcBest">…/best.json</code> · <code id="srcCollapse">…/last_collapse.json</code> · <code>rl/auto_train.log</code>.
-  Alertas: último collapse (no reloj). attack* incluye infantry/vehicle_attack_move; eco incluye harvesters_move; gris = solo no_op.
+  Alertas: último collapse (no reloj). combat* = land + naval_attack_move + air_attack_move (no esconder navy/air bajo vehicle); eco incluye harvesters_move; gris = solo no_op.
   Cambiá carpeta con <code>?dir=rl/ckpts</code> (v1.1) o <code>?dir=rl/ckpts_v2</code> (default). Backup: <code>dashboard.html.bak</code>.
 </footer>
 
@@ -259,19 +261,33 @@ function parseMetrics(text) {
   return [...by.values()].sort((a,b) => a.iter - b.iter);
 }
 
-function attackFrac(hist) {
-  // combat*: attack + *attack_move (army / infantry / vehicle)
+function histTotal(hist) {
   if (!hist) return 0;
-  let n = 0, atk = 0;
-  const ATK = new Set([
-    "attack", "attack_move", "army_attack_move",
-    "infantry_attack_move", "vehicle_attack_move",
-  ]);
-  for (const [k,v] of Object.entries(hist)) {
-    const c = +v || 0; n += c;
-    if (ATK.has(k)) atk += c;
-  }
-  return n ? atk / n : 0;
+  let n = 0;
+  for (const v of Object.values(hist)) n += (+v || 0);
+  return n;
+}
+function histFrac(hist, keys) {
+  if (!hist) return 0;
+  const n = histTotal(hist);
+  if (!n) return 0;
+  let hit = 0;
+  for (const k of keys) hit += (+hist[k] || 0);
+  return hit / n;
+}
+const LAND_ATK = [
+  "attack", "attack_move", "army_attack_move",
+  "infantry_attack_move", "vehicle_attack_move",
+];
+const NAVAL_ATK = ["naval_attack_move"];
+const AIR_ATK = ["air_attack_move"];
+function landCombatFrac(hist) { return histFrac(hist, LAND_ATK); }
+function navalCombatFrac(hist) { return histFrac(hist, NAVAL_ATK); }
+function airCombatFrac(hist) { return histFrac(hist, AIR_ATK); }
+function attackFrac(hist) {
+  // combat*: land + naval + air (navy/air NOT folded under vehicle)
+  if (!hist) return 0;
+  return landCombatFrac(hist) + navalCombatFrac(hist) + airCombatFrac(hist);
 }
 function ecoFrac(hist) {
   if (!hist) return 0;
@@ -625,7 +641,9 @@ function render(rows, pfsp, best, collapse) {
   }
 
   drawLines($("cAct"), [
-    { ys: rows.map(x => attackFrac(x.action_hist)), color: "#ff6b7a" },
+    { ys: rows.map(x => landCombatFrac(x.action_hist)), color: "#ff6b7a" },
+    { ys: rows.map(x => navalCombatFrac(x.action_hist)), color: "#38bdf8" },
+    { ys: rows.map(x => airCombatFrac(x.action_hist)), color: "#c084fc" },
     { ys: rows.map(x => ecoFrac(x.action_hist)), color: "#3dd68c" },
     { ys: rows.map(x => noopFrac(x.action_hist)), color: "#8b9bb0" },
   ], { ymin: 0, ymax: 1 });

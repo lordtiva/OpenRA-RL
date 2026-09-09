@@ -398,7 +398,7 @@ check("push uses mental base after leftovers cleared",
 check("mental base push != GPS beacon", cell_mb != (95, 11))
 
 sc = scalar_features(obs_fog_base, belief=th4.belief)
-check("SCALAR_DIM is 29", SCALAR_DIM == 29 and sc.shape == (29,))
+check("SCALAR_DIM is 33", SCALAR_DIM == 33 and sc.shape == (33,))
 check("has_enemy_base_belief scalar on", float(sc[25]) == 1.0)
 check("base_conf > 0", float(sc[28]) > 0.0)
 
