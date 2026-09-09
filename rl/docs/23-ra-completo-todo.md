@@ -44,10 +44,13 @@ P0 (rama `exp/ra-completo-p0`): path singular harv→celda **existe** (unit head
 
 **Estado:** cerrado en `exp/ra-completo-p0` (rebase sobre `alphalite-v2` / AMP `dfb2b02`). Tip: `fe02a7c`. Tests: `test_ra_completo_p0`, `test_alphalite_v2`, `test_onboard`.
 
-### P1 — Building slot head (sell / repair / rally / power_down / set_primary)
+### P1 — Building slot head (sell / repair / rally / power_down / set_primary) — IN PROGRESS
 
-- [ ] Cabeza o path de **building slot**: `sell`, `repair`, `rally`, `power_down`, `set_primary`.
-- [ ] No mezclar con el mismo corte que crece type-head + maps (un régimen por vez).
+- [~] Path de **building slot** (scaffold): `sell`, `repair`, `set_rally_point`, `power_down`, `set_primary` en `ENABLED_TYPES`; `ActionIndex.building_ids` + máscara hasta que haya edificios; `index_to_command` emite `CommandModel` con `actor_id` del slot (unit_slot → building_ids). Sin cabeza neural dedicada aún (reusa unit head).
+- [ ] Cabeza neural dedicada / `building_valid` en sampling (hoy unit_valid).
+- [x] No mezclar con el mismo corte que crece type-head + maps (un régimen por vez) — P1 reusa filas ya existentes en `ACTION_TYPES` (sin crecer type-head).
+
+**Estado:** scaffold en `exp/ra-completo-p0`. Tests: `test_ra_completo_p1`. Land macros intactos.
 
 ### P2 — Micro: group stance / stop, focus fire
 

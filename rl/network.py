@@ -70,12 +70,15 @@ CELL_HEAD_OLD_IN = SPATIAL_CH + 64 + 64  # fmap + tipo + hidden (pre Capa 2)
 # Qué cabeza usa cada tipo de acción (FUENTE ÚNICA para log_prob condicional;
 # action_adapter debe ser coherente con estos conjuntos). Auditoría 2026-08-24.
 TYPES_USE_UNIT = {"move", "attack_move", "attack", "stop", "set_stance",
-                  "harvest", "deploy"}
+                  "harvest", "deploy",
+                  # P1 scaffold: unit_slot indexes ActionIndex.building_ids
+                  "sell", "repair", "power_down", "set_primary",
+                  "set_rally_point"}
 TYPES_USE_CELL = {"move", "attack_move", "attack", "place_building",
                   "army_attack_move", "infantry_attack_move",
                   "vehicle_attack_move", "harvesters_move",
                   "naval_attack_move", "air_attack_move",
-                  "harvest"}
+                  "harvest", "set_rally_point"}
 # Role-group macros: cell only (no unit head); adapter multi-commands.
 TYPES_GROUP_MACRO = {"army_attack_move", "infantry_attack_move",
                      "vehicle_attack_move", "harvesters_move",
@@ -87,6 +90,9 @@ COMBAT_PUSH_TYPES = frozenset({
     "naval_attack_move", "air_attack_move",
 })
 TYPES_USE_ITEM = {"train", "build", "place_building", "cancel_production"}
+# P1: building-slot actions (adapter remaps unit_slot -> building_ids).
+TYPES_USE_BUILDING = {"sell", "repair", "power_down", "set_primary",
+                      "set_rally_point"}
 
 
 def build_combat_type_mask(base_mask: torch.Tensor) -> torch.Tensor | None:

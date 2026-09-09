@@ -11,9 +11,9 @@ handler"):
       edificios de producción (dato que ya viene en la observación)
     - ATTACK sin enemigo visible cerca -> target_actor_id=0 -> NRE en C# ->
       se degrada a ATTACK_MOVE hacia la celda (siempre seguro)
-    - Acciones que apuntan a EDIFICIOS (sell/repair/rally/power_down/
-      set_primary) quedan fuera de la v0.1: requerirían una cabeza de slots
-      de edificios; se agregará cuando el núcleo sea estable
+    - Acciones de EDIFICIO (sell/repair/rally/power_down/set_primary):
+      P1 scaffold — unit_slot indexa ActionIndex.building_ids (append-only,
+      masked hasta que haya edificios). Cabeza dedicada puede venir después.
 """
 
 import numpy as np
@@ -33,6 +33,13 @@ ENABLED_TYPES = {
     "cancel_production", "army_attack_move",
     "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
     "naval_attack_move", "air_attack_move",
+    # P1 scaffold: building slot (masked until buildings exist)
+    "sell", "repair", "set_rally_point", "power_down", "set_primary",
+}
+
+# Types that pick a building actor via unit_slot -> building_ids.
+BUILDING_SLOT_TYPES = {
+    "sell", "repair", "set_rally_point", "power_down", "set_primary",
 }
 
 UNIT_ACTION_TYPES = {"move", "attack_move", "attack", "stop", "set_stance",
@@ -116,6 +123,7 @@ MOVE_CELL_TYPES = {
     "move", "attack_move", "attack", "army_attack_move",
     "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
     "naval_attack_move", "air_attack_move", "harvest",
+    "set_rally_point",
 }
 # Combat movement: masked until a refinery stands. Otherwise PPO
 # reward-hacks army_attack_move / attack_move (the 201-309 collapse).
@@ -686,7 +694,8 @@ class ActionIndex:
     __slots__ = ("type_mask", "unit_valid", "cell_mask", "item_indices",
                  "item_mask", "unit_ids", "items", "train_items",
                  "build_items", "rol_a_concreto", "h", "w",
-                 "train_slot_mask", "build_slot_mask", "pass_grid")
+                 "train_slot_mask", "build_slot_mask", "pass_grid",
+                 "building_ids", "building_valid")
 
     def __init__(self, obs, vocab: Vocab, device="cpu"):
         self.h = max(obs.map_info.height, 1)
@@ -726,6 +735,16 @@ class ActionIndex:
         self.unit_valid = torch.zeros(MAX_UNITS, dtype=torch.bool)
         for i in range(len(self.unit_ids)):
             self.unit_valid[i] = True
+
+        # P1 scaffold: building slots (same MAX_UNITS cap; unit_slot remapped)
+        blds = list(getattr(obs, "buildings", None) or [])[:MAX_UNITS]
+        self.building_ids = [
+            int(getattr(b, "actor_id", 0) or 0) for b in blds
+            if int(getattr(b, "actor_id", 0) or 0) > 0
+        ]
+        self.building_valid = torch.zeros(MAX_UNITS, dtype=torch.bool)
+        for i in range(len(self.building_ids)):
+            self.building_valid[i] = True
 
         # Cabeza 3: mapa completo como candidatos de celda
         self.cell_mask = torch.ones(self.h * self.w, dtype=torch.bool)
@@ -804,6 +823,10 @@ class ActionIndex:
             m[TYPE_TO_IDX["naval_attack_move"]] = False
         if n_air_total(obs) < 1:
             m[TYPE_TO_IDX["air_attack_move"]] = False
+        # P1: building-slot actions masked until at least one building exists.
+        if len(self.building_ids) < 1:
+            for name in BUILDING_SLOT_TYPES:
+                m[TYPE_TO_IDX[name]] = False
         self.type_mask = torch.from_numpy(m)
 
 
@@ -927,6 +950,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         t_name = "no_op"
     if t_name == "air_attack_move" and n_air_total(obs) < 1:
         t_name = "no_op"
+    if t_name in BUILDING_SLOT_TYPES and not aidx.building_ids:
+        t_name = "no_op"
 
     # Per-harvester cell path (P0): move/attack_move/attack on a selected
     # harvester stays MOVE to (cx,cy) for THAT actor_id — do not rewrite to
@@ -972,6 +997,13 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         m_id = _any_mcv(obs)
         if m_id and m_id in aidx.unit_ids:
             eff_unit_slot = aidx.unit_ids.index(m_id)
+    elif t_name in BUILDING_SLOT_TYPES and aidx.building_ids:
+        # unit_slot indexes building_ids (scaffold; dedicated head later).
+        if 0 <= unit_slot < len(aidx.building_ids):
+            eff_unit_slot = unit_slot
+        else:
+            eff_unit_slot = 0
+        actor_id = aidx.building_ids[eff_unit_slot]
 
     cmd = None
     group_cmds = None  # v2: multi CommandModel for role-group macros
@@ -1038,6 +1070,13 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
                            target_x=cx, target_y=cy)
     elif t == ActionType.CANCEL_PRODUCTION:
         cmd = CommandModel(action=t, item_type=item_type)
+    elif t in (ActionType.SELL, ActionType.REPAIR, ActionType.POWER_DOWN,
+               ActionType.SET_PRIMARY):
+        # P1 stub: actor_id = selected building slot.
+        cmd = CommandModel(action=t, actor_id=actor_id)
+    elif t == ActionType.SET_RALLY_POINT:
+        cmd = CommandModel(action=t, actor_id=actor_id,
+                           target_x=cx, target_y=cy)
     else:
         cmd = CommandModel(action=ActionType.NO_OP)
     if group_cmds:
