@@ -909,6 +909,35 @@ class ActionIndex:
             self.build_slot_mask[slot] = True
         self.pass_grid = None
 
+        # P3: on land-only / puddle maps, forbid naval BUILD + ship TRAIN
+        # (Informe-2 anti-syrd). Water maps (catalog has_water) keep navy.
+        # Airbase / air units stay legal on land. Defense already unmasked
+        # once proc stands (not in ECONOMY_BUILD_ROLES-only gate).
+        from rl.map_catalog import (
+            FORBIDDEN_BUILD_ROLES_LAND, NAVAL_TRAIN_ROLES, allows_naval,
+        )
+        map_name = str(getattr(getattr(obs, 'map_info', None), 'map_name', '') or '')
+        naval_ok = allows_naval(map_name)
+        if not naval_ok:
+            for slot, role in enumerate(self.build_items):
+                bslot = n_train + slot
+                if bslot >= n_vocab:
+                    break
+                if role in FORBIDDEN_BUILD_ROLES_LAND:
+                    self.build_slot_mask[bslot] = False
+                    self.item_mask[bslot] = False
+            for slot, role in enumerate(self.train_items):
+                if slot >= n_vocab:
+                    break
+                if role in NAVAL_TRAIN_ROLES:
+                    self.train_slot_mask[slot] = False
+                    self.item_mask[slot] = False
+            if not bool(self.build_slot_mask.any()):
+                m[TYPE_TO_IDX['build']] = False
+            if not bool(self.train_slot_mask.any()):
+                m[TYPE_TO_IDX['train']] = False
+            self.type_mask = torch.from_numpy(m)
+
         # Hard constraint: no combat TRAIN until proc + harvester.
         # Without a standing proc, also freeze ALL train (no harv spam) and
         # BUILD of barracks/weap/etc. Power + refinery stay legal so we

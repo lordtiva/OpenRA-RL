@@ -44,6 +44,7 @@ from rl.imitation import (
 )
 from rl.onboard import mix_target_prob
 from rl.scripted_teacher import ScriptedTeacher
+from rl import map_catalog as mapcat
 
 
 def pick_device(requested: str) -> str:
@@ -141,6 +142,10 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
     async def _one(i, env):
         t_macro = int(getattr(args, "bc_macro_ticks", 0) or 0) or args.macro_ticks
         t_steps = int(getattr(args, "bc_max_steps", 0) or 0) or args.max_steps
+        ep_kwargs = dict(t_kwargs)
+        pool = mapcat.parse_pool_arg(getattr(args, "map_pool", None))
+        if pool:
+            ep_kwargs.update(mapcat.reset_payload_for(mapcat.sample_pool(pool)))
         try:
             traj, outcome = await collect_one_episode(
                 env, net, vocab, device,
@@ -148,7 +153,7 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
                 temperature=args.temperature,
                 max_steps=t_steps,
                 macro_ticks=t_macro,
-                reset_kwargs=t_kwargs,
+                reset_kwargs=ep_kwargs,
                 shaper_preset=args.shaper_preset,
                 auto_support=args.auto_support,
                 war_nudge=not args.no_war_nudge,
@@ -323,20 +328,41 @@ async def amain(args):
     print(f"Pool: {pool_size} envs / {len(urls)} urls | ws_timeout={ws_timeout:.0f}s",
           flush=True)
 
-    # Curriculum Fase 2: --scenario A resetea con el mapa pre-construido
-    # (base del cliente + 8 rifles vs beginner). None = juego completo.
+    # Maps: --scenario (single) and/or --map-pool (sample per episode).
+    # Default curriculum stays a_short via auto_train; water maps are opt-in.
     reset_kwargs = {}
-    if args.scenario:
-        mapa = Path("rl/scenarios") / f"fase2_{args.scenario.lower()}.oramap"
-        if not mapa.exists():
-            raise SystemExit(f"escenario inexistente: {mapa} "
-                             f"(generar con rl/make_scenario.py)")
-        # map_name ESTABLE: el server sobreescribe siempre el mismo archivo
-        # y el engine puede cachearlo. Sin esto genera un nombre unico por
-        # episodio => cache fria en cada reset (~+100 s/iter medida).
-        reset_kwargs = {"map_data": base64.b64encode(mapa.read_bytes()).decode(),
-                        "map_name": f"fase2_{args.scenario.lower()}.oramap"}
-        print(f"Escenario {args.scenario} ({mapa.name})", flush=True)
+    map_pool = mapcat.parse_pool_arg(getattr(args, "map_pool", None))
+    if map_pool:
+        print(f"Map pool ({len(map_pool)}): {','.join(map_pool)}", flush=True)
+        # Seed reset_kwargs with first entry so teacher BC / early path has a map.
+        try:
+            reset_kwargs.update(mapcat.reset_payload_for(map_pool[0]))
+            print(f"Map pool seed: {map_pool[0]} ({reset_kwargs.get('map_name')})",
+                  flush=True)
+        except (KeyError, FileNotFoundError) as e:
+            raise SystemExit(f"map pool invalid: {e}") from e
+    elif args.scenario:
+        try:
+            reset_kwargs.update(mapcat.reset_payload_for(args.scenario))
+            entry = mapcat.get_entry(args.scenario)
+            print(
+                f"Escenario {entry.key} ({entry.file_name}) "
+                f"water={entry.has_water}",
+                flush=True)
+        except KeyError:
+            # Legacy fallback: fase2_{name}.oramap if not in catalog
+            mapa = Path("rl/scenarios") / f"fase2_{args.scenario.lower()}.oramap"
+            if not mapa.exists():
+                raise SystemExit(
+                    f"escenario inexistente: {args.scenario!r} / {mapa} "
+                    f"(known: {', '.join(sorted(mapcat.MAP_CATALOG))})")
+            reset_kwargs = {
+                "map_data": base64.b64encode(mapa.read_bytes()).decode(),
+                "map_name": mapa.name,
+            }
+            print(f"Escenario legacy {args.scenario} ({mapa.name})", flush=True)
+        except FileNotFoundError as e:
+            raise SystemExit(str(e)) from e
 
     # Oponente configurable por sesion: el server procesa bot_type en los
     # kwargs de reset (openra_environment.py). Curriculum de oponentes —
@@ -419,6 +445,9 @@ async def amain(args):
                 for _ in range(n):
                     traj, outcome = None, None
                     ep_kwargs = dict(reset_kwargs)
+                    if map_pool:
+                        mk = mapcat.sample_pool(map_pool)
+                        ep_kwargs.update(mapcat.reset_payload_for(mk))
                     ep_bot = ep_kwargs.get("bot_type") or args.bot_type or "easy"
                     if pfsp is not None:
                         ep_bot = pfsp.sample()
@@ -1154,8 +1183,14 @@ def main():
                          "senal entre episodios; 'episode' = centrado grupal "
                          "historico)")
     ap.add_argument("--scenario", default=None,
-                    help="Curriculum Fase 2: 'A'/'a_short' = base pre-construida "
-                         "(rl/scenarios/fase2_{X}.oramap). Vacio = juego completo.")
+                    help="Map/scenario key (catalog): a_short (default land), "
+                         "doughnut / bombardment_islands (water), or legacy "
+                         "fase2_{name}. Vacio = juego completo (singles).")
+    ap.add_argument("--map-pool", default=None,
+                    help="P3: sample a map per episode. Named pools: "
+                         "land|water|mixed, or comma keys "
+                         "(e.g. a_short,doughnut). Overrides single --scenario "
+                         "for collection; does not change a_short default when unset.")
     ap.add_argument("--bot-type", default=None,
                     choices=("beginner", "easy", "medium", "hard", "brutal",
                              "dummy"),

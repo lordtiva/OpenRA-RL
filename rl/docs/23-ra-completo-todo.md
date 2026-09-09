@@ -66,11 +66,29 @@ P0 (rama `exp/ra-completo-p0`): path singular harv→celda **existe** (unit head
 
 **Estado:** DONE en `exp/ra-completo-p0`. Tests: `test_ra_completo_p2` (+ p0/p1/alphalite smoke). Type-head crece +3 (`army_stop`/`army_set_stance`/`army_guard`) → partial load. Caveat: engine Guard rango limitado; SFT corto recomendable sobre guard/focus antes de prod.
 
-### P3 — Producción RA completa + mapas agua/aire + spawn variety
+### P3 — Producción RA completa + mapas agua/aire + spawn variety — IN PROGRESS (first cut)
 
-- [ ] Usar el **árbol de producción RA** de punta a punta (no solo el subset land del teacher).
-- [ ] Mapas con **agua / aire** en el curriculum.
-- [ ] Más variedad de **spawns** / layouts (evitar overfitting a un solo a_short).
+- [x] Inventario + wire de mapas agua seleccionables sin romper default _short.
+  - 
+l/map_catalog.py: fase2 land + stock water (doughnut, ombardment_islands en 
+l/scenarios/stock_*.oramap).
+  - 	rain --scenario doughnut / --map-pool land|water|mixed|a_short,doughnut.
+  - uto_train sigue con --scenario a_short (sin cambio de default).
+- [x] Máscaras de producción: **forbid naval BUILD/ship TRAIN en land-only**; unmask en mapas has_water.
+  - Airbase/heli siguen legales en land; defense ya sale del gate eco (proc+harv) vía roles.
+  - Combat TRAIN (incl. air/naval units) sigue gated en proc+harv; no se fuerza navy en a_short.
+- [x] Teacher: _optional_naval_air — syrd/spen ligero si mapa water + cash; airbase opcional en water.
+  - TODO(P3+): air opcional en land / mapas con airfield start; tapes navy/air aparte.
+- [x] Spawn/layout variety hook: --map-pool (>=2 mapas). **Multi spawn rotation** del engine **no** hookeado (documentado).
+- [ ] Árbol RA *completo* en teacher (tech/defense push sistemático) — aún land-first; solo navy/air light.
+- [ ] Mapas aire dedicados / prebuilt fase2 water con base — blocked on scenario authoring.
+- [ ] Curriculum onboard JSON flag para pool water — hook train listo; onboard/auto_train aún no lo setea.
+
+**Estado (2026-09-09):** first cut en exp/ra-completo-p0. Tests: 	est_ra_completo_p3.
+Assets MAIN OpenRA/mods/ra/maps/*.oramap (read-only inventory): muchos stock water
+(archipelago, doughnut, bombardment-islands, …). Worktree OpenRA/ submodule vacío —
+por eso stock water se copió a 
+l/scenarios/.
 
 ### P4 — Obs / dash para naval y air
 
