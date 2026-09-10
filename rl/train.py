@@ -34,12 +34,13 @@ from rl.reward_shaping import PRESETS as SHAPER_PRESETS
 from rl.network import AlphaLiteNet
 from rl.rollout import (add_advantages, center_advantage_by_episode,
                         collect_one_episode, flatten_samples)
+from rl.metrics_lock import metrics_lock
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
 from rl.best_ckpt import batch_is_dead, batch_is_wipe, maybe_update_best
 from rl.pfsp import BotPFSP, parse_pool
 from rl.imitation import (
     EliteBuffer, TeacherWinBuffer, SIL_PREFER_TICKS,
-    BC_WIN_CAP, BC_WIN_PREFER_TICKS,
+    BC_WIN_CAP, BC_WIN_EP_CAP, BC_WIN_PREFER_TICKS,
     balance_bc_samples, lambda_bc_at, merge_teacher_wins,
     tape_schema_for_mode,
 )
@@ -165,7 +166,8 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
                 war_nudge=not args.no_war_nudge,
                 teacher=ScriptedTeacher(
                     rush_attack_move=int(getattr(args, "bc_rush", 0) or 0) or None,
-                    mode=_teacher_mode(args)))
+                    mode=_teacher_mode(args)),
+                heuristic_p=float(getattr(args, "_heuristic_p_cur", 1.0)))
         except Exception as e:
             print(f"  [bc] teacher game {i + 1}/{n} fail: {e}", flush=True)
             return None
@@ -495,7 +497,9 @@ async def amain(args):
                                 shaper_preset=args.shaper_preset,
                                 auto_support=args.auto_support,
                                 war_nudge=not args.no_war_nudge,
-                                opponent_net=opp_net)
+                                opponent_net=opp_net,
+                                heuristic_p=float(
+                                    getattr(args, "_heuristic_p_cur", 1.0)))
                             break
                         except Exception as e:
                             msg = str(e)
@@ -607,6 +611,9 @@ async def amain(args):
         win_cap = int(getattr(args, "bc_win_cap", 0) or BC_WIN_CAP)
         win_prefer = int(getattr(args, "bc_win_prefer_ticks", 0)
                          or BC_WIN_PREFER_TICKS)
+        win_ep_cap = int(getattr(args, "bc_win_ep_cap", BC_WIN_EP_CAP)
+                         if getattr(args, "bc_win_ep_cap", None) is not None
+                         else BC_WIN_EP_CAP)
         win_dir = getattr(args, "bc_win_dir", None) or os.path.join(
             args.ckpt_dir, "teacher_wins")
         teacher_wins = TeacherWinBuffer(
@@ -615,9 +622,11 @@ async def amain(args):
             path=win_dir,
             keep_incomplete=bool(getattr(args, "bc_keep_incomplete", False)),
             schema=tape_schema_for_mode(_teacher_mode(args)),
+            ep_cap=win_ep_cap,
         )
-        print(f"  [bc] TeacherWinBuffer cap={win_cap} prefer_ticks={win_prefer} "
-              f"dir={win_dir} loaded eps={teacher_wins.n_episodes} "
+        print(f"  [bc] TeacherWinBuffer cap={win_cap} ep_cap={win_ep_cap} "
+              f"prefer_ticks={win_prefer} dir={win_dir} "
+              f"loaded eps={teacher_wins.n_episodes} "
               f"steps={len(teacher_wins)}",
               flush=True)
 
@@ -645,8 +654,10 @@ async def amain(args):
                 "bc_collect_target": target,
                 "bc_new_wins": int(new_wins),
             }
-            with open(args.metrics, "a", encoding="utf-8") as f:
-                f.write(json.dumps(row) + "\n")
+            with metrics_lock(args.metrics, exclusive=True):
+                with open(args.metrics, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(row) + "\n")
+                    f.flush()
 
         if teacher_wins.n_episodes >= target:
             print(
@@ -726,6 +737,8 @@ async def amain(args):
     bc_epochs = max(1, int(getattr(args, "bc_epochs", 1) or 1))
     collect_it[0] = first_it
     for it in range(first_it, last_it + 1):
+
+        args._heuristic_p_cur = compute_heuristic_p(args, it)
         collect_it[0] = it
         t0 = time.time()
         if bc_only:
@@ -1043,6 +1056,8 @@ async def amain(args):
                     "bot_type": (pfsp.anchor if pfsp is not None else args.bot_type),
                     **({"onboard_phase": args.onboard_phase}
                        if getattr(args, "onboard_phase", None) else {}),
+                    "heuristic_p": round(
+                        float(getattr(args, "_heuristic_p_cur", 1.0)), 4),
                     **({"bc_only": True} if bc_only else {}),
                     **({"pfsp": True,
                         "pfsp_pool": list(pfsp.pool),
@@ -1111,8 +1126,10 @@ async def amain(args):
                        if vcs else {}),
                     **({"update_skipped": True} if skipped_update else {}),
             }
-            with open(args.metrics, "a", encoding="utf-8") as f:
-                f.write(json.dumps(metrics_row) + "\n")
+            with metrics_lock(args.metrics, exclusive=True):
+                with open(args.metrics, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(metrics_row) + "\n")
+                    f.flush()
             maybe_update_best(args.ckpt_dir, metrics_row, latest_path=ckpt_path)
 
         print(f"[iter {it:3d}] col {collect_s:5.1f}s upd {dt_update:5.1f}s "
@@ -1141,6 +1158,28 @@ async def amain(args):
     print(f"Listo. {total} episodios, winrate {wins}/{total}, "
           f"{time.time()-t_start:.0f}s totales.")
 
+
+
+def compute_heuristic_p(args, iteration: int) -> float:
+    """P1.4 anneal for stage/guard army cell heuristics.
+
+    Knobs:
+      --heuristic-p            fixed override (0..1); skips anneal when set
+      --heuristic-anneal-iters length of linear decay after phase start (default 60)
+      --heuristic-phase-start  iteration where anneal begins (Phase B start);
+                               Phase A / unset keeps p=1.0
+    """
+    override = getattr(args, "heuristic_p", None)
+    if override is not None:
+        return float(max(0.0, min(1.0, override)))
+    phase = getattr(args, "onboard_phase", None)
+    if phase is None or str(phase) == "A":
+        return 1.0
+    start = int(getattr(args, "heuristic_phase_start", 0) or 0)
+    anneal = int(getattr(args, "heuristic_anneal_iters", 60) or 60)
+    if start <= 0 or anneal <= 0:
+        return 1.0
+    return max(0.0, 1.0 - (float(iteration) - float(start)) / float(anneal))
 
 def main():
     ap = argparse.ArgumentParser()
@@ -1282,6 +1321,15 @@ def main():
     ap.add_argument("--onboard-phase", default=None,
                     choices=("A", "B", "C", "D", "E"),
                     help="Marca la fase A-E en metrics.jsonl (lo setea auto_train).")
+    ap.add_argument("--heuristic-p", type=float, default=None,
+                    help="P1.4 fixed override for stage/guard army heuristics "
+                         "(0..1). Default None = anneal from phase start.")
+    ap.add_argument("--heuristic-anneal-iters", type=int, default=60,
+                    help="P1.4 iters to anneal heuristic_p 1→0 after "
+                         "--heuristic-phase-start (default 60). Phase A stays 1.0.")
+    ap.add_argument("--heuristic-phase-start", type=int, default=0,
+                    help="P1.4 iteration where heuristic anneal begins "
+                         "(Phase B start from curriculum). 0 = keep p=1.0.")
     ap.add_argument("--bc-teacher-mode", default="rush",
                     choices=("rush", "expand"),
                     help="ScriptedTeacher: rush (A/B rifle) o expand "
@@ -1308,8 +1356,11 @@ def main():
                     help="Origen del warmup BC. 0 = ckpt o start_iter. "
                          "No debe resetearse en cada --resume.")
     ap.add_argument("--bc-win-cap", type=int, default=BC_WIN_CAP,
-                    help="Cap de steps del TeacherWinBuffer (default 16000, "
-                         "~30–40 rushes cortos).")
+                    help="Cap de steps del TeacherWinBuffer (default 64000, "
+                         "backstop; el tope real es --bc-win-ep-cap).")
+    ap.add_argument("--bc-win-ep-cap", type=int, default=BC_WIN_EP_CAP,
+                    help="Tope de episodios win en teacher_wins/ (default 40). "
+                         "Lleno: una win más corta pisa la más larga.")
     ap.add_argument("--bc-win-prefer-ticks", type=int,
                     default=BC_WIN_PREFER_TICKS,
                     help="Wins con ticks>=este se recortan primero y no se "

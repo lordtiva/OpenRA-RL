@@ -21,7 +21,10 @@ import torch
 from openra_env.client import OpenRAEnv
 from rl.peer_obs import peer_obs_from_metadata
 from openra_env.models import ActionType, CommandModel, OpenRAAction
-from rl.action_adapter import ActionIndex, Vocab, apply_passability, index_to_command_effective, filter_army_push_hysteresis
+from rl.action_adapter import (ActionIndex, Vocab, apply_passability,
+                               index_to_command_effective,
+                               filter_army_push_hysteresis,
+                               drain_item_slot_fallback)
 from rl.imitation import (
     command_to_indices, pick_bc_command, pick_bc_commands,
     student_combat_ready,
@@ -145,7 +148,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                               auto_support: bool = False,
                               war_nudge: bool = True,
                               teacher=None,
-                              opponent_net=None):
+                              opponent_net=None,
+                              heuristic_p: float = 1.0):
     """Juega UNA partida completa; devuelve (trayectoria, resumen).
 
     max_steps limita los env.step (cada uno avanza 2 ticks del juego):
@@ -254,7 +258,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     primary = picks[0] if picks else pick_bc_command(raw.commands)
                     t0, u0, c0, i0 = command_to_indices(obs, primary, aidx)
                     action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
-                        obs, t0, u0, c0, i0, aidx)
+                        obs, t0, u0, c0, i0, aidx, heuristic_p=heuristic_p)
                     extras = [c for c in (raw.commands or []) if c is not primary]
                     action.commands.extend(extras)
                     sampled = (t0, u0, i0, c0)
@@ -281,6 +285,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     action, (eff_t, eff_u, eff_i, eff_c) = index_to_command_effective(
                         obs, int(out["type"]), int(out["unit_slot"]),
                         int(out["cell_flat"]), int(out["item_slot"]), aidx,
+                        heuristic_p=heuristic_p,
                     )
                     sampled = (int(out["type"]), int(out["unit_slot"]),
                                int(out["item_slot"]), int(out["cell_flat"]))
@@ -329,6 +334,10 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 # train/no_op vs el remate army_attack_move que nunca usa).
                 atype = ACTION_TYPES[eff_t]
                 action_counts[atype] = action_counts.get(atype, 0) + 1
+                _fb = drain_item_slot_fallback()
+                if _fb:
+                    action_counts["item_slot_fallback"] = (
+                        action_counts.get("item_slot_fallback", 0) + _fb)
                 if telemetry is not None:
                     telemetry.append({
                         "step": step,
@@ -357,6 +366,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         push_action, (pt, pu, pi, pc) = index_to_command_effective(
                             obs, int(out2["type"]), int(out2["unit_slot"]),
                             int(out2["cell_flat"]), int(out2["item_slot"]), aidx,
+                            heuristic_p=heuristic_p,
                         )
                         if auto_support:
                             new_pc, _ = apply_dest_credit(
@@ -372,6 +382,10 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         action.commands.extend(push_action.commands or [])
                         ptype = ACTION_TYPES[int(pt)]
                         action_counts[ptype] = action_counts.get(ptype, 0) + 1
+                        _fb = drain_item_slot_fallback()
+                        if _fb:
+                            action_counts["item_slot_fallback"] = (
+                                action_counts.get("item_slot_fallback", 0) + _fb)
                         psampled = (int(out2["type"]), int(out2["unit_slot"]),
                                     int(out2["item_slot"]), int(out2["cell_flat"]))
                         peffective = (int(pt), int(pu), int(pi), int(pc))
@@ -468,7 +482,11 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     for extra_cmd in picks[1:]:
                         xt, xu, xc, xi = command_to_indices(obs, extra_cmd, aidx)
                         x_action, (xet, xeu, xei, xec) = index_to_command_effective(
-                            obs, xt, xu, xc, xi, aidx)
+                            obs, xt, xu, xc, xi, aidx, heuristic_p=heuristic_p)
+                        _fb = drain_item_slot_fallback()
+                        if _fb:
+                            action_counts["item_slot_fallback"] = (
+                                action_counts.get("item_slot_fallback", 0) + _fb)
                         xcell = torch.tensor([int(xec)])
                         with torch.no_grad():
                             xlp, _, _ = net.evaluate_actions(
@@ -506,6 +524,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 p_action, _ = index_to_command_effective(
                     peer_obs, int(p_out["type"]), int(p_out["unit_slot"]),
                     int(p_out["cell_flat"]), int(p_out["item_slot"]), p_aidx,
+                    heuristic_p=heuristic_p,
                 )
                 pending_cmd.peer_commands = list(p_action.commands or [])
             except Exception as ex:

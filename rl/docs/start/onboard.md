@@ -148,7 +148,7 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 | `--onboard-collect` | — | Suma teacher games aunque ya haya tapes. |
 | `--onboard-collect-only` | — | Solo acumula `teacher_wins` hasta `--onboard-collect-target` (default 40); sin SFT/eval; no borra `latest.pt`; no requiere `--scratch`. |
 
-`--scratch --onboard` y el **resume** `--onboard` **reusan** `teacher_wins/` si el schema coincide con la fase: A/B `eco_and_combat_mental_v4`, C/D/E `eco_and_combat_expand_v1`. Al promover B→C (y C→D, D→E) se **borran** las cintas: el rifle teacher no se clona vs easy. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas con schema distinto se ignoran.
+`--scratch --onboard`, el **resume** `--onboard` y el promote **A→B** reusan `teacher_wins/` si el schema coincide: A/B `eco_and_combat_mental_v4`, C/D/E `eco_and_combat_expand_v1`. Tope 40 eps (las más cortas pisan las más largas). Al promover B→C (y C→D, D→E) se **borran** las cintas: el rifle teacher no se clona vs easy. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas con schema distinto se ignoran.
 
 
 
@@ -203,15 +203,7 @@ Estado en `rl/ckpts/curriculum.json`. Cada salto mata el `rl.train` y lo relanza
 
 - **TeacherWinBuffer** persistente: acumula wins entre iters bajo `{ckpt_dir}/teacher_wins/`
 
-  (`manifest.json` + `ep_XXXX.pt`). Cada update BC samplea el ring completo (un iter
-
-  con 0 wins nuevos sigue entrenando). Cap default `--bc-win-cap 64000`
-
-  (~40-60 short rushes before trim; eco+push K=2 ~1.0-1.5k steps). Wins ≥`--bc-win-prefer-ticks` 20000 se recortan
-
-  primero (un 33k miller-win no come el dataset). SIL sigue en 40k. Override
-
-  con `--bc-win-dir`.
+  (`manifest.json` + `ep_XXXX.pt`). Tope **40 episodios** (`--bc-win-ep-cap`); una win más corta pisa la más larga. `--bc-win-cap 64000` es backstop de steps. Promote A→B reusa el ring (`--bc-replay`); no sigue grabando. Wins ≥`--bc-win-prefer-ticks` 20000 se recortan primero. Override con `--bc-win-dir`.
 
 - Además, 4 partidas del **alumno** por iter (`--eval-games 4`, sin PPO) para
 
@@ -256,6 +248,8 @@ a fase A desde `iter0020.pt` (no uses 24).
   `--bc-keep-incomplete`). Sin `--bc-only` (PPO sigue, salvo tanda wipe:
 
   4 lose <15k ticks; ahí solo BC/SIL). Sin PFSP.
+
+- `--no-amp` (igual C/D/E). `auto_train --no-amp` también lo acepta y lo reenvía a `rl.train` (útil para forzar en A).
 
 - PPO: macro 50 / max-steps 1000, `--lr 2.0e-5`, `--adv-mode global`.
 

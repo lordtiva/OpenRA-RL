@@ -16,6 +16,9 @@ handler"):
       building_valid (no unit_own). Cabeza dedicada puede venir después.
 """
 
+import logging
+import random
+
 import numpy as np
 import torch
 
@@ -25,6 +28,20 @@ from rl.obs_encoding import (
     BEACON_BY_MAP, MAX_UNITS, pending_place_item, resolve_beacon,
     select_unit_slots,
 )
+
+_log = logging.getLogger(__name__)
+
+# P1.3: silent _item_slot_of fallback counter (drained by rollout → action_hist).
+_ITEM_SLOT_FALLBACK_COUNT = 0
+
+
+def drain_item_slot_fallback() -> int:
+    """Return and reset module fallback hits since last drain."""
+    global _ITEM_SLOT_FALLBACK_COUNT
+    n = int(_ITEM_SLOT_FALLBACK_COUNT)
+    _ITEM_SLOT_FALLBACK_COUNT = 0
+    return n
+
 
 # Tipos habilitados en v0.1 (el resto ni entra en la máscara)
 ENABLED_TYPES = {
@@ -1178,8 +1195,15 @@ def _item_slot_of(item_type: str, aidx) -> int:
 
     PLACE/cancel mutan item_type al InternalName; TRAIN/BUILD ya traen rol.
     Mismo orden que SIL en imitation.py: rol primero, concreto si ya está.
+    Fallback a slot 0 se loguea (P1.3) y cuenta en action_hist via rollout.
     """
+    global _ITEM_SLOT_FALLBACK_COUNT
     if not item_type or not getattr(aidx, "items", None):
+        items = getattr(aidx, "items", None) or []
+        _ITEM_SLOT_FALLBACK_COUNT += 1
+        _log.warning(
+            "_item_slot_of fallback: item_type=%r role=%r len(items)=%d slot0",
+            item_type, None, len(items))
         return 0
     items = aidx.items
     if item_type in items:
@@ -1188,13 +1212,22 @@ def _item_slot_of(item_type: str, aidx) -> int:
     role = role_of(item_type)
     if role in items:
         return int(items.index(role))
+    _ITEM_SLOT_FALLBACK_COUNT += 1
+    _log.warning(
+        "_item_slot_of fallback: item_type=%r role=%r len(items)=%d slot0",
+        item_type, role, len(items))
     return 0
 
 
 def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
                                cell_flat: int, item_slot: int,
-                               aidx: ActionIndex):
+                               aidx: ActionIndex,
+                               heuristic_p: float = 1.0):
     """Igual que index_to_command pero TAMBIÉN devuelve los índices EFECTIVOS.
+
+    heuristic_p (P1.4): probabilidad de aplicar stage_army_attack_cell +
+    guard_army_push_cell en army/infantry/vehicle_attack_move. remap_move_cell
+    siempre corre (safety). Phase A / default = 1.0; anneal post Phase B.
 
     Las correcciones de seguridad mutan la acción muestreada (ej. 'train'
     con ítem de edificio -> primer entrenable). Guardar el log_prob de la
@@ -1327,9 +1360,12 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         cx, cy = remap_move_cell(obs, aidx, cx, cy, actor_id)
         if t_name in ("army_attack_move", "infantry_attack_move",
                       "vehicle_attack_move"):
-            cx, cy = stage_army_attack_cell(obs, aidx, cx, cy)
-            # After stage/remap: block west ore yank + fog-east retarget.
-            cx, cy = guard_army_push_cell(obs, aidx, cx, cy)
+            # P1.4: annealable staging/guard heuristics (safety remap always on).
+            hp = 1.0 if heuristic_p is None else float(heuristic_p)
+            if hp >= 1.0 or (hp > 0.0 and random.random() < hp):
+                cx, cy = stage_army_attack_cell(obs, aidx, cx, cy)
+                # After stage/remap: block west ore yank + fog-east retarget.
+                cx, cy = guard_army_push_cell(obs, aidx, cx, cy)
     eff_cell_flat = int(cy) * aidx.w + int(cx)
     if t_name in ("train", "build", "place_building", "cancel_production"):
         # PLACE/cancel dejan item_type concreto (proc/gun/tent); aidx.items

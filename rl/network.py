@@ -559,16 +559,15 @@ class AlphaLiteNet(nn.Module):
         return self.unit_pool_proj(torch.cat(
             [mean_own, max_own, mean_ene, max_ene, mean_all], dim=-1))
 
-    def encode(self, spatial, scalars, unit_feats, unit_valid, hidden,
-               unit_role_ids=None, unit_own_mask=None):
-        """spatial [B,9,H,W], scalars [B,S], units [B,U,F], valid [B,U] bool.
+    def encode_features(self, spatial, scalars, unit_feats, unit_valid,
+                        unit_role_ids=None, unit_own_mask=None):
+        """Encoder path independent of GRU hidden.
 
-        Devuelve (fmap, feat_map_flat, new_hidden, tokens). tokens [B,U,128]
-        alimentan dist_cell (Capa 2). feat_map_flat se conserva por firma.
-        GRU unit_vec: Friendly||Enemy||Global -> Fusion MLP 128 (arch v2).
+        Returns (fmap, tokens, fused) where fused feeds ``self.core``.
+        Spatial/scalar/unit features do not depend on h — call once per
+        B*T stack in ``evaluate_actions_seq_batch``, then loop only GRU+heads.
         """
         fmap = self._enc_spatial(self._coord_conv(spatial))
-        feat_map_flat = fmap.flatten(1)
         spatial_vec = F.adaptive_avg_pool2d(fmap, 1).flatten(1)
 
         u = self.unit_mlp(self._unit_in(unit_feats, unit_role_ids))
@@ -577,6 +576,21 @@ class AlphaLiteNet(nn.Module):
 
         s = self.scalar_mlp(scalars)
         fused = torch.cat([spatial_vec, s, unit_vec], dim=-1)
+        return fmap, tokens, fused
+
+    def encode(self, spatial, scalars, unit_feats, unit_valid, hidden,
+               unit_role_ids=None, unit_own_mask=None):
+        """spatial [B,9,H,W], scalars [B,S], units [B,U,F], valid [B,U] bool.
+
+        Devuelve (fmap, feat_map_flat, new_hidden, tokens). tokens [B,U,128]
+        alimentan dist_cell (Capa 2). feat_map_flat se conserva por firma.
+        GRU unit_vec: Friendly||Enemy||Global -> Fusion MLP 128 (arch v2).
+        Wrapper: encode_features + GRU core (same math as pre-vectorize).
+        """
+        fmap, tokens, fused = self.encode_features(
+            spatial, scalars, unit_feats, unit_valid,
+            unit_role_ids=unit_role_ids, unit_own_mask=unit_own_mask)
+        feat_map_flat = fmap.flatten(1)
         new_hidden = self.core(fused, hidden)
         return fmap, feat_map_flat, new_hidden, tokens
 
@@ -1015,17 +1029,14 @@ class AlphaLiteNet(nn.Module):
         value = self.value_head(new_hidden).squeeze(-1)
         return lp, entropy, value
 
-    def _eval_step(self, batch, h, actions):
-        """Un paso BPTT, B>=1. actions: type/unit/cell/item/had_item [B].
+    def _eval_heads(self, batch, h_new, actions, fmap, tokens, feats, valid,
+                    role_ids, own):
+        """Post-GRU heads for one BPTT step (lp / entropy / value).
 
-        Encode puede ir en AMP (fp16). Cabezas siempre fp32: masked_fill(-1e9)
-        no entra a Half (crash 1158).
-        Devuelve (lp, entropy, value, h_new) todos [B].
+        Extracted from ``_eval_step`` so ``evaluate_actions_seq_batch`` can
+        reuse heads after a single batched ``encode_features``. Cabezas
+        siempre fp32: masked_fill(-1e9) no entra a Half (crash 1158).
         """
-        feats, valid, role_ids, own = self._unit_ctx(batch)
-        fmap, _, h_new, tokens = self.encode(
-            batch["spatial"], batch["scalars"], feats, valid, h,
-            unit_role_ids=role_ids, unit_own_mask=own)
         t_idx = actions["type"].reshape(-1)
         try:
             heads_ctx = torch.amp.autocast("cuda", enabled=False)
@@ -1093,7 +1104,70 @@ class AlphaLiteNet(nn.Module):
                        / (1.0 + use_u_f + use_b_f + use_c_f + use_i_f))
 
             value = self.value_head(h_f).squeeze(-1)
+        return lp, entropy, value
+
+    def _eval_step(self, batch, h, actions):
+        """Un paso BPTT, B>=1. actions: type/unit/cell/item/had_item [B].
+
+        Encode puede ir en AMP (fp16). Cabezas siempre fp32 via ``_eval_heads``.
+        Devuelve (lp, entropy, value, h_new) todos [B].
+        """
+        feats, valid, role_ids, own = self._unit_ctx(batch)
+        fmap, tokens, fused = self.encode_features(
+            batch["spatial"], batch["scalars"], feats, valid,
+            unit_role_ids=role_ids, unit_own_mask=own)
+        h_new = self.core(fused, h)
+        lp, entropy, value = self._eval_heads(
+            batch, h_new, actions, fmap, tokens, feats, valid, role_ids, own)
         return lp, entropy, value, h_new
+
+    def _evaluate_actions_seq_batch_legacy(self, segs, device):
+        """Pre-vectorize path (per-t full encode). Kept for numerical parity tests."""
+        if not segs:
+            z = torch.zeros(0, 0, device=device)
+            return z, z, z, z.bool()
+        B = len(segs)
+        T = max(len(s) for s in segs)
+        h0 = []
+        for seg in segs:
+            h = seg[0]["h_in"]
+            if not torch.is_tensor(h):
+                raise TypeError("h_in debe ser tensor")
+            h = h.to(device, non_blocking=True)
+            if h.dim() == 1:
+                h = h.unsqueeze(0)
+            elif h.dim() > 2:
+                h = h.reshape(1, -1)
+            h0.append(h)
+        h = torch.cat(h0, dim=0)
+        if h.dim() > 2:
+            h = h.reshape(B, -1)
+        lp_t, ent_t, val_t, valid_t = [], [], [], []
+        for t in range(T):
+            steps = []
+            active = []
+            burn = []
+            for seg in segs:
+                if t < len(seg):
+                    steps.append(seg[t])
+                    active.append(True)
+                    burn.append(bool(seg[t].get("_burn")))
+                else:
+                    steps.append(seg[-1])
+                    active.append(False)
+                    burn.append(False)
+            row_active = torch.tensor(active, dtype=torch.bool, device=device)
+            row_burn = torch.tensor(burn, dtype=torch.bool, device=device)
+            row_valid = row_active & ~row_burn
+            batch, actions = _stack_steps(steps, device)
+            lp, ent, val, h_new = self._eval_step(batch, h, actions)
+            h = torch.where(row_active.unsqueeze(-1), h_new, h)
+            lp_t.append(lp)
+            ent_t.append(ent)
+            val_t.append(val)
+            valid_t.append(row_valid)
+        return (torch.stack(lp_t, dim=1), torch.stack(ent_t, dim=1),
+                torch.stack(val_t, dim=1), torch.stack(valid_t, dim=1))
 
     def evaluate_actions_seq(self, seg, device):
         """BPTT truncado sobre UN segmento. Wrapper de evaluate_actions_seq_batch."""
@@ -1107,6 +1181,13 @@ class AlphaLiteNet(nn.Module):
         El h_in del primer step de cada seg entra como constante; el GRU
         propaga sin detach. Pasos `_burn` (burn-in) avanzan h pero no
         entran al loss. Padding no entra al loss ni al hidden siguiente.
+
+        Vectorizado: apila B*T, ``encode_features`` una sola vez, luego
+        loop solo GRU + ``_eval_heads`` (mismo math que el path legacy).
+
+        Float note: batched encode can introduce <=1e-9 drift vs legacy
+        per-t encode on value (matmul reduction order). lp/entropy typically
+        bit-exact on CPU. See ``_evaluate_actions_seq_batch_legacy`` + tests.
 
         Devuelve lp, entropy, value, valid — todos [B, T].
         """
@@ -1130,28 +1211,62 @@ class AlphaLiteNet(nn.Module):
         if h.dim() > 2:
             h = h.reshape(B, -1)
 
+        # Pad to T, layout [t0_b0..t0_bB, t1_b0.., ...] then reshape B,T.
+        flat_steps = []
+        active_bt = []
+        burn_bt = []
+        for t in range(T):
+            for seg in segs:
+                if t < len(seg):
+                    flat_steps.append(seg[t])
+                    active_bt.append(True)
+                    burn_bt.append(bool(seg[t].get("_burn")))
+                else:
+                    flat_steps.append(seg[-1])
+                    active_bt.append(False)
+                    burn_bt.append(False)
+        batch_flat, actions_flat = _stack_steps(flat_steps, device)
+        feats, valid, role_ids, own = self._unit_ctx(batch_flat)
+        fmap, tokens, fused = self.encode_features(
+            batch_flat["spatial"], batch_flat["scalars"], feats, valid,
+            unit_role_ids=role_ids, unit_own_mask=own)
+
+        def _view_bt(x):
+            return x.view(T, B, *x.shape[1:]).transpose(0, 1).contiguous()
+
+        fmap_bt = _view_bt(fmap)
+        tokens_bt = _view_bt(tokens)
+        fused_bt = _view_bt(fused)
+        feats_bt = _view_bt(feats)
+        valid_bt = _view_bt(valid)
+        role_bt = _view_bt(role_ids)
+        own_bt = _view_bt(own)
+
+        batch_bt = {k: _view_bt(v) for k, v in batch_flat.items()
+                    if torch.is_tensor(v)}
+        actions_bt = {k: _view_bt(v) for k, v in actions_flat.items()
+                      if torch.is_tensor(v)}
+
+        active_t = (torch.tensor(active_bt, dtype=torch.bool, device=device)
+                    .view(T, B).transpose(0, 1).contiguous())
+        burn_t = (torch.tensor(burn_bt, dtype=torch.bool, device=device)
+                  .view(T, B).transpose(0, 1).contiguous())
+
         # stack, no inplace: un buffer new_zeros no requiere grad y
         # lp_out[:,t]=lp cortaría el grafo de BPTT.
         lp_t, ent_t, val_t, valid_t = [], [], [], []
         for t in range(T):
-            steps = []
-            active = []
-            burn = []
-            for seg in segs:
-                if t < len(seg):
-                    steps.append(seg[t])
-                    active.append(True)
-                    burn.append(bool(seg[t].get("_burn")))
-                else:
-                    steps.append(seg[-1])
-                    active.append(False)
-                    burn.append(False)
-            # Pad steps stay inactive. Burn-in steps advance h but skip loss.
-            row_active = torch.tensor(active, dtype=torch.bool, device=device)
-            row_burn = torch.tensor(burn, dtype=torch.bool, device=device)
+            row_active = active_t[:, t]
+            row_burn = burn_t[:, t]
             row_valid = row_active & ~row_burn
-            batch, actions = _stack_steps(steps, device)
-            lp, ent, val, h_new = self._eval_step(batch, h, actions)
+            batch_t = {k: v[:, t] for k, v in batch_bt.items()}
+            actions_t = {k: v[:, t] for k, v in actions_bt.items()}
+            h_new = self.core(fused_bt[:, t], h)
+            lp, ent, val = self._eval_heads(
+                batch_t, h_new, actions_t,
+                fmap_bt[:, t], tokens_bt[:, t],
+                feats_bt[:, t], valid_bt[:, t],
+                role_bt[:, t], own_bt[:, t])
             h = torch.where(row_active.unsqueeze(-1), h_new, h)
             lp_t.append(lp)
             ent_t.append(ent)

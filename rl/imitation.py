@@ -379,11 +379,11 @@ def _cpu_clone_step(s: dict) -> dict:
 # 1141 closed in 17–30k. A 50k win dumps ~1k late train-spam into the ring;
 # sample_recent(512) used to clone that tail (Run 33 plateau).
 SIL_PREFER_TICKS = 40000
-# Teacher tapes for reuse: Phase A "Bien" ~35–50 short rushes; with eco+push K=2
-# short wins ~1.0–1.5k steps → 64000 ≈ 40–60 before trim.
-# Cap is STEPS not episodes. Long = ticks >= prefer; trim drops those first.
-# 20k corta el timeout-adjacent.
+# Teacher tapes: hard cap 40 episodes (short rushes). Step cap is a backstop
+# if 40 still overflow (eco+push K=2 ~1.0–1.5k steps). Long = ticks >= prefer;
+# at ep_cap a shorter win replaces the longest. 20k corta el timeout-adjacent.
 BC_WIN_CAP = 64000
+BC_WIN_EP_CAP = 40
 BC_WIN_PREFER_TICKS = 20000
 
 
@@ -512,6 +512,8 @@ class TeacherWinBuffer:
     Same trim/sample pattern as EliteBuffer (prefer short wins), plus
     `{ckpt_dir}/teacher_wins/` manifest + ep_XXXX.pt so a resume still has
     past wins when the current iter collects 0.
+    ep_cap bounds how many episodes sit on disk (default 40). A shorter
+    new win replaces the longest; a longer one is dropped.
     """
 
     def __init__(self, cap_steps: int = BC_WIN_CAP,
@@ -519,9 +521,11 @@ class TeacherWinBuffer:
                  path: str | os.PathLike | None = None,
                  keep_incomplete: bool = False,
                  incomplete_min_ticks: int = 15000,
-                 schema: str | None = None):
+                 schema: str | None = None,
+                 ep_cap: int | None = None):
         self.cap = int(cap_steps)
         self.prefer_ticks = int(prefer_ticks)
+        self.ep_cap = int(BC_WIN_EP_CAP if ep_cap is None else ep_cap)
         self.path = Path(path) if path else None
         self.keep_incomplete = bool(keep_incomplete)
         self.incomplete_min_ticks = int(incomplete_min_ticks)
@@ -560,6 +564,12 @@ class TeacherWinBuffer:
             ticks = 0
         if not self._accept(result, ticks):
             return 0
+        ep_cap = int(self.ep_cap or 0)
+        if ep_cap > 0 and len(self._episodes) >= ep_cap:
+            long_i = self._longest_idx()
+            long_t = int(self._episodes[long_i].get("ticks") or 0)
+            if ticks >= long_t:
+                return 0
         cloned = [_cpu_clone_step(s) for s in samples]
         self._episodes.append({
             "id": int(self._next_id),
@@ -571,8 +581,21 @@ class TeacherWinBuffer:
         self._trim()
         return len(cloned)
 
+    def _longest_idx(self) -> int:
+        best_i = 0
+        best_t = -1
+        for i, e in enumerate(self._episodes):
+            t = int(e.get("ticks") or 0)
+            if t > best_t:
+                best_t = t
+                best_i = i
+        return best_i
+
     def _trim(self) -> None:
-        """Drop oldest long wins first; if one ep exceeds cap, even-pick it."""
+        """Keep ≤ep_cap (drop longest) then the step cap (long ticks first)."""
+        ep_cap = int(self.ep_cap or 0)
+        while ep_cap > 0 and len(self._episodes) > ep_cap:
+            self._episodes.pop(self._longest_idx())
         while self._episodes and self._n_steps() > self.cap:
             if len(self._episodes) == 1:
                 ep = self._episodes[0]
@@ -630,6 +653,7 @@ class TeacherWinBuffer:
         manifest = {
             "schema": self.schema,
             "cap": self.cap,
+            "ep_cap": int(self.ep_cap or 0),
             "prefer_ticks": self.prefer_ticks,
             "episodes": [],
         }
@@ -695,8 +719,11 @@ class TeacherWinBuffer:
                 "ticks": int(blob.get("ticks") or entry.get("ticks") or 0),
                 "result": str(blob.get("result") or entry.get("result") or "win"),
             })
+        n_loaded = len(loaded)
         self._episodes = loaded
         self._next_id = max_id + 1
         self.path = root
         self._trim()
+        if self.path is not None and len(self._episodes) < n_loaded:
+            self.save()
         return len(self._episodes)

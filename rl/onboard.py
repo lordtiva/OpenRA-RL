@@ -18,7 +18,7 @@ import os
 import shutil
 from pathlib import Path
 
-from rl.imitation import BC_WIN_CAP, BC_WIN_PREFER_TICKS
+from rl.imitation import BC_WIN_CAP, BC_WIN_EP_CAP, BC_WIN_PREFER_TICKS
 
 PHASES = ("A", "B", "C", "D", "E", "done")
 PHASE_BOT = {
@@ -53,7 +53,11 @@ DEFAULTS = {
     "b_bc_warmup": 40,
     "b_bc_lambda_end": 0.10,
     "b_bc_start_iter": 0,  # 0 = use phase_started_iter
+    # P1.4: anneal stage/guard army heuristics after Phase B start
+    "heuristic_anneal_iters": 60,
+
     "bc_win_cap": BC_WIN_CAP,
+    "bc_win_ep_cap": BC_WIN_EP_CAP,
     "bc_win_prefer_ticks": BC_WIN_PREFER_TICKS,
     # Mix ramp onto the phase target. C/D/E keep BC (expand teacher).
     "c_mix_from": "beginner",
@@ -78,7 +82,7 @@ _STRIP = {
     "--bc-games", "--bc-epochs", "--bc-keep-incomplete",
     "--bc-macro-ticks", "--bc-max-steps", "--bc-lambda-end",
     "--bc-rush", "--bc-replay", "--bc-collect-only", "--bc-collect-target",
-    "--bc-win-cap", "--bc-win-prefer-ticks", "--bc-teacher-mode",
+    "--bc-win-cap", "--bc-win-ep-cap", "--bc-win-prefer-ticks", "--bc-teacher-mode",
     "--eval-games",
     "--sil", "--lambda-sil",
     "--iters", "--reset-opt", "--onboard-phase",
@@ -86,6 +90,7 @@ _STRIP = {
     "--mix-from", "--mix-warmup", "--mix-start", "--mix-start-iter",
     "--amp-init-scale", "--no-amp",
     "--map-pool",
+    "--heuristic-p", "--heuristic-anneal-iters", "--heuristic-phase-start",
 }
 
 
@@ -115,6 +120,7 @@ def _cfg(raw: dict | None) -> dict:
         for k, v in raw.items():
             if k in DEFAULTS or k in (
                 "phase", "a_launched", "c_reset_opt_done", "phase_started_iter",
+                "heuristic_phase_start",
             ):
                 out[k] = v
     return out
@@ -138,6 +144,7 @@ def load_curriculum(path: str | Path) -> dict | None:
     cfg["a_launched"] = bool(raw.get("a_launched"))
     cfg["c_reset_opt_done"] = bool(raw.get("c_reset_opt_done"))
     cfg["phase_started_iter"] = int(raw.get("phase_started_iter") or 0)
+    cfg["heuristic_phase_start"] = int(raw.get("heuristic_phase_start") or 0)
     return cfg
 
 
@@ -172,6 +179,7 @@ def save_curriculum(path: str | Path, cfg: dict) -> None:
             cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"])),
         "b_bc_start_iter": int(cfg.get("b_bc_start_iter") or 0),
         "bc_win_cap": int(cfg.get("bc_win_cap", DEFAULTS["bc_win_cap"])),
+        "bc_win_ep_cap": int(cfg.get("bc_win_ep_cap", DEFAULTS["bc_win_ep_cap"])),
         "bc_win_prefer_ticks": int(
             cfg.get("bc_win_prefer_ticks", DEFAULTS["bc_win_prefer_ticks"])),
         "c_mix_from": str(cfg.get("c_mix_from") or DEFAULTS["c_mix_from"]),
@@ -183,6 +191,10 @@ def save_curriculum(path: str | Path, cfg: dict) -> None:
         "a_launched": bool(cfg.get("a_launched")),
         "c_reset_opt_done": bool(cfg.get("c_reset_opt_done")),
         "phase_started_iter": int(cfg.get("phase_started_iter") or 0),
+        "heuristic_phase_start": int(cfg.get("heuristic_phase_start") or 0),
+        "heuristic_anneal_iters": int(
+            cfg.get("heuristic_anneal_iters")
+            or DEFAULTS.get("heuristic_anneal_iters", 60)),
     }
     tmp = p.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
@@ -195,6 +207,7 @@ def new_curriculum(overrides: dict | None = None) -> dict:
     cfg["a_launched"] = False
     cfg["c_reset_opt_done"] = False
     cfg["phase_started_iter"] = 0
+    cfg["heuristic_phase_start"] = 0
     return cfg
 
 
@@ -268,6 +281,8 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--k-skip", str(int(cfg["a_k_skip"])),
             "--eval-games", str(int(cfg.get("a_eval_games") or DEFAULTS["a_eval_games"])),
             "--bc-win-cap", str(int(cfg.get("bc_win_cap") or DEFAULTS["bc_win_cap"])),
+            "--bc-win-ep-cap", str(int(
+                cfg.get("bc_win_ep_cap") or DEFAULTS["bc_win_ep_cap"])),
             "--bc-win-prefer-ticks", str(int(
                 cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
             # Phase A: dense QSA/XF (topk=0 = off). Sparse topk masks enemy
@@ -299,14 +314,27 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--bc-macro-ticks", str(int(cfg.get("a_macro_ticks") or DEFAULTS["a_macro_ticks"])),
             "--bc-max-steps", str(int(cfg.get("a_max_steps") or DEFAULTS["a_max_steps"])),
             "--bc-win-cap", str(int(cfg.get("bc_win_cap") or DEFAULTS["bc_win_cap"])),
+            "--bc-win-ep-cap", str(int(
+                cfg.get("bc_win_ep_cap") or DEFAULTS["bc_win_ep_cap"])),
             "--bc-win-prefer-ticks", str(int(
                 cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
             # 5e-5 still clip 0.55–0.96 in B (target ~0.20–0.30).
             "--lr", "2.0e-5",
             "--adv-mode", "global",
             "--sil", "--lambda-sil", "0.5",
+            "--no-amp",
             "--iters", str(int(cfg["bc_iters"])),
             "--onboard-phase", "B",
+            # P1.4: anneal stage/guard after Phase B start (Phase A stays 1.0)
+            # First B iter (= phase_started_iter+1) → p=1.0 at boundary
+            "--heuristic-phase-start", str(int(
+                cfg.get("heuristic_phase_start")
+                or ((int(cfg.get("phase_started_iter") or 0) + 1)
+                    if int(cfg.get("phase_started_iter") or 0) > 0
+                    else bc_start))),
+            "--heuristic-anneal-iters", str(int(
+                cfg.get("heuristic_anneal_iters")
+                or DEFAULTS.get("heuristic_anneal_iters", 60))),
         ]
     if phase in EXPAND_PHASES:
         return _expand_phase_flags(phase, cfg)
@@ -338,6 +366,8 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
         "--bc-macro-ticks", str(int(cfg.get("a_macro_ticks") or DEFAULTS["a_macro_ticks"])),
         "--bc-max-steps", str(int(cfg.get("a_max_steps") or DEFAULTS["a_max_steps"])),
         "--bc-win-cap", str(int(cfg.get("bc_win_cap") or DEFAULTS["bc_win_cap"])),
+        "--bc-win-ep-cap", str(int(
+            cfg.get("bc_win_ep_cap") or DEFAULTS["bc_win_ep_cap"])),
         "--bc-win-prefer-ticks", str(int(
             cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
         "--lr", "2.0e-5",
@@ -352,6 +382,16 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
         "--mix-start-iter", str(max(1, mix_start_iter)),
         "--iters", str(int(cfg["bc_iters"])),
         "--onboard-phase", phase,
+        # P1.4: continue anneal from this phase's start iter
+        # Prefer frozen B-start so anneal continues across C/D/E
+        "--heuristic-phase-start", str(int(
+            cfg.get("heuristic_phase_start")
+            or ((int(cfg.get("phase_started_iter") or 0) + 1)
+                if int(cfg.get("phase_started_iter") or 0) > 0
+                else bc_start))),
+        "--heuristic-anneal-iters", str(int(
+            cfg.get("heuristic_anneal_iters")
+            or DEFAULTS.get("heuristic_anneal_iters", 60))),
     ]
 
 

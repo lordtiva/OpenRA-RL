@@ -9,4 +9,4 @@
 # UI selectors on http://localhost:8786/ POST /api/config for the next episode.
 Set-Location $PSScriptRoot
 $env:PYTHONPATH = ""
-& .\.venv\Scripts\python.exe -m rl.play_vs_checkpoint_live --no-war-nudge @args
+& .\.venv\Scripts\python.exe -m rl.play_vs_checkpoint_live --no-war-nudge --no-greedy @args

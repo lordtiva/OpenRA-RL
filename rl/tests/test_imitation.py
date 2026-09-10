@@ -550,6 +550,34 @@ try:
                      {"result": "win", "ticks": 12000})
     check("TW prefer 20k echa win 33k antes que rush 12k",
           tw20.n_episodes == 1 and all(s["tag"][0] == "S" for s in tw20.snapshot()))
+    tw_ep = TeacherWinBuffer(cap_steps=10000, prefer_ticks=40000, ep_cap=3)
+    for i, ticks in enumerate((30000, 20000, 15000, 25000, 10000)):
+        tw_ep.add_episode(
+            [{"tag": (str(i), j)} for j in range(5)],
+            {"result": "win", "ticks": ticks})
+    kept = sorted(int(e["ticks"]) for e in tw_ep._episodes)
+    check("TW ep_cap 3 keeps shortest",
+          tw_ep.n_episodes == 3 and kept == [10000, 15000, 20000])
+    n_rej = tw_ep.add_episode(
+        [{"tag": ("X", 0)}], {"result": "win", "ticks": 40000})
+    check("TW ep_cap rejects longer",
+          n_rej == 0 and tw_ep.n_episodes == 3)
+    tw_disk = Path(tempfile.mkdtemp(prefix="twep_"))
+    try:
+        tw_a = TeacherWinBuffer(cap_steps=10000, ep_cap=5, path=tw_disk)
+        for i, ticks in enumerate((50000, 40000, 30000, 20000, 10000)):
+            tw_a.add_episode(
+                [{"tag": (str(i), 0)}], {"result": "win", "ticks": ticks})
+        tw_a.save()
+        check("TW save 5 under ep_cap 5", tw_a.n_episodes == 5)
+        tw_b = TeacherWinBuffer(cap_steps=10000, ep_cap=3, path=tw_disk)
+        check("TW load trims to ep_cap 3", tw_b.n_episodes == 3)
+        left = sorted(int(e["ticks"]) for e in tw_b._episodes)
+        check("TW load kept shortest 3", left == [10000, 20000, 30000])
+        check("TW load rewrote disk to 3",
+              len(list(tw_disk.glob("ep_*.pt"))) == 3)
+    finally:
+        shutil.rmtree(tw_disk, ignore_errors=True)
     man = json.loads((tw_dir / "manifest.json").read_text(encoding="utf-8"))
     check("TW schema hunt_v2", man.get("schema") == TAPE_SCHEMA)
     check("TW schema string", TAPE_SCHEMA == "eco_and_combat_mental_v4")

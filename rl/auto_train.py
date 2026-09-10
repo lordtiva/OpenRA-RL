@@ -65,6 +65,7 @@ from rl.best_ckpt import (
     DROUGHT_STREAK, dead_policy_reason, is_dead_policy, drought_should_restore,
 )
 from rl import onboard as ob
+from rl.metrics_lock import metrics_lock
 # Default v2 A/B root. Override with --ckpt-dir (relativo al ROOT del repo).
 CKPT_DIR_REL = "rl/ckpts_v2"
 CKPT_DIR = ROOT / CKPT_DIR_REL
@@ -75,6 +76,7 @@ _onboard = None
 _replay_tapes = False
 _collect_only = False
 _collect_target = 40
+_no_amp = False  # --no-amp CLI: forward to rl.train (B/C/D/E also default it)
 # Seed de emergencia si ckpts_v2 no tiene latest/iter (sigue en el árbol v1.1).
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
 
@@ -280,19 +282,24 @@ COLLAPSE_COOLDOWN_ITERS = 15
 
 
 def last_metrics_rows(n: int = 3) -> list:
-    """Last n unique-by-iter metrics rows (latest write wins per iter)."""
+    """Last n unique-by-iter metrics rows (latest write wins per iter).
+
+    Shared lock (P0.2) so auto_train does not race train.py appends.
+    Degrades safely if the lock backend is unavailable.
+    """
     rows = []
     if not METRICS.exists():
         return rows
     try:
-        with open(METRICS, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    j = json.loads(line)
-                except Exception:
-                    continue
-                if isinstance(j.get("iter"), int):
-                    rows.append(j)
+        with metrics_lock(str(METRICS), exclusive=False):
+            with open(METRICS, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        j = json.loads(line)
+                    except Exception:
+                        continue
+                    if isinstance(j.get("iter"), int):
+                        rows.append(j)
     except OSError:
         return []
     by_iter = {}
@@ -583,6 +590,13 @@ def try_promote(last_iter: int) -> str | None:
         "E": ("onboard phase E hard expand BC", "hard"),
         "done": ("onboard DONE wr20 vs hard", "hard"),
     }
+    if nxt == "B":
+        # P1.4: freeze anneal origin at first B iter (continues into C/D/E).
+        _onboard["heuristic_phase_start"] = int(last_iter) + 1
+        # Same rush schema as A. Resume already passes --bc-replay; a hot
+        # promote in this process used to keep collecting.
+        if arm_replay_for_phase("B"):
+            log("  reusando teacher_wins/ (promote A->B no re-juega al teacher)")
     if nxt in ("C", "D", "E"):
         snap = ob.snapshot_phase_best(CKPT_DIR, old)
         if snap:
@@ -604,6 +618,30 @@ def collect_only_train_extras(target: int | None = None) -> list[str]:
     """Argv fragment for rl.train --bc-collect-only (never --bc-replay)."""
     n = int(_collect_target if target is None else target)
     return ["--bc-collect-only", "--bc-collect-target", str(max(1, n))]
+
+
+def arm_replay_for_phase(phase: str) -> bool:
+    """Set _replay_tapes if teacher_wins schema matches this phase.
+
+    Used by resume and by a hot A->B promote (same rush tapes).
+    """
+    global _replay_tapes
+    if _collect_only:
+        return False
+    tw = CKPT_DIR / "teacher_wins"
+    man_p = tw / "manifest.json"
+    if not (tw.is_dir() and man_p.is_file()):
+        return False
+    try:
+        man = json.loads(man_p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    want = ob.tape_schema_for_phase(phase or "A")
+    n_eps = len(man.get("episodes") or [])
+    if str(man.get("schema") or "") != want or n_eps <= 0:
+        return False
+    _replay_tapes = True
+    return True
 
 
 def would_pass_bc_replay(replay_tapes: bool = None, onboard=None,
@@ -631,6 +669,8 @@ def launch_train(extra_args=None) -> subprocess.Popen:
         args = ob.build_train_argv(list(TRAIN_ARGS), _onboard["phase"], _onboard)
     else:
         args = list(TRAIN_ARGS)
+    if _no_amp and "--no-amp" not in args:
+        args.append("--no-amp")
     args[args.index("--url") + 1] = urls
     log(f"game urls ({n_srv}): {urls}")
     resume = find_resume()
@@ -725,6 +765,11 @@ def parse_auto_args(argv=None):
              "(default: on). Fase A lo ignora. Usa --no-collapse para "
              "desactivarlo en B/C.")
     ap.add_argument(
+        "--no-amp", action="store_true",
+        help="Disable CUDA AMP in rl.train (fp32). Phase B/C/D/E already "
+             "default --no-amp via onboard phase_flags; pass this so the "
+             "flag is accepted and also forced on Phase A / non-onboard.")
+    ap.add_argument(
         "--ckpt-dir", default=None,
         help="Carpeta de ckpts relativa al repo (default: rl/ckpts_v2). "
              "Para control v1.1: --ckpt-dir rl/ckpts.")
@@ -816,7 +861,7 @@ def _init_onboard(args) -> None:
         for k in ("a_macro_ticks", "a_max_steps", "a_k_skip",
                   "b_bc_games", "b_bc_epochs", "b_bc_warmup",
                   "b_bc_lambda_end",
-                  "bc_win_cap", "bc_win_prefer_ticks",
+                  "bc_win_cap", "bc_win_ep_cap", "bc_win_prefer_ticks",
                   "c_mix_from", "c_mix_warmup", "c_mix_start",
                   "c_promote_wr20", "d_promote_wr20",
                   "d_mix_from", "e_mix_from"):
@@ -900,8 +945,9 @@ def _init_onboard(args) -> None:
 
 
 def main():
-    global _onboard
+    global _onboard, _no_amp
     args = parse_auto_args()
+    _no_amp = bool(getattr(args, "no_amp", False))
     if getattr(args, "ckpt_dir", None):
         apply_ckpt_dir(args.ckpt_dir)
     else:

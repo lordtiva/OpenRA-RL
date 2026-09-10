@@ -73,6 +73,7 @@ check("A eval alumno 4", fa[fa.index("--eval-games") + 1] == "4")
 check("A rush 8", fa[fa.index("--bc-rush") + 1] == "8")
 check("A teacher-mode rush", fa[fa.index("--bc-teacher-mode") + 1] == "rush")
 check("A win-cap 64000", fa[fa.index("--bc-win-cap") + 1] == "64000")
+check("A ep-cap 40", fa[fa.index("--bc-win-ep-cap") + 1] == "40")
 check("A prefer-ticks 20000", fa[fa.index("--bc-win-prefer-ticks") + 1] == "20000")
 check("A iters largo (wr gate, no sft_iters)",
       fa[fa.index("--iters") + 1] == "10000")
@@ -100,10 +101,12 @@ check("B wins-only (no keep incomplete)", "--bc-keep-incomplete" not in fb)
 check("B lambda piso 0.10", fb[fb.index("--bc-lambda-end") + 1] == "0.10")
 check("B lr 2e-5", fb[fb.index("--lr") + 1] == "2.0e-5")
 check("B adv-mode global", fb[fb.index("--adv-mode") + 1] == "global")
+check("B no-amp", "--no-amp" in fb and "--amp-init-scale" not in fb)
 check("B teacher macro 40", fb[fb.index("--bc-macro-ticks") + 1] == "40")
 check("B teacher max-steps 1800", fb[fb.index("--bc-max-steps") + 1] == "1800")
 check("B rush 8", fb[fb.index("--bc-rush") + 1] == "8")
 check("B teacher-mode rush", fb[fb.index("--bc-teacher-mode") + 1] == "rush")
+check("B ep-cap 40", fb[fb.index("--bc-win-ep-cap") + 1] == "40")
 cfg_b_start = dict(cfg)
 cfg_b_start["phase"] = "B"
 cfg_b_start["phase_started_iter"] = 20
@@ -129,6 +132,7 @@ check("C sil + expand BC", "--sil" in fc and "--bc" in fc
       and "--bc-only" not in fc)
 check("C teacher-mode expand", fc[fc.index("--bc-teacher-mode") + 1] == "expand")
 check("C teacher-bot easy", fc[fc.index("--bc-teacher-bot") + 1] == "easy")
+check("C ep-cap 40", fc[fc.index("--bc-win-ep-cap") + 1] == "40")
 fd = phase_flags("D", cfg)
 check("D bot medium", fd[fd.index("--bot-type") + 1] == "medium")
 check("D mix-from easy", fd[fd.index("--mix-from") + 1] == "easy")
@@ -279,6 +283,7 @@ check("argv B last teacher beginner",
       cmd_b[[i for i, a in enumerate(cmd_b) if a == "--bc-teacher-bot"][-1] + 1]
       == "beginner")
 check("argv B sin pfsp", "--pfsp" not in cmd_b)
+check("argv B no-amp", "--no-amp" in cmd_b)
 check("argv C last teacher-mode expand",
       phase_flags("C", cfg)[phase_flags("C", cfg).index("--bc-teacher-mode") + 1]
       == "expand")
@@ -541,6 +546,33 @@ try:
           at._replay_tapes is True)
     check("resume phase B would_pass True",
           at.would_pass_bc_replay() is True)
+
+    at._replay_tapes = False
+    at._collect_only = False
+    check("arm_replay B with v4 tapes",
+          at.arm_replay_for_phase("B") is True)
+    check("arm_replay B armed _replay_tapes", at._replay_tapes is True)
+    at._replay_tapes = False
+    check("arm_replay C with rush tapes False",
+          at.arm_replay_for_phase("C") is False)
+    check("arm_replay C did not arm", at._replay_tapes is False)
+
+    at._onboard = {
+        "phase": "A", "sft_iters": 20, "promote_wr20": 0.5,
+        "done_wr20": 0.45, "streak": 10, "min_iters": 20,
+        "bc_games": 4, "a_eval_games": 4, "a_rush": 8,
+        "a_launched": True, "c_reset_opt_done": False,
+        "phase_started_iter": 0,
+    }
+    at._replay_tapes = False
+    at._collect_only = False
+    with mock.patch.object(at.ob, "should_promote", return_value="B"), \
+            mock.patch.object(at, "last_metrics_rows", return_value=[]), \
+            mock.patch.object(at.ob, "save_curriculum"), \
+            mock.patch.object(at.ob, "append_era_reset"):
+        nxt_ab = at.try_promote(20)
+    check("try_promote A->B", nxt_ab == "B")
+    check("try_promote A->B arms replay", at._replay_tapes is True)
 
     # Phase C resume with RUSH tapes: schema mismatch, re-collect.
     (td / "curriculum.json").write_text(
