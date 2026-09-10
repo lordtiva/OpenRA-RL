@@ -1,4 +1,4 @@
-"""P0/P1 training fixes: encode vectorize parity, item_slot fallback, heuristic_p, metrics lock."""
+"""P0/P1 training fixes: seq-eval smoke, item_slot fallback, heuristic_p, metrics lock."""
 from __future__ import annotations
 
 import json
@@ -98,26 +98,26 @@ def test_encode_features_matches_encode_core():
     assert torch.allclose(h_from_fused, h2)
 
 
-def test_evaluate_actions_seq_batch_parity_vs_legacy():
-    """CRITICAL: vectorized path == legacy per-t encode (same math)."""
+def test_evaluate_actions_seq_batch_smoke():
+    """Seq eval still runs (per-t encode; P0.1 BxT path reverted)."""
     torch.manual_seed(42)
     net = AlphaLiteNet()
     net.train()
     segs = [_make_seg(net, T=4), _make_seg(net, T=3)]
-    # Clone nets state — same weights for both paths
-    lp_n, ent_n, val_n, valid_n = net.evaluate_actions_seq_batch(segs, "cpu")
-    lp_o, ent_o, val_o, valid_o = net._evaluate_actions_seq_batch_legacy(segs, "cpu")
-    assert torch.equal(valid_n, valid_o)
-    # Intentional micro-drift: batched encode_features(B*T) vs per-t encode
-    # can differ at ~1e-9 on value (matmul reduction order). lp/entropy
-    # usually bit-exact on CPU; allow atol=1e-7 across the board.
-    atol = 1e-7
-    assert torch.allclose(lp_n, lp_o, rtol=0, atol=atol), (
-        f"lp drift max={(lp_n - lp_o).abs().max().item()}")
-    assert torch.allclose(ent_n, ent_o, rtol=0, atol=atol), (
-        f"ent drift max={(ent_n - ent_o).abs().max().item()}")
-    assert torch.allclose(val_n, val_o, rtol=0, atol=atol), (
-        f"val drift max={(val_n - val_o).abs().max().item()}")
+    lp, ent, val, valid = net.evaluate_actions_seq_batch(segs, "cpu")
+    assert lp.shape == (2, 4)
+    assert ent.shape == (2, 4)
+    assert val.shape == (2, 4)
+    assert valid.shape == (2, 4)
+    assert valid.dtype == torch.bool
+    # padded shorter seg: T=3 active, last pad invalid
+    assert bool(valid[0].all())
+    assert bool(valid[1, :3].all()) and not bool(valid[1, 3])
+    assert torch.isfinite(lp[valid]).all()
+    assert torch.isfinite(ent[valid]).all()
+    assert torch.isfinite(val[valid]).all()
+    # no legacy vectorized helper after revert
+    assert not hasattr(net, "_evaluate_actions_seq_batch_legacy")
 
 
 def test_item_slot_fallback_logs_and_counts(caplog):

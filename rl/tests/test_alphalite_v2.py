@@ -164,12 +164,16 @@ def test_act_combat_mask():
     h = torch.zeros(B, HIDDEN_DIM)
     out = net.act(batch, h, temperature=0.0)
     assert "_ctx" in out
-    out2 = net.act_combat(batch, out["hidden"], temperature=0.0, ctx=out["_ctx"])
+    assert len(out["_ctx"]) >= 7 and out["_ctx"][6] is not None  # fused
+    # Alt-B: micro-step GRU then combat sample under advanced hidden
+    h_in2, h2 = net.k2_micro_hidden(out["_ctx"], out["hidden"])
+    assert torch.equal(h_in2, out["hidden"])
+    assert not torch.equal(h2, out["hidden"]), "K=2 micro GRU must move hidden"
+    out2 = net.act_combat(batch, h2, temperature=0.0, ctx=out["_ctx"])
     assert out2 is not None
     tname = ACTION_TYPES[int(out2["type"].item())]
     assert tname in COMBAT_PUSH_TYPES, tname
-    # Same hidden (no second GRU step when ctx reused)
-    assert torch.equal(out2["hidden"], out["hidden"])
+    assert torch.equal(out2["hidden"], h2)
     # Illegal combat -> None
     batch_off = dict(batch)
     batch_off["type_mask"] = torch.zeros(B, N_ACTION_TYPES, dtype=torch.bool)

@@ -590,13 +590,15 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                     obs, action, atype_str, int(eff_c), aidx,
                     last_push=last_push_cell)
                 eff_c = int(new_c)
-            # K=2 eco+push: second combat AR when ready (same tick / same ctx).
+            # K=2 eco+push Alt-B: micro-step GRU then combat AR (same tick).
             if (out_ctx is not None and student_combat_ready(obs, belief)
                     and atype_str not in COMBAT_PUSH_TYPES):
                 with torch.no_grad():
+                    _h_in2, h_push = net.k2_micro_hidden(out_ctx, hidden)
                     out2 = net.act_combat(
-                        batch, hidden, temperature=args.temperature, ctx=out_ctx)
+                        batch, h_push, temperature=args.temperature, ctx=out_ctx)
                 if out2 is not None:
+                    hidden = h_push.detach()
                     push_action, (pt, pu, pi, pc) = index_to_command_effective(
                         obs, int(out2["type"]), int(out2["unit_slot"]),
                         int(out2["cell_flat"]), int(out2["item_slot"]), aidx)

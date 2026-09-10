@@ -33,7 +33,7 @@ from rl.action_adapter import Vocab
 from rl.reward_shaping import PRESETS as SHAPER_PRESETS
 from rl.network import AlphaLiteNet
 from rl.rollout import (add_advantages, center_advantage_by_episode,
-                        collect_one_episode, flatten_samples)
+                        smdp_k_ref, collect_one_episode, flatten_samples)
 from rl.metrics_lock import metrics_lock
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
 from rl.best_ckpt import batch_is_dead, batch_is_wipe, maybe_update_best
@@ -66,7 +66,8 @@ def sample_dims(s):
 
 
 def process_results(results, gamma, lam, verbose=True,
-                    adv_mode: str = "episode"):
+                    adv_mode: str = "episode",
+                    k_ref: float | None = None):
     """results: [(traj, outcome)] -> (samples filtrados, outcomes).
 
     adv_mode:
@@ -83,7 +84,7 @@ def process_results(results, gamma, lam, verbose=True,
     episodes = [t for t, _ in results]
     outcomes = [o for _, o in results]
     for traj in episodes:
-        add_advantages(traj, gamma=gamma, lam=lam)
+        add_advantages(traj, gamma=gamma, lam=lam, k_ref=k_ref)
 
     def _concat_advs():
         chunks = [
@@ -173,7 +174,11 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
             return None
         samples, _ = process_results(
             [(traj, outcome)], args.gamma, args.lam,
-            adv_mode=args.adv_mode, verbose=False)
+            adv_mode=args.adv_mode, verbose=False,
+            k_ref=smdp_k_ref(
+                getattr(args, "macro_ticks", 0),
+                getattr(args, "k_skip", 8),
+                getattr(args, "smdp_k_ref", 0) or None))
         print(f"  [bc] teacher {i + 1}/{n} "
               f"result={outcome.get('result')} ticks={outcome.get('ticks')}",
               flush=True)
@@ -756,7 +761,11 @@ async def amain(args):
                     results = await launch_collection(None)
                     samples, outcomes = process_results(
                         results, args.gamma, args.lam,
-                        adv_mode=args.adv_mode)
+                        adv_mode=args.adv_mode,
+                        k_ref=smdp_k_ref(
+                            getattr(args, "macro_ticks", 0),
+                            getattr(args, "k_skip", 8),
+                            getattr(args, "smdp_k_ref", 0) or None))
                     print(f"  [eval] student n={len(outcomes)} temp=0.0 "
                           f"{[o.get('result') for o in outcomes]}",
                           flush=True)
@@ -771,8 +780,13 @@ async def amain(args):
             # con esos pesos y el update k corre en un thread: el event loop
             # puede avanzar OpenRA. No tocar infer_net hasta el próximo await.
             infer_net.load_state_dict(net.state_dict())
-            samples, outcomes = process_results(results, args.gamma, args.lam,
-                                                adv_mode=args.adv_mode)
+            samples, outcomes = process_results(
+                results, args.gamma, args.lam,
+                adv_mode=args.adv_mode,
+                k_ref=smdp_k_ref(
+                    getattr(args, "macro_ticks", 0),
+                    getattr(args, "k_skip", 8),
+                    getattr(args, "smdp_k_ref", 0) or None))
         lmb_bc = (1.0 if bc_only else
                   (lambda_bc_at(it, bc_start_iter, args.bc_warmup,
                                 end=float(getattr(args, "bc_lambda_end", 0.0) or 0.0))
@@ -1216,6 +1230,8 @@ def main():
     ap.add_argument("--qsa-block", type=int, default=8,
                     help="map QSA block size in cells (default 8)")
     ap.add_argument("--gamma", type=float, default=0.995)
+    ap.add_argument("--smdp-k-ref", type=float, default=0.0,
+                    help="SMDP nominal ticks for gamma_eff=gamma**(dt/k_ref); 0=auto (macro_ticks or 2*k_skip)")
     ap.add_argument("--lam", type=float, default=0.95)
     ap.add_argument("--device", default="auto")
     ap.add_argument("--ckpt-dir", default="rl/ckpts")

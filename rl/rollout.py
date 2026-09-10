@@ -7,6 +7,8 @@ Diseño v0:
     - old_log_prob y value se guardan CONGELADOS para PPO
     - hidden del GRU desacoplado del gradiente entre decisiones
     - GAE(λ) por trayectoria + centrado por grupo (por episodio)
+    - SMDP: gamma_eff = gamma ** (delta_t / k_ref) cuando Δt de macro varía
+    - K=2 eco+push Alt-B: micro-step GRU entre eco y push (h_in distintos)
 
 Uso:
     episodes, outcomes = asyncio.run(collect_episodes(url, net, vocab, device))
@@ -39,6 +41,26 @@ from rl.supremacy import evaluate_supremacy
 from rl.economy_race import EconomyRace
 from rl.auto_support import apply_dest_credit, support_commands
 
+
+
+# Engine step() always advances 2 ticks; advance() returns the rest.
+# SMDP Δt for a decision = STEP_TICKS + sum(actual_ticks_advanced).
+# Closing NO_OP (+2) is obs-refresh overhead beyond the macro_ticks budget
+# and is NOT included in delta_t (matches restante = macro_ticks - 2).
+STEP_TICKS = 2
+
+
+def smdp_k_ref(macro_ticks: int = 0, k_skip: int = 8, explicit: float | None = None) -> float:
+    """Nominal tick-step for SMDP gamma_eff = gamma ** (delta_t / k_ref).
+
+    Prefer explicit >0; else macro_ticks if macro; else 2*k_skip (frame-skip
+    ticks between decisions). Default k_skip=8 → k_ref=16.
+    """
+    if explicit is not None and float(explicit) > 0:
+        return float(explicit)
+    if int(macro_ticks or 0) > 0:
+        return float(macro_ticks)
+    return float(STEP_TICKS * max(1, int(k_skip or 1)))
 
 
 def _pad_building_valid(building_valid, width: int) -> torch.Tensor:
@@ -149,7 +171,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                               war_nudge: bool = True,
                               teacher=None,
                               opponent_net=None,
-                              heuristic_p: float = 1.0):
+                              heuristic_p: float = 1.0,
+                              smdp_k_ref_ticks: float | None = None):
     """Juega UNA partida completa; devuelve (trayectoria, resumen).
 
     max_steps limita los env.step (cada uno avanza 2 ticks del juego):
@@ -165,6 +188,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     (para análisis offline sin abrir el juego ni usar visión).
     """
     use_macro = macro_ticks > 0
+    k_ref = smdp_k_ref(macro_ticks, k_skip, smdp_k_ref_ticks)
     result = await env.reset(**(reset_kwargs or {}))
     obs = result.observation
 
@@ -194,6 +218,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     macro_final_result = None
     interrupt_reason = None
     advanced_total = 0   # ticks avanzados vía advance() (modo macro)
+    decision_adv_ticks = 0  # advance() ticks in current decision block (SMDP Δt)
     interrupts = {}      # conteo por razón de interrupción
     # Carrera económica: riqueza por bando muestreada durante el episodio.
     # Muestra inicial desde la obs local (el enemigo es niebla aún).
@@ -239,6 +264,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 pending_sample = None
                 atype = "no_op"
             else:
+                decision_adv_ticks = 0  # SMDP: accumulate advance() ticks this block
                 batch, aidx = _batch_of(obs, vocab, device, belief=belief)
                 h_in = hidden.detach().clone()
                 had_item = aidx.item_mask.any().view(1).to(device)
@@ -354,15 +380,18 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         "n_units": len(obs.units),
                         "cash": obs.economy.cash,
                     })
-                # K=2 eco+push (student, no teacher): second AR = combat push
-                # when combat-ready / belief enemy_base / leftover ghosts.
-                # Reuses encode ctx so GRU advances once per macro-tick.
+                # K=2 eco+push Alt-B (micro-step formal): after eco, advance
+                # GRU once more on same fused (k2_micro_hidden) so push is
+                # autoregressive conditional on eco. Traj keeps 2 steps but
+                # second h_in = h' ≠ first h_in (unless push skipped).
                 if (teacher is None and out_ctx is not None
                         and student_combat_ready(obs, belief)
                         and ACTION_TYPES[int(eff_t)] not in COMBAT_PUSH_TYPES):
+                    h_in_push, h_push = net.k2_micro_hidden(out_ctx, hidden)
                     out2 = net.act_combat(
-                        batch, hidden, temperature=temperature, ctx=out_ctx)
+                        batch, h_push, temperature=temperature, ctx=out_ctx)
                     if out2 is not None:
+                        hidden = h_push.detach()
                         push_action, (pt, pu, pi, pc) = index_to_command_effective(
                             obs, int(out2["type"]), int(out2["unit_slot"]),
                             int(out2["cell_flat"]), int(out2["item_slot"]), aidx,
@@ -392,8 +421,9 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         plp = out2["log_prob"]
                         if psampled != peffective:
                             with torch.no_grad():
+                                # Recalc under push h_in (pre-second-GRU), not eco h_in.
                                 plp, _, _ = net.evaluate_actions(
-                                    batch, h_in, {
+                                    batch, h_in_push, {
                                         "type": torch.tensor([pt], device=device),
                                         "unit_slot": torch.tensor(
                                             [pu], device=device),
@@ -403,6 +433,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                             [pi], device=device),
                                         "had_item": had_item,
                                     })
+                        # value under post-micro hidden (h_push)
+                        push_value = float(out2["value"].detach().cpu().item())                             if "value" in out2 else out_value
                         # Stash for traj append with pending_bc_extra below.
                         student_push_sample = {
                             "batch": {k: v.cpu() for k, v in batch.items()},
@@ -415,8 +447,10 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                 "log_prob": plp.detach().cpu(),
                             },
                             "reward": 0.0,
-                            "value_pred": out_value,
-                            "h_in": h_in.cpu(),
+                            "value_pred": push_value,
+                            "h_in": h_in_push.detach().cpu(),
+                            "delta_t": 0.0,  # filled at append: push carries block Δt
+                            "_k2_push": True,
                         }
                     else:
                         student_push_sample = None
@@ -587,7 +621,9 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
             try:
                 while restante > 0 and not done:
                     adv = await env.advance(min(50, restante))
-                    advanced_total += int(adv.get("actual_ticks_advanced", 0) or 0)
+                    _adv_n = int(adv.get("actual_ticks_advanced", 0) or 0)
+                    advanced_total += _adv_n
+                    decision_adv_ticks += _adv_n
                     done = bool(adv.get("done", False))
                     if done:
                         macro_final_result = adv.get("result") or None
@@ -671,6 +707,26 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 consec_errors = 0
 
         if can_decide and pending_sample is not None:
+            # SMDP Δt: actual ticks this decision (step + advance bursts).
+            # Macro: STEP_TICKS + decision_adv_ticks (== macro budget when
+            # uninterrupted). Frame-skip: STEP_TICKS * k_skip.
+            # Closing NO_OP (+2) excluded — see STEP_TICKS comment.
+            if use_macro:
+                block_dt = float(STEP_TICKS + decision_adv_ticks)
+            else:
+                block_dt = float(STEP_TICKS * max(1, int(k_skip)))
+            # K=2: eco→push is same-tick micro (Δt=0 → gamma_eff=1);
+            # push (last) carries the full block Δt to the next decision.
+            if pending_bc_extra:
+                pending_sample["delta_t"] = 0.0
+                pending_sample["k_ref"] = float(k_ref)
+                for i, extra in enumerate(pending_bc_extra):
+                    is_last = (i == len(pending_bc_extra) - 1)
+                    extra["delta_t"] = block_dt if is_last else 0.0
+                    extra["k_ref"] = float(k_ref)
+            else:
+                pending_sample["delta_t"] = block_dt
+                pending_sample["k_ref"] = float(k_ref)
             traj.append(pending_sample)
             if pending_bc_extra:
                 traj.extend(pending_bc_extra)
@@ -783,13 +839,20 @@ async def collect_episodes(url: str, net, vocab: Vocab, device: str,
 
 
 def add_advantages(traj: list, gamma: float = 0.99, lam: float = 0.95,
-                   last_value: float | None = None):
+                   last_value: float | None = None,
+                   k_ref: float | None = None):
     """GAE(λ) in-place sobre una trayectoria.
 
     F5 (auditoría 2026-08-24): si el último paso trae '_v_next' (valor de
     V(s') computado en el rollout al TRUNCAR), se usa como bootstrap —
     antes next_v caía en values[-1] → δ_T = r_T (pseudo-terminal) y el
     crítico nunca vio valor restante. last_value explícito tiene prioridad.
+
+    SMDP: when samples carry delta_t (actual ticks advanced), discount with
+      gamma_eff = gamma ** (delta_t / k_ref)
+    where k_ref is the nominal tick-step (macro_ticks or 2*k_skip). Missing
+    delta_t → treat as k_ref (uniform gamma, backward compatible).
+    delta_t=0 (K=2 eco micro-step) → gamma_eff=1.
     """
     T = len(traj)
     if T == 0:
@@ -799,13 +862,25 @@ def add_advantages(traj: list, gamma: float = 0.99, lam: float = 0.95,
         nv_final = last_value
     else:
         nv_final = float(traj[-1].pop("_v_next", 0.0) or 0.0)
+    # Resolve k_ref: explicit arg > sample field > 1.0 (uniform)
+    if k_ref is None or float(k_ref) <= 0:
+        for s in traj:
+            if s.get("k_ref"):
+                k_ref = float(s["k_ref"])
+                break
+        else:
+            k_ref = 1.0
+    k_ref = float(k_ref)
     next_v = nv_final
     gae = 0.0
     for t in reversed(range(T)):
-        delta = traj[t]["reward"] + gamma * next_v - values[t]
-        gae = delta + gamma * lam * gae
+        dt = float(traj[t].get("delta_t", k_ref))
+        g_eff = float(gamma) ** (dt / k_ref) if k_ref > 0 else float(gamma)
+        delta = traj[t]["reward"] + g_eff * next_v - values[t]
+        gae = delta + g_eff * lam * gae
         traj[t]["adv"] = gae
         traj[t]["ret"] = gae + values[t]
+        traj[t]["gamma_eff"] = g_eff
         next_v = values[t]
 
 

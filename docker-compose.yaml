@@ -27,11 +27,11 @@ services:
     deploy:
           resources:
             limits:
-              cpus: "9"
+              cpus: "4"
               # 6G: el fix de fuga (DestroySession → GC.Collect) mantiene el daemon
               # en meseta, así que no hace falta margen gigante. 12G dejaba al host
               # sin RAM para el resto del sistema.
-              memory: 6G
+              memory: 4G
     shm_size: 256m
     restart: unless-stopped
     healthcheck:
