@@ -319,6 +319,8 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--bc-win-prefer-ticks", str(int(
                 cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
             # 5e-5 still clip 0.55–0.96 in B (target ~0.20–0.30).
+            "--qsa-topk", "0",
+            "--xf-topk", "0",
             "--lr", "2.0e-5",
             "--adv-mode", "global",
             "--sil", "--lambda-sil", "0.5",
@@ -523,6 +525,81 @@ def drought_blocked_until_min_iters(cfg: dict | None, rows: list[dict]) -> bool:
     return n_phase < min_it
 
 
+def load_metrics_rows(path: str | Path) -> list[dict]:
+    """Parse metrics.jsonl into dict rows (skips bad lines)."""
+    p = Path(path)
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if not s:
+                continue
+            try:
+                row = json.loads(s)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                out.append(row)
+    except OSError:
+        return []
+    return out
+
+
+def phase_count_origin(cfg: dict, rows: list[dict], phase: str) -> int:
+    """Iter origin for min_iters: prefer first tagged row of this phase.
+
+    Rewind C→B used to pin phase_started_iter=keep_iter so leftover wr
+    could not re-promote. That also zeroed in-progress streak/min_iters
+    after resume. onboard_phase already scopes the era — count from the
+    first kept row of this phase (origin = first_iter - 1). Fall back to
+    curriculum phase_started_iter when no tagged rows exist yet.
+    """
+    first = None
+    want = str(phase or "")
+    for r in rows or []:
+        if r.get("era_reset") or not isinstance(r.get("iter"), int):
+            continue
+        if want and str(r.get("onboard_phase") or "") != want:
+            continue
+        it = int(r["iter"])
+        first = it if first is None else min(first, it)
+    if first is not None:
+        return int(first) - 1
+    return int((cfg or {}).get("phase_started_iter") or 0)
+
+
+def apply_earned_promotions(cfg: dict, rows: list[dict], last_iter: int,
+                            games_per_iter: int = 4) -> list[str]:
+    """Advance cfg phase while kept metrics already meet promote rules.
+
+    Used after --onboard-rewind and on resume so wr20/streak from history
+    before the cut (or before a crash) are not ignored. Does not invent
+    wins — only rows still present in 
+ows. Ambiguous history: if
+    should_promote clearly fires on recomputed rolling stats, promote.
+
+    Mutates cfg in place. Returns phases entered (e.g. ["B"] or ["C"]).
+    Does not write metrics or wipe tapes — caller handles side effects.
+    """
+    earned: list[str] = []
+    last_iter = int(last_iter or 0)
+    for _ in range(len(PHASES) + 1):
+        nxt = should_promote(cfg, rows, last_iter, games_per_iter=games_per_iter)
+        if not nxt:
+            break
+        cfg["phase"] = nxt
+        cfg["phase_started_iter"] = last_iter
+        if nxt == "B":
+            cfg["heuristic_phase_start"] = last_iter + 1
+            cfg["a_launched"] = True
+        if nxt in EXPAND_PHASES or nxt == "done":
+            cfg["c_reset_opt_done"] = True
+        earned.append(nxt)
+    return earned
+
+
 def should_promote(cfg: dict, rows: list[dict], last_iter: int,
                    games_per_iter: int = 4) -> str | None:
     """Return the next phase name, or None if the current one continues."""
@@ -556,9 +633,8 @@ def should_promote(cfg: dict, rows: list[dict], last_iter: int,
     need = int(cfg.get("streak") or DEFAULTS["streak"])
     min_it = int(cfg.get("min_iters") or DEFAULTS["min_iters"])
     held = wr20_streak(results, thr, need, games_per_iter=games_per_iter)
-    n_phase = iters_in_phase(
-        rows, bot, int(cfg.get("phase_started_iter") or 0),
-        onboard_phase=phase)
+    origin = phase_count_origin(cfg, rows, phase)
+    n_phase = iters_in_phase(rows, bot, origin, onboard_phase=phase)
     if held >= need and n_phase >= min_it:
         return PHASE_NEXT[phase]
     return None
@@ -683,8 +759,10 @@ def rewind_onboard(ckpt_dir: str | Path, keep_iter: int,
             cfg["phase"] = "B"
             cfg["c_reset_opt_done"] = False
             if from_later:
-                # Undo a bad C/D/E: λ stays at the B floor; min_iters
-                # restarts from keep_iter so leftover wr no re-promueve.
+                # Undo a bad C/D/E: λ stays at the B floor. phase_started
+                # pins at keep_iter for drought/heuristics; apply_earned
+                # below may still re-promote if streak+wr20 clearly met
+                # on kept B rows (prefer promote when unambiguous).
                 if origin > 0:
                     cfg["b_bc_start_iter"] = origin
                 else:
@@ -695,9 +773,19 @@ def rewind_onboard(ckpt_dir: str | Path, keep_iter: int,
             else:
                 cfg["phase_started_iter"] = keep_iter
                 cfg["b_bc_start_iter"] = max(1, keep_iter + 1 - warmup)
+    # Recompute promote from kept metrics (A→B if wr20 already met at N,
+    # B→C if streak+wr20 already held, etc). Prefer promoting when criteria
+    # clearly met; do not invent wins beyond the trimmed jsonl.
+    rows = load_metrics_rows(d / "metrics.jsonl")
+    last = keep_iter
+    for r in rows:
+        if isinstance(r.get("iter"), int):
+            last = max(last, int(r["iter"]))
+    earned = apply_earned_promotions(cfg, rows, last)
     save_curriculum(d / "curriculum.json", cfg)
     info = {"src": src.name, "metrics_kept": n_m, "race_kept": n_r,
-            "phase": cfg["phase"]}
+            "phase": cfg["phase"], "earned_promotions": earned,
+            "last_iter": last}
     return cfg, info
 
 

@@ -34,9 +34,10 @@ def metrics_lock(path, exclusive: bool = True, timeout_s: float = 5.0) -> Iterat
             locked = _lock_msvcrt(fh, exclusive=exclusive, deadline=deadline)
         else:
             locked = _lock_fcntl(fh, exclusive=exclusive, deadline=deadline)
-        yield
     except Exception:
         # Degrade: proceed without lock rather than break train/auto_train.
+        fh = None
+    try:
         yield
     finally:
         if fh is not None:

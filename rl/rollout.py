@@ -682,20 +682,22 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                           f"sesión envenenada, abortando episodio")
                     outcome_error = True
                     # Best-effort: intentar cerrar la sesión colgada sin
-                    # bloquear el rollout; el próximo reset del pool la recrea.
-                    try:
-                        # destroy es best-effort; el daemon la GCea si no responde
-                        import grpc as _grpc
-                        _ = _grpc  # evita unused-import linter
-                        try:
-                            # Env puede exponer destroy_session vía bridge; si no, no-op
-                            br = getattr(env, "_bridge", None) or getattr(env, "bridge", None)
-                            if br is not None and hasattr(br, "destroy_session"):
-                                br.destroy_session()
-                        except Exception:
-                            pass
-                    except Exception:
-                        pass
+                    # bloquear el rollout.  El destroy puede colgar si el
+                    # canal gRPC está en el mismo estado que causó el
+                    # DEADLINE, por eso lo corremos en un thread daemon con
+                    # join(5s): el rollout sigue en ≤5s pase lo que pase.
+                    import threading as _threading
+                    br = getattr(env, "_bridge", None) or getattr(env, "bridge", None)
+                    if br is not None and hasattr(br, "destroy_session"):
+                        def _destroy_best_effort(bridge):
+                            try:
+                                bridge.destroy_session()
+                            except Exception:
+                                pass
+                        _t = _threading.Thread(
+                            target=_destroy_best_effort, args=(br,), daemon=True)
+                        _t.start()
+                        _t.join(timeout=5.0)
                     break
                 consec_errors += 1
                 print(f"  [engine] advance {step}: {msg[:120]} "

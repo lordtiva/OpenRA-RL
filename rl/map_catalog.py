@@ -220,10 +220,11 @@ def _candidate_paths(entry: MapEntry) -> list[Path]:
 
 def resolve_map_path(key: str) -> Path:
     entry = get_entry(key)
-    for p in _candidate_paths(entry):
+    candidates = _candidate_paths(entry)
+    for p in candidates:
         if p.is_file():
             return p
-    tried = ", ".join(str(p) for p in _candidate_paths(entry)[:6])
+    tried = ", ".join(str(p) for p in candidates[:6])
     raise FileNotFoundError(
         f"map file missing for key={entry.key!r} (display={entry.display_name!r}). "
         f"Tried: {tried}. Populate OpenRA/mods/ra/maps or rl/scenarios/."

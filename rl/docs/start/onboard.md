@@ -140,7 +140,7 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 
 | `--onboard-min-iters` | 20 | Mínimo de iters en B y en C (un 4/4 suelto no promociona) |
 
-| `--onboard-rewind N` | — | **Una vez**: `latest` y `best` ← `iterN`/`best@N`, trunca metrics/race. N≤`sft_iters` vuelve a A. N>sft en **B o C** vuelve a B; `λ_bc` queda en el piso. |
+| --onboard-rewind N | — | **Una vez**: latest/est ← iterN, trunca metrics/race, luego **recomputa promote** con el jsonl quedado (A+wr20→B; B streak+wr20→C; etc). N≤sft_iters parte en A (puede promover). C→B undo puede re-promover si el streak B sigue claro. |
 | `--onboard-rush` | 8 | `ScriptedTeacher.RUSH_ATTACK_MOVE`. Bench n=20 eligió 8; 6/5 suben lose_rate. |
 | `--onboard-bc-games` | 4 | Partidas teacher / iter en A. |
 | `--onboard-eval-games` | 4 | Partidas eval del alumno / iter en A. |
@@ -227,9 +227,15 @@ Criterio de salida: ≥ `--onboard-sft-iters` **y** wr20 del alumno ≥
 
 
 
-Si A ya corrió 20 iters de SFT viejo: `--onboard --onboard-rewind 20` vuelve
+Si A ya corrió 20 iters de SFT viejo: --onboard --onboard-rewind 20
 
-a fase A desde `iter0020.pt` (no uses 24).
+restaura iter0020.pt y trunca metrics. Si el wr20 del alumno en esas
+
+filas ya ≥ --onboard-a-promote-wr20, el curriculum **queda en B**
+
+(no hace falta rellenar wr20 de cero). Sin outcomes / wr bajo, sigue en A.
+
+Resume --onboard sin rewind también aplica promotes ya ganados en metrics.
 
 
 

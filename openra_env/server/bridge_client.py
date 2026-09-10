@@ -65,15 +65,39 @@ class BridgeClient:
         logger.info(f"Connected to OpenRA bridge at {self.host}:{self.port}")
 
     def wait_for_ready(self, max_retries: int = 30, retry_interval: float = 1.0) -> bool:
-        """Wait for the gRPC server to become available."""
+        """Wait for the gRPC server / session to become available.
+
+        Phases accepted as "ready":
+          - "playing" : game world running (single-session and multi-session after
+                        the client calls FastAdvance the first time).
+          - "paused"  : multi-session daemon has created the world and is waiting
+                        for the first FastAdvance call — this IS ready.
+          - "ready"   : future-proof alias used by some daemon versions.
+
+        Avoids reconnecting on every attempt: the gRPC channel is created once
+        and reused.  Reconnecting in a tight loop (as the old code did) floods
+        the HTTP/2 handshake path and makes recovery slower when the daemon is
+        under load.
+        """
+        # Establish the channel once; subsequent calls reuse it.
+        if not self._connected:
+            self.connect()
         for attempt in range(max_retries):
             try:
-                self.connect()
                 state = self.get_state()
-                if state.phase == "playing":
-                    logger.info(f"Bridge ready after {attempt + 1} attempts, phase={state.phase}")
+                phase = getattr(state, "phase", "")
+                # "paused" = world created and frozen, awaiting first FastAdvance.
+                # "playing" = already advancing (single-session or resumed).
+                if phase in ("playing", "paused", "ready"):
+                    logger.info(f"Bridge ready after {attempt + 1} attempts, phase={phase}")
                     return True
-                logger.debug(f"Bridge not ready (attempt {attempt + 1}), phase={state.phase}")
+                # Hard-fail: daemon signalled a terminal error on this session.
+                if phase == "error":
+                    logger.error(
+                        f"Session in error phase after {attempt + 1} attempts — aborting wait"
+                    )
+                    return False
+                logger.debug(f"Bridge not ready (attempt {attempt + 1}), phase={phase!r}")
                 time.sleep(retry_interval)
                 continue
             except grpc.RpcError as e:

@@ -126,6 +126,22 @@ _USE_C = torch.tensor([n in TYPES_USE_CELL for n in ACTION_TYPES])
 _USE_I = torch.tensor([n in TYPES_USE_ITEM for n in ACTION_TYPES])
 _USE_B = torch.tensor([n in TYPES_USE_BUILDING for n in ACTION_TYPES])
 
+_USE_CACHE: dict[torch.device, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+
+def _tables_for(device: torch.device | str | None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    dev = torch.device("cpu" if device is None else device)
+    tables = _USE_CACHE.get(dev)
+    if tables is None:
+        tables = (
+            _USE_U.to(dev),
+            _USE_C.to(dev),
+            _USE_I.to(dev),
+            _USE_B.to(dev),
+        )
+        _USE_CACHE[dev] = tables
+    return tables
+
 # fp16 max ≈ 65504. masked_fill(-1e9) bajo AMP crashea (Half overflow).
 _ILLEGAL_FP16 = -1.0e4
 _ILLEGAL_FP32 = -1.0e9
@@ -147,9 +163,8 @@ def _heads_used(t_idx: torch.Tensor, device=None) -> tuple:
     dev = t.device if device is None else device
     if t.device != dev:
         t = t.to(dev, non_blocking=True)
-    return (_USE_U.to(dev, non_blocking=True)[t],
-            _USE_C.to(dev, non_blocking=True)[t],
-            _USE_I.to(dev, non_blocking=True)[t])
+    u_tab, c_tab, i_tab, _ = _tables_for(dev)
+    return (u_tab[t], c_tab[t], i_tab[t])
 
 
 def _align_building_valid(building_valid, batch_size, device):
@@ -704,7 +719,10 @@ class AlphaLiteNet(nn.Module):
         """Logits [B, MAX_BUILDINGS] for the dedicated building head."""
         B = hidden.size(0)
         if building_feats is None:
-            return hidden.new_full((B, MAX_BUILDINGS), -1e9)
+            fill = (_ILLEGAL_FP16
+                    if hidden.dtype in (torch.float16, torch.bfloat16)
+                    else _ILLEGAL_FP32)
+            return hidden.new_full((B, MAX_BUILDINGS), fill)
         feats = building_feats
         if feats.dim() == 2:
             feats = feats.unsqueeze(0)
@@ -743,11 +761,10 @@ class AlphaLiteNet(nn.Module):
         return self._categorical(logits)
 
 
-    def _unit_cond_map(self, tokens, unit_valid, unit_slot, chosen_type, hw,
-                       unit_own_mask=None):
-        """Broadcast del slot elegido, o del pool propio si el tipo no usa unidad."""
+    def _unit_cond_vector(self, tokens, unit_valid, unit_slot, chosen_type,
+                          unit_own_mask=None):
+        """Vector condicional proyectado [B, UNIT_COND_DIM] según el slot elegido o pool propio."""
         B, U, _ = tokens.shape
-        H, W = int(hw[0]), int(hw[1])
         slot = unit_slot.clamp(0, max(U - 1, 0))
         chosen = tokens[torch.arange(B, device=tokens.device), slot]
         pool_m = unit_own_mask if unit_own_mask is not None else unit_valid
@@ -755,7 +772,14 @@ class AlphaLiteNet(nn.Module):
         pooled = (tokens * valid_f).sum(1) / valid_f.sum(1).clamp(min=1.0)
         use_u = _heads_used(chosen_type, tokens.device)[0]
         cond = torch.where(use_u.unsqueeze(-1), chosen, pooled)
-        emb = F.relu(self.unit_cond_proj(cond))
+        return F.relu(self.unit_cond_proj(cond))
+
+    def _unit_cond_map(self, tokens, unit_valid, unit_slot, chosen_type, hw,
+                       unit_own_mask=None):
+        """Broadcast del slot elegido, o del pool propio si el tipo no usa unidad."""
+        H, W = int(hw[0]), int(hw[1])
+        emb = self._unit_cond_vector(
+            tokens, unit_valid, unit_slot, chosen_type, unit_own_mask=unit_own_mask)
         return emb[:, :, None, None].expand(-1, -1, H, W)
 
     def _logits_cell(self, fmap, chosen_type, cell_mask, hidden,
@@ -773,18 +797,10 @@ class AlphaLiteNet(nn.Module):
         emb = self.type_embedding(chosen_type)
         emb_map = emb[:, :, None, None].expand(-1, -1, H, W)
         hd = F.relu(self.hidden_proj(hidden))[:, :, None, None].expand(-1, -1, H, W)
-        unit_map = self._unit_cond_map(
-            tokens, unit_valid, unit_slot, chosen_type, (H, W),
+        unit_cond = self._unit_cond_vector(
+            tokens, unit_valid, unit_slot, chosen_type,
             unit_own_mask=unit_own_mask)
-        # unit_cond vector (pre-broadcast) for QSA query
-        slot = unit_slot.clamp(0, max(tokens.size(1) - 1, 0))
-        chosen = tokens[torch.arange(b, device=tokens.device), slot]
-        pool_m = unit_own_mask if unit_own_mask is not None else unit_valid
-        valid_f = pool_m.float().unsqueeze(-1)
-        pooled = (tokens * valid_f).sum(1) / valid_f.sum(1).clamp(min=1.0)
-        use_u = _heads_used(chosen_type, tokens.device)[0]
-        unit_cond = torch.where(use_u.unsqueeze(-1), chosen, pooled)
-        unit_cond = F.relu(self.unit_cond_proj(unit_cond))
+        unit_map = unit_cond[:, :, None, None].expand(-1, -1, H, W)
 
         logits_map = self.cell_head(
             torch.cat([fmap, scatter, emb_map, hd, unit_map], dim=1)).squeeze(1)

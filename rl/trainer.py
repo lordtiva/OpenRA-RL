@@ -15,6 +15,7 @@ Diseño (lecciones alto-truco/Imperium aplicadas):
 """
 
 import math
+import os
 import time
 
 import numpy as np
@@ -455,7 +456,10 @@ def save_checkpoint(path: str, net, opt, iteration: int, extra: dict | None = No
             "iteration": iteration, "time": time.time()}
     if extra:
         ckpt.update(extra)
-    torch.save(ckpt, path)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp_path = f"{path}.tmp"
+    torch.save(ckpt, tmp_path)
+    os.replace(tmp_path, path)
 
 
 def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False,

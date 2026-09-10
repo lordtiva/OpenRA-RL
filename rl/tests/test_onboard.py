@@ -8,6 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from rl.onboard import (
+    apply_earned_promotions,
     build_train_argv,
     drought_blocked_until_min_iters,
     drought_since_iter,
@@ -414,6 +415,107 @@ check("rewind C best.json iter 130",
 check("snapshot_phase_best copia",
       snapshot_phase_best(td2, "B") is not None
       and (td2 / "best_B.pt").exists())
+
+# Rewind to sft_iters with A wr20 already >= threshold → land in B
+td3 = Path(tempfile.mkdtemp())
+(td3 / "iter0020.pt").write_bytes(b"SFT20W")
+(td3 / "latest.pt").write_bytes(b"LATE")
+(td3 / "best.pt").write_bytes(b"BEST")
+(td3 / "best.json").write_text(json.dumps({"iter": 40}), encoding="utf-8")
+# 5 iters x 4 games = 20 outcomes, 8 wins → wr20=0.40 >= 0.25
+a_rows = []
+for i in range(1, 21):
+    # pad early iters with losses so last-20 window is controlled
+    if i < 16:
+        outs = ["lose", "lose", "lose", "lose"]
+    else:
+        outs = ["win", "win", "lose", "incomplete"]  # 2/4
+    a_rows.append(
+        json.dumps({"iter": i, "bot_type": "beginner", "onboard_phase": "A",
+                    "outcomes": outs}))
+# last 20 games = iters 16..20 = 5*4: each 2 wins → 10/20 = 0.50
+(td3 / "metrics.jsonl").write_text(
+    "\n".join(a_rows) + "\n"
+    + json.dumps({"iter": 40, "onboard_phase": "B", "bot_type": "beginner",
+                  "outcomes": ["lose"]}) + "\n",
+    encoding="utf-8")
+(td3 / "economy_race.jsonl").write_text(
+    '{"iter": 20}\n{"iter": 40}\n', encoding="utf-8")
+cfg_a2b = new_curriculum()
+cfg_a2b["phase"] = "B"
+cfg_a2b["a_launched"] = True
+cfg_a2b["phase_started_iter"] = 20
+cfg_a2b["sft_iters"] = 20
+cfg_a2b["a_promote_wr20"] = 0.25
+out_a2b, inf_a2b = rewind_onboard(td3, 20, cfg=cfg_a2b)
+check("rewind-20 con wr20>=a_promote landa en B", out_a2b["phase"] == "B")
+check("rewind-20 earned [B]", inf_a2b.get("earned_promotions") == ["B"])
+check("rewind-20 phase_started = keep",
+      int(out_a2b["phase_started_iter"]) == 20)
+check("rewind-20 trunca B posterior",
+      '"iter": 40' not in (td3 / "metrics.jsonl").read_text(encoding="utf-8"))
+
+# Same metrics, empty wr → stays A (no invent wins)
+td3b = Path(tempfile.mkdtemp())
+(td3b / "iter0020.pt").write_bytes(b"SFT20")
+(td3b / "latest.pt").write_bytes(b"L")
+(td3b / "best.pt").write_bytes(b"B")
+(td3b / "best.json").write_text(json.dumps({"iter": 20}), encoding="utf-8")
+empty_a = "\n".join(
+    json.dumps({"iter": i, "bot_type": "beginner", "onboard_phase": "A",
+                "outcomes": []}) for i in range(1, 21)) + "\n"
+(td3b / "metrics.jsonl").write_text(empty_a, encoding="utf-8")
+cfg_stay = new_curriculum()
+cfg_stay["phase"] = "B"
+cfg_stay["a_launched"] = True
+out_stay, inf_stay = rewind_onboard(td3b, 20, cfg=cfg_stay)
+check("rewind-20 sin outcomes sigue A", out_stay["phase"] == "A")
+check("rewind-20 sin outcomes no earned",
+      inf_stay.get("earned_promotions") == [])
+
+# B→C: kept B history already has streak+wr20+min_iters → promote to C
+# (also covers resume-style apply_earned_promotions)
+b_lines = []
+for i in range(21, 51):  # 30 B iters > min_iters 20
+    b_lines.append(json.dumps({
+        "iter": i, "bot_type": "beginner", "onboard_phase": "B",
+        "outcomes": ["win", "win", "win", "incomplete"],  # wr high
+    }))
+rows_b = [json.loads(s) for s in b_lines]
+cfg_b2c = new_curriculum()
+cfg_b2c["phase"] = "B"
+cfg_b2c["phase_started_iter"] = 50  # pinned like post-rewind; history still counts
+cfg_b2c["promote_wr20"] = 0.50
+cfg_b2c["streak"] = 10
+cfg_b2c["min_iters"] = 20
+earned_b2c = apply_earned_promotions(cfg_b2c, rows_b, last_iter=50)
+check("apply_earned B->C con streak historico", earned_b2c == ["C"])
+check("apply_earned deja phase C", cfg_b2c["phase"] == "C")
+
+# Rewind C→B when B streak already met on kept rows → re-promote to C
+td4 = Path(tempfile.mkdtemp())
+(td4 / "iter0050.pt").write_bytes(b"B50")
+(td4 / "latest.pt").write_bytes(b"CLATE")
+(td4 / "best.pt").write_bytes(b"CBEST")
+(td4 / "best.json").write_text(json.dumps({"iter": 60}), encoding="utf-8")
+(td4 / "metrics.jsonl").write_text(
+    "\n".join(b_lines) + "\n"
+    + json.dumps({"iter": 60, "onboard_phase": "C", "bot_type": "easy",
+                  "outcomes": ["lose", "lose", "lose", "lose"]}) + "\n",
+    encoding="utf-8")
+(td4 / "economy_race.jsonl").write_text(
+    '{"iter": 50}\n{"iter": 60}\n', encoding="utf-8")
+cfg_c2c = new_curriculum()
+cfg_c2c["phase"] = "C"
+cfg_c2c["a_launched"] = True
+cfg_c2c["phase_started_iter"] = 51
+cfg_c2c["b_bc_start_iter"] = 21
+cfg_c2c["promote_wr20"] = 0.50
+cfg_c2c["streak"] = 10
+cfg_c2c["min_iters"] = 20
+out_c2c, inf_c2c = rewind_onboard(td4, 50, cfg=cfg_c2c)
+check("rewind C con B-streak met landa en C", out_c2c["phase"] == "C")
+check("rewind C earned includes C", "C" in (inf_c2c.get("earned_promotions") or []))
 
 
 print("=== collapse A vs B ===")

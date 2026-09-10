@@ -151,9 +151,9 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
         t_macro = int(getattr(args, "bc_macro_ticks", 0) or 0) or args.macro_ticks
         t_steps = int(getattr(args, "bc_max_steps", 0) or 0) or args.max_steps
         ep_kwargs = dict(t_kwargs)
-        pool = mapcat.parse_pool_arg(getattr(args, "map_pool", None))
-        if pool:
-            ep_kwargs.update(mapcat.reset_payload_for(mapcat.sample_pool(pool)))
+        map_pool = mapcat.parse_pool_arg(getattr(args, "map_pool", None))
+        if map_pool:
+            ep_kwargs.update(mapcat.reset_payload_for(mapcat.sample_pool(map_pool)))
         try:
             traj, outcome = await collect_one_episode(
                 env, net, vocab, device,
@@ -756,7 +756,7 @@ async def amain(args):
                 saved_temp = float(args.temperature)
                 args.episodes = eval_n
                 # Phase A / bc_only: greedy eval (temp=1.0 samples junk buildings).
-                args.temperature = 1.0
+                args.temperature = 0.0
                 try:
                     results = await launch_collection(None)
                     samples, outcomes = process_results(
@@ -901,8 +901,6 @@ async def amain(args):
                         bc_samples, lmb_bc, epochs=bc_epochs,
                         batch_size=args.batch_size)
                     st["lambda_bc"] = round(lmb_bc, 4)
-                if device == "cuda":
-                    torch.cuda.empty_cache()
                 return st
 
             stats = await asyncio.to_thread(_imitation_only)
@@ -929,8 +927,6 @@ async def amain(args):
                         sil_batch, lmb_sil, epochs=1,
                         batch_size=args.batch_size)
                     st["sil_n"] = len(sil_batch)
-                if device == "cuda":
-                    torch.cuda.empty_cache()
                 return st
 
             stats = await asyncio.to_thread(_ppo_and_imitation)
@@ -1167,6 +1163,7 @@ async def amain(args):
 
     if pending is not None:
         pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
     await asyncio.gather(*(env.close() for env in pool),
                          return_exceptions=True)
     print(f"Listo. {total} episodios, winrate {wins}/{total}, "

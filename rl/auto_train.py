@@ -418,20 +418,53 @@ def _docker_logs_recent(files, service, n: int = 300) -> str:
     except Exception:
         return ""
 
-def docker_dead_marker_count() -> int:
-    """Cuántos markers de daemon podrido hay en logs recientes.
 
-    Un solo 'Session failed' puede ser un retry de 20s; 3+ es cascada.
+def _docker_logs_since(files, service, since_s: int = 300) -> str:
+    """Logs del servicio compose de los últimos since_s segundos.
+
+    Usar --since en vez de --tail evita que markers de reinicios
+    anteriores contaminen el conteo actual. Docker acepta duraciones
+    como '300s'. Fallback a _docker_logs_recent si --since falla
+    (Docker Engine < 1.13 no lo soporta).
+    """
+    try:
+        return subprocess.check_output(
+            _compose(files) + ["logs", "--since", f"{since_s}s", service],
+            cwd=str(ROOT),
+            text=True, encoding="utf-8", errors="replace",
+            stderr=subprocess.STDOUT, timeout=20)
+    except Exception:
+        # Fallback: si --since no está disponible, usar tail conservador.
+        return _docker_logs_recent(files, service, 200)
+
+
+# Ventana temporal para detección de daemon podrido.
+# 300s = 5 minutos: suficiente para capturar una cascada de fallos
+# consecutivos (que tarda <2 min) sin arrastrar eventos de arranques previos.
+DOCKER_DEAD_WINDOW_S = 300
+
+
+def docker_dead_marker_count() -> int:
+    """Cuántos markers de daemon podrido hay en los últimos DOCKER_DEAD_WINDOW_S.
+
+    Usa --since para filtrar por tiempo en vez de --tail por líneas.
+    Esto evita dos clases de errores:
+    - Falsos positivos: markers viejos de reinicios anteriores que
+      quedan dentro de la ventana de N líneas.
+    - Falsos negativos: una ráfaga reciente de errores que queda
+      fuera de las últimas N líneas por logs de health-check.
+
+    Un solo 'Session failed' puede ser un retry normal de 20s; 3+ es cascada.
     """
     if not docker_available():
         return 0
     n = 0
     for url, files, service in daemons_up():
-        logs = _docker_logs_recent(files, service, 300)
+        logs = _docker_logs_since(files, service, DOCKER_DEAD_WINDOW_S)
         if not logs:
             continue
-        recent = logs.splitlines()[-150:]
-        n += sum(1 for line in recent if any(m in line for m in DOCKER_DEAD_MARKERS))
+        n += sum(1 for line in logs.splitlines()
+                 if any(m in line for m in DOCKER_DEAD_MARKERS))
     return n
 
 def docker_daemon_dead() -> bool:
@@ -598,6 +631,7 @@ def try_promote(last_iter: int) -> str | None:
         if arm_replay_for_phase("B"):
             log("  reusando teacher_wins/ (promote A->B no re-juega al teacher)")
     if nxt in ("C", "D", "E"):
+        _replay_tapes = False
         snap = ob.snapshot_phase_best(CKPT_DIR, old)
         if snap:
             log(f"onboard snapshot {snap.name} (best {old})")
@@ -607,11 +641,65 @@ def try_promote(last_iter: int) -> str | None:
         if tw.is_dir():
             shutil.rmtree(tw, ignore_errors=True)
             log(f"  wiped teacher_wins/ (schema {old} → expand {nxt})")
-        _replay_tapes = False
     if nxt in notes:
         ob.append_era_reset(METRICS, notes[nxt][0], notes[nxt][1])
     ob.save_curriculum(CURRICULUM, _onboard)
     return nxt
+
+
+def _history_promote_side_effects(earned: list[str], last_iter: int) -> None:
+    """Tapes / era_reset / snapshots after apply_earned_promotions.
+
+    try_promote already does this on a live promote; rewind/resume that
+    advances phase from kept metrics needs the same bookkeeping once.
+    """
+    global _onboard, _replay_tapes
+    if not earned or not _onboard:
+        return
+    notes = {
+        "B": ("onboard phase B beginner PPO+BC", "beginner"),
+        "C": ("onboard phase C easy expand BC", "easy"),
+        "D": ("onboard phase D medium expand BC", "medium"),
+        "E": ("onboard phase E hard expand BC", "hard"),
+        "done": ("onboard DONE wr20 vs hard", "hard"),
+    }
+    prev = {"B": "A", "C": "B", "D": "C", "E": "D", "done": "E"}
+    for nxt in earned:
+        log(f"onboard HISTORY-PROMOTE -> {nxt} @ iter {last_iter} "
+            f"(kept metrics)")
+        if nxt == "B":
+            if arm_replay_for_phase("B"):
+                log("  reusando teacher_wins/ (history A->B)")
+        if nxt in ("C", "D", "E"):
+            _replay_tapes = False
+            old = prev.get(nxt, "B")
+            snap = ob.snapshot_phase_best(CKPT_DIR, old)
+            if snap:
+                log(f"onboard snapshot {snap.name} (best {old})")
+            tw = CKPT_DIR / "teacher_wins"
+            if tw.is_dir():
+                shutil.rmtree(tw, ignore_errors=True)
+                log(f"  wiped teacher_wins/ (history promote -> {nxt})")
+        if nxt in notes:
+            ob.append_era_reset(METRICS, notes[nxt][0], notes[nxt][1])
+
+
+def _sync_earned_promotions_from_metrics(earned_from_rewind=None) -> None:
+    """After rewind/resume: land on phase already earned in metrics."""
+    global _onboard
+    if not _onboard or _collect_only:
+        return
+    last = last_iter_from_metrics()
+    if earned_from_rewind is not None:
+        earned = list(earned_from_rewind)
+    else:
+        rows = last_metrics_rows(800)
+        earned = ob.apply_earned_promotions(
+            _onboard, rows, last, games_per_iter=4)
+        if earned:
+            ob.save_curriculum(CURRICULUM, _onboard)
+    if earned:
+        _history_promote_side_effects(earned, last)
 
 
 def collect_only_train_extras(target: int | None = None) -> list[str]:
@@ -885,9 +973,14 @@ def _init_onboard(args) -> None:
             log(f"  latest <- {info['src']}  metrics_kept={info['metrics_kept']} "
                 f"race_kept={info['race_kept']}  "
                 f"b_bc_start_iter={_onboard.get('b_bc_start_iter')} "
-                f"lambda@{nxt}={lmb:.2f}")
+                f"lambda@{nxt}={lmb:.2f}  phase={_onboard.get('phase')}")
+            earned_rw = list(info.get("earned_promotions") or [])
+            if earned_rw:
+                log(f"  earned from kept metrics: {' -> '.join(earned_rw)}")
+            _sync_earned_promotions_from_metrics(earned_from_rewind=earned_rw)
         else:
             ob.save_curriculum(CURRICULUM, _onboard)
+            _sync_earned_promotions_from_metrics(earned_from_rewind=None)
         # --onboard-fresh-tapes also applies on resume (not only --scratch).
         tw = CKPT_DIR / "teacher_wins"
         if args.onboard_fresh_tapes and tw.is_dir():

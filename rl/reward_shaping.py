@@ -252,16 +252,19 @@ class ShapedReward:
                 n_new_types += 1
         r += self.w_new_type * n_new_types
 
-        n_harv = getattr(obs.economy, "harvester_count", 0)
+        # Minería base: solo para presets anteriores a v3.
+        # v3 y v4 delegan el ciclo económico completo a _v3_econ() (incluye w_refinery_early).
         r_mining = 0.0
-        if not self._refinery_paid and "proc" in {b.type for b in obs.buildings}:
-            self._refinery_paid = True
-            r_mining += self.w_refinery
-        nuevos_harv = min(n_harv, self.harvester_cap) - self._harvesters_paid
-        if nuevos_harv > 0:
-            r_mining += self.w_harvester * nuevos_harv
-            self._harvesters_paid += nuevos_harv
-        r += r_mining
+        if self.preset not in ("eradicate_v3", "eradicate_v4"):
+            n_harv = getattr(obs.economy, "harvester_count", 0)
+            if not self._refinery_paid and "proc" in {b.type for b in obs.buildings}:
+                self._refinery_paid = True
+                r_mining += self.w_refinery
+            nuevos_harv = min(n_harv, self.harvester_cap) - self._harvesters_paid
+            if nuevos_harv > 0:
+                r_mining += self.w_harvester * nuevos_harv
+                self._harvesters_paid += nuevos_harv
+            r += r_mining
 
         r_raze = self._raze_delta(obs, mil)
         r += r_raze
