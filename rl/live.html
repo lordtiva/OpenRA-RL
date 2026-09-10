@@ -32,6 +32,10 @@
   .btn.rec{background:#3a1515;border-color:var(--red);color:#ffb4b0}
   .btn.rec.on{background:var(--red);color:#fff;animation:pulse 1.2s infinite}
   .eid{font-size:11px;color:var(--muted);font-family:ui-monospace,Consolas,monospace}
+  .lobby{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:0 0 12px;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:8px}
+  .lobby label{font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:4px}
+  .lobby select{background:#0b0e14;color:var(--fg);border:1px solid var(--border);border-radius:6px;padding:6px 8px;font-size:13px}
+  .lobby .hint{font-size:11px;color:var(--muted)}
   .rec-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:var(--red);margin-right:6px;vertical-align:middle}
   #comp{position:fixed;left:-99999px;top:0;width:1000px;height:640px;opacity:0;pointer-events:none}
 </style>
@@ -46,9 +50,34 @@
   <span class="eid" id="eid-lbl"></span>
 </header>
 
+<div class="lobby" id="lobby-bar">
+  <label>Enemy
+    <select id="sel-enemy">
+      <option value="Random">Random</option>
+      <option value="RandomSoviet">RandomSoviet</option>
+      <option value="RandomAllies">RandomAllies</option>
+      <option value="russia">russia</option>
+      <option value="ukraine">ukraine</option>
+      <option value="england">england</option>
+      <option value="france">france</option>
+      <option value="germany">germany</option>
+    </select>
+  </label>
+  <label>Spawn (agent)
+    <select id="sel-spawn">
+      <option value="random">Random (SW/NE)</option>
+      <option value="sw">SW</option>
+      <option value="ne">NE</option>
+    </select>
+  </label>
+  <button class="btn" id="btn-lobby" type="button">Aplicar próxima partida</button>
+  <span class="hint" id="lobby-hint">CLI/--api: enemy + spawn; agent sigue Allies (Multi1)</span>
+</div>
+
 <div class="bar" id="kpis">
   <div class="kpi"><div class="l">Tick</div><div class="v" id="k-tick">—</div></div>
   <div class="kpi"><div class="l">Facción</div><div class="v" id="k-fac">—</div></div>
+  <div class="kpi"><div class="l">Spawn</div><div class="v" id="k-spawn">—</div></div>
   <div class="kpi"><div class="l">Cash</div><div class="v" id="k-cash">—</div></div>
   <div class="kpi"><div class="l">Ore / cap</div><div class="v" id="k-ore">—</div></div>
   <div class="kpi"><div class="l">Power</div><div class="v" id="k-power">—</div></div>
@@ -99,6 +128,7 @@
 
 <script>
 const API = '/api/state';
+const CFG = '/api/config';
 const canvas = document.getElementById('map');
 const ctx = canvas.getContext('2d');
 const comp = document.getElementById('comp');
@@ -328,6 +358,19 @@ function render(s){
   facEl.textContent = ene ? (fac + ' vs ' + ene) : fac;
   const soviet = /russia|ukraine|soviet/i.test(fac);
   facEl.style.color = soviet ? '#f85149' : (fac && fac !== '—' ? '#3fb950' : '');
+  const lob = s.lobby || {};
+  const side = lob.agent_side || lob.spawn || '';
+  const spEl = document.getElementById('k-spawn');
+  if(spEl){
+    const pending = s.lobby_pending;
+    spEl.textContent = pending && pending.spawn
+      ? (side + ' → ' + pending.spawn)
+      : (side || '—');
+  }
+  if(!window._lobbyDirty){
+    if(lob.enemy_faction) document.getElementById('sel-enemy').value = lob.enemy_faction;
+    if(lob.spawn) document.getElementById('sel-spawn').value = lob.spawn;
+  }
   document.getElementById('k-cash').textContent = fmt(s.cash);
   document.getElementById('k-ore').textContent = s.ore!=null ? `${fmt(s.ore)}/${fmt(s.cap)}` : '—';
   document.getElementById('k-power').textContent = s.power_provided!=null ? `${s.power_provided}/${s.power_drained}` : '—';
@@ -418,6 +461,32 @@ function drawMap(s){
   }
   ctx.strokeStyle = '#232b38'; ctx.lineWidth=2; ctx.strokeRect(0,0,size,size);
 }
+
+window._lobbyDirty = false;
+['sel-enemy','sel-spawn'].forEach(id=>{
+  const el = document.getElementById(id);
+  if(el) el.addEventListener('change', ()=>{ window._lobbyDirty = true; });
+});
+document.getElementById('btn-lobby').addEventListener('click', async ()=>{
+  const body = {
+    enemy_faction: document.getElementById('sel-enemy').value,
+    spawn: document.getElementById('sel-spawn').value,
+  };
+  const hint = document.getElementById('lobby-hint');
+  try{
+    const r = await fetch(CFG, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    const j = await r.json();
+    if(!r.ok || !j.ok) throw new Error(j.error || r.status);
+    hint.textContent = 'Queued next ep: enemy=' + body.enemy_faction + ' spawn=' + body.spawn;
+    window._lobbyDirty = false;
+  }catch(e){
+    hint.textContent = 'Config error: ' + e.message;
+  }
+});
 
 setInterval(poll, 400);
 poll();

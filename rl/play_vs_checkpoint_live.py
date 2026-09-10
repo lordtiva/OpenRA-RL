@@ -18,6 +18,10 @@ Uso (PowerShell, UN comando):
     # visor:
     http://localhost:8786/
 
+    # live-only lobby overrides (train defaults untouched):
+    python -m rl.play_vs_checkpoint_live --enemy-faction russia --spawn ne --episodes 1
+    python -m rl.play_vs_checkpoint_live --enemy-faction Random --spawn random
+
 Loop infinito (default --episodes 0) pausa --pause-sec entre partidas
 para que dé tiempo a mirar el canvas. --pause-sec 0 vuelve al turbo.
 
@@ -47,6 +51,16 @@ from rl.action_adapter import Vocab
 from rl.network import AlphaLiteNet
 from rl.trainer import load_checkpoint
 from rl.live_server import LiveBroadcaster
+from rl.live_lobby import (
+    ENEMY_FACTION_CHOICES,
+    PLAYER_FACTION_CHOICES,
+    SPAWN_CHOICES,
+    normalize_enemy_faction,
+    normalize_player_faction,
+    normalize_spawn,
+    patch_oramap_bytes,
+    resolve_episode_spawn,
+)
 from rl.obs_encoding import BEACON_BY_MAP, EnemyBeliefStore, decode_spatial
 from rl.rollout import _batch_of
 from rl.action_adapter import index_to_command_effective, filter_army_push_hysteresis
@@ -416,7 +430,20 @@ def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str,
 async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                            broadcaster: LiveBroadcaster, ckpt_iter: int = 0,
                            ep_index: int = 1):
+    lobby = broadcaster.take_lobby() if broadcaster is not None else {
+        "player_faction": getattr(args, "player_faction", "RandomAllies"),
+        "enemy_faction": getattr(args, "enemy_faction", "Random"),
+        "spawn": getattr(args, "spawn", "random"),
+    }
+    player_faction = normalize_player_faction(lobby.get("player_faction"))
+    enemy_faction = normalize_enemy_faction(lobby.get("enemy_faction"))
+    spawn_asked = normalize_spawn(lobby.get("spawn"))
+    import random as _random
+    rng = _random.Random((args.seed or 0) + int(ep_index) * 1009)
+    agent_side = resolve_episode_spawn(spawn_asked, rng=rng)
+
     reset_kwargs = {}
+    spawn_meta = {}
     if args.scenario:
         mapa = Path(f"rl/scenarios/fase2_{args.scenario.lower()}.oramap")
         if not mapa.exists():
@@ -425,7 +452,13 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                 mapa = alt
             else:
                 raise SystemExit(f"Escenario no encontrado: {mapa}")
-        reset_kwargs["map_data"] = base64.b64encode(mapa.read_bytes()).decode()
+        raw_map = mapa.read_bytes()
+        try:
+            raw_map, spawn_meta = patch_oramap_bytes(raw_map, agent_side)
+        except ValueError as e:
+            print(f"  [live] spawn pin skipped ({e}); using stock map", flush=True)
+            spawn_meta = {"agent_side": agent_side, "error": str(e)}
+        reset_kwargs["map_data"] = base64.b64encode(raw_map).decode()
         reset_kwargs["map_name"] = mapa.name
     # bot_type="" -> dummy (pasivo), ai_slot="" -> sin enemigo. No filtrar "".
     if args.bot_type is not None:
@@ -433,8 +466,32 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
     if hasattr(args, "ai_slot") and args.ai_slot is not None:
         reset_kwargs["ai_slot"] = args.ai_slot
     reset_kwargs["seed"] = args.seed
+    reset_kwargs["player_faction"] = player_faction
+    reset_kwargs["enemy_faction"] = enemy_faction
 
     beacon = BEACON_BY_MAP.get(reset_kwargs.get("map_name")) if reset_kwargs.get("map_name") else None
+    if spawn_meta.get("enemy_cell"):
+        beacon = tuple(spawn_meta["enemy_cell"])
+    print(
+        f"  lobby player={player_faction} enemy={enemy_faction} "
+        f"spawn_asked={spawn_asked} agent_side={agent_side} "
+        f"beacon={beacon}",
+        flush=True,
+    )
+    if broadcaster is not None:
+        broadcaster.update({
+            "lobby": {
+                "player_faction": player_faction,
+                "enemy_faction": enemy_faction,
+                "spawn": spawn_asked,
+                "agent_side": agent_side,
+            },
+            "spawn_meta": {
+                k: (list(v) if isinstance(v, tuple) else v)
+                for k, v in spawn_meta.items()
+                if k != "spawns"
+            },
+        })
 
     result = await env.reset(**reset_kwargs)
     obs = result.observation
@@ -789,10 +846,17 @@ async def amain(args):
     if args.greedy:
         args.temperature = 0.0
     print(f"Server: {args.url} | bot={args.bot_type} scenario={args.scenario} T={args.temperature} macro={args.macro_ticks}")
+    print(f"Lobby live: player={args.player_faction} enemy={args.enemy_faction} spawn={args.spawn}")
 
     bc = LiveBroadcaster(port=args.port)
+    bc.set_lobby_defaults(
+        player_faction=args.player_faction,
+        enemy_faction=args.enemy_faction,
+        spawn=args.spawn,
+    )
     bc.start()
     print(f"Abrí en el navegador: http://localhost:{args.port}/  (se actualiza solo)")
+    print("  UI: selectores enemy/spawn hacen POST /api/config (valen desde la próxima partida)")
 
     ws_timeout = max(60.0, args.max_steps * 3.0)
     env = OpenRAEnv(base_url=args.url, message_timeout_s=ws_timeout)
@@ -884,12 +948,30 @@ def main():
                     help="map QSA top-k blocks (0=off)")
     ap.add_argument("--qsa-block", type=int, default=8,
                     help="map QSA block size")
+    ap.add_argument(
+        "--player-faction", default="RandomAllies",
+        help="facción del RL agent (Allies only): RandomAllies|england|france|germany",
+    )
+    ap.add_argument(
+        "--enemy-faction", default="Random",
+        help="facción del bot: Random|RandomAllies|RandomSoviet|england|france|germany|russia|ukraine",
+    )
+    ap.add_argument(
+        "--spawn", default="random",
+        help="spawn del agent: random|sw|ne (pin via LockSpawn en el .oramap; agent=Multi1)",
+    )
     ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")
     ap.add_argument("--log-file", default=None,
                     help="jsonl por partida (default: <ckpt-dir>/live_games.jsonl). Vacío = off.")
     ap.add_argument("--tape-file", default=None,
                     help="jsonl del tape (default: <ckpt-dir>/live_tape.jsonl). Vacío = off.")
     args = ap.parse_args()
+    try:
+        args.player_faction = normalize_player_faction(args.player_faction)
+        args.enemy_faction = normalize_enemy_faction(args.enemy_faction)
+        args.spawn = normalize_spawn(args.spawn)
+    except ValueError as e:
+        raise SystemExit(f"lobby flag error: {e}")
     # Defaults next to the ckpt (v2: rl/ckpts_v2; v1.1: pass --ckpt rl/ckpts/...)
     if args.log_file is None:
         args.log_file = (Path(args.ckpt).parent / "live_games.jsonl").as_posix()

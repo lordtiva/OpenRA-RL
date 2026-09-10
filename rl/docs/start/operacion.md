@@ -121,7 +121,10 @@ Politica vs bot / vs ckpt, con WebM opcional:
 * Device CUDA si hay. Ckpts **pre arch v2** cargan tronco con `strict=False` + soft-adapt XF/fusion/spatial/feats/type (`adapt_v2_state_dict` + capa2c/scalar). Adam fresco si hay mismatch. **A/B:** train v2 en `rl/ckpts_v2/` (no mezclar con v1.1 en `rl/ckpts/`).
 * Grabaciones: `rl/ckpts/live_recordings/{episode_id}.webm` cuando el pipeline de MediaRecorder esta activo.
 
-Script helper (si existe en el repo): `rl/watch_live.ps1` — alinear flags a `TRAIN_ARGS` (`--no-war-nudge`, etc.).
+Script helper (si existe en el repo): 
+l/watch_live.ps1 - alinear flags a TRAIN_ARGS (--no-war-nudge, etc.).
+
+Live lobby overrides (NO cambian train): --enemy-faction russia|Random|..., --spawn sw|ne|random, --player-faction RandomAllies|england|france|germany. Spawn pinnea Multi1 via LockSpawn en el .oramap (SW/NE de mpspawn). El visor (live.html) tiene selectores que hacen POST /api/config para la proxima partida.
 
 ### 6) Skirmish humano vs PPO (cliente Windows)
 

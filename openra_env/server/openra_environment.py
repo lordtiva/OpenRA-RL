@@ -3087,6 +3087,15 @@ class OpenRAEnvironment(MCPEnvironment):
         if "bot_type" in kwargs:
             self._config.bot_type = kwargs["bot_type"]
 
+        # Live/viewer (and any reset caller): opt-in lobby overrides.
+        # Train defaults stay RandomAllies / Random / Multi0 when omitted.
+        if "ai_slot" in kwargs and kwargs["ai_slot"] is not None:
+            self._config.ai_slot = kwargs["ai_slot"]
+        if "player_faction" in kwargs and kwargs["player_faction"] is not None:
+            self._config.player_faction = kwargs["player_faction"]
+        if "enemy_faction" in kwargs and kwargs["enemy_faction"] is not None:
+            self._config.enemy_faction = kwargs["enemy_faction"]
+
         # Update map if provided (for scenario-based training)
         map_name = kwargs.get("map_name")
         map_data = kwargs.get("map_data")  # base64-encoded .oramap bytes
