@@ -34,6 +34,7 @@ from rl.reward_shaping import PRESETS as SHAPER_PRESETS
 from rl.network import AlphaLiteNet
 from rl.rollout import (add_advantages, center_advantage_by_episode,
                         smdp_k_ref, collect_one_episode, flatten_samples)
+from rl.collect_heartbeat import write_heartbeat
 from rl.metrics_lock import metrics_lock
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
 from rl.best_ckpt import batch_is_dead, batch_is_wipe, maybe_update_best
@@ -168,7 +169,12 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
                 teacher=ScriptedTeacher(
                     rush_attack_move=int(getattr(args, "bc_rush", 0) or 0) or None,
                     mode=_teacher_mode(args)),
-                heuristic_p=float(getattr(args, "_heuristic_p_cur", 1.0)))
+                heuristic_p=float(getattr(args, "_heuristic_p_cur", 1.0)),
+                heartbeat_path=os.path.join(
+                    getattr(args, "ckpt_dir", "") or "",
+                    "collect_heartbeat.json") if getattr(args, "ckpt_dir", None) else None,
+                heartbeat_iter=int(getattr(args, "_heartbeat_iter", 0) or 0) or None,
+                heartbeat_worker=i)
         except Exception as e:
             print(f"  [bc] teacher game {i + 1}/{n} fail: {e}", flush=True)
             return None
@@ -219,6 +225,8 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
 async def amain(args):
     device = pick_device(args.device)
     os.makedirs(args.ckpt_dir, exist_ok=True)
+    hb_path = os.path.join(args.ckpt_dir, "collect_heartbeat.json")
+    write_heartbeat(hb_path, phase="boot", force=True, iter=0)
 
     # Rotar métricas al arrancar FRESCO: evita mezclar regímenes en el
     # dashboard (ya nos pasó — un trainer viejo vivo también puede seguir
@@ -504,7 +512,10 @@ async def amain(args):
                                 war_nudge=not args.no_war_nudge,
                                 opponent_net=opp_net,
                                 heuristic_p=float(
-                                    getattr(args, "_heuristic_p_cur", 1.0)))
+                                    getattr(args, "_heuristic_p_cur", 1.0)),
+                                heartbeat_path=hb_path,
+                                heartbeat_iter=it_now,
+                                heartbeat_worker=idx)
                             break
                         except Exception as e:
                             msg = str(e)
@@ -745,6 +756,8 @@ async def amain(args):
 
         args._heuristic_p_cur = compute_heuristic_p(args, it)
         collect_it[0] = it
+        args._heartbeat_iter = it
+        write_heartbeat(hb_path, phase="collect", force=True, iter=int(it))
         t0 = time.time()
         if bc_only:
             infer_net.load_state_dict(net.state_dict())
@@ -892,6 +905,9 @@ async def amain(args):
                 except OSError as e:
                     print(f"[sil] save elite fail: {e}", flush=True)
         if bc_only:
+            write_heartbeat(
+                hb_path, phase="update", force=True,
+                iter=int(it), tick=None, step=None)
             def _imitation_only():
                 st = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
                       "clip_frac": 0.0, "kl": 0.0, "grad_norm": 0.0,
@@ -910,6 +926,9 @@ async def amain(args):
             sil_batch = (elite.sample_recent(512)
                          if (lmb_sil > 0.0 and elite is not None) else [])
 
+            write_heartbeat(
+                hb_path, phase="update", force=True,
+                iter=int(it), tick=None, step=None)
             def _ppo_and_imitation():
                 if skipped_update:
                     st = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,

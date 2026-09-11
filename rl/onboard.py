@@ -319,9 +319,9 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--bc-win-prefer-ticks", str(int(
                 cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
             # 5e-5 still clip 0.55–0.96 in B (target ~0.20–0.30).
-            "--qsa-topk", "0",
-            "--xf-topk", "0",
-            "--lr", "2.0e-5",
+            #"--qsa-topk", "0",
+            #"--xf-topk", "0",
+            "--lr", "1.0e-5",
             "--adv-mode", "global",
             "--sil", "--lambda-sil", "0.5",
             "--no-amp",

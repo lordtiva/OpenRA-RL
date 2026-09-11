@@ -21,6 +21,7 @@ import numpy as np
 import torch
 
 from openra_env.client import OpenRAEnv
+from rl.collect_heartbeat import write_heartbeat
 from rl.peer_obs import peer_obs_from_metadata
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.action_adapter import (ActionIndex, Vocab, apply_passability,
@@ -172,7 +173,10 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                               teacher=None,
                               opponent_net=None,
                               heuristic_p: float = 1.0,
-                              smdp_k_ref_ticks: float | None = None):
+                              smdp_k_ref_ticks: float | None = None,
+                              heartbeat_path: str | None = None,
+                              heartbeat_iter: int | None = None,
+                              heartbeat_worker: int | None = None):
     """Juega UNA partida completa; devuelve (trayectoria, resumen).
 
     max_steps limita los env.step (cada uno avanza 2 ticks del juego):
@@ -201,6 +205,21 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     traj = []
     episode_reward = 0.0
     t0 = time.time()
+    def _hb(force: bool = False, step_i: int | None = None) -> None:
+        if not heartbeat_path:
+            return
+        sess = getattr(env, "base_url", None) or getattr(env, "_ws_url", None) or ""
+        write_heartbeat(
+            heartbeat_path,
+            tick=int(getattr(obs, "tick", 0) or 0),
+            step=int(step_i if step_i is not None else 0),
+            phase="collect",
+            session=str(sess) if sess else None,
+            iter=heartbeat_iter,
+            worker=heartbeat_worker,
+            force=force,
+        )
+    _hb(force=True, step_i=0)
     pending_cmd = None   # comando re-aplicado durante el frame-skip
     pending_sample = None
     pending_bc_extra = []  # labels BC extra (eco+push) del mismo tick teacher
@@ -243,6 +262,9 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
         # Obs del shell map (otro MapSize) no se graban ni se encodean:
         # NO_OP hasta lockear HxW del mapa de juego.
         can_decide = use_macro or step % k_skip == 0
+        # Phase 1.5 heartbeat: every decision (throttled to 15s in writer).
+        if can_decide and heartbeat_path:
+            _hb(step_i=step)
 
         if can_decide:
             cur_dims = (int(obs.map_info.height or 1), int(obs.map_info.width or 1))

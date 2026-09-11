@@ -15,6 +15,7 @@ services:
       - DISPLAY=:99
       - LIBGL_ALWAYS_SOFTWARE=1
       - MESA_GL_VERSION_OVERRIDE=3.3
+      - OPENRA_RL_FAST_ADVANCE_DEADLINE_S=90
     deploy:
       resources:
         limits:

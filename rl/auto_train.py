@@ -18,7 +18,10 @@ auto_train.py — 1 comando que lanza rl.train y lo vigila (sin 2 ventanas).
 
 Cuelgues — DOS orígenes distintos (no confundirlos):
   A) Cuelgue del PROCESO PYTHON (train): el .py se traba o muere. Lo cubre
-     el watchdog clásico (GPU baja + metrics sin avanzar) -> matar/relanzar.
+     el watchdog clásico (GPU baja + metrics/heartbeat sin avanzar).
+     Phase 1.5: markers=0 + idle + GPU~0 tambien recrea Docker
+     (daemon silencioso) con backoff/max-per-hora; heartbeat
+     (collect_heartbeat.json) evita matar collects sanos largos.
   B) Cuelgue del DAEMON DOCKER (juego): el contenedor sigue "healthy"
      (/health responde 200) pero el daemon .NET no puede crear sesiones de
      juego -> los logs del contenedor escupen "Session failed to become
@@ -26,7 +29,7 @@ Cuelgues — DOS orígenes distintos (no confundirlos):
      el train NO arregla nada: el train nuevo se reconecta al mismo daemon
      podrido y vuelve a colgar. La única cura es RECREAR el contenedor
      (docker compose down/up). Este script ahora detecta (B) por los markers
-     del log del contenedor y recrea el servicio 'openra-rl' solo.
+     del log del contenedor (cascada >=3) y recrea los daemons up. markers=0 hang usa el mismo recreate path (Phase 1.5).
 
 Uso:  .venv/Scripts/python.exe rl/auto_train.py
       .venv/Scripts/python.exe rl/auto_train.py --scratch
@@ -66,6 +69,12 @@ from rl.best_ckpt import (
 )
 from rl import onboard as ob
 from rl.metrics_lock import metrics_lock
+from rl.collect_heartbeat import (
+    HEARTBEAT_NAME,
+    heartbeat_advanced,
+    heartbeat_age_s,
+    read_heartbeat,
+)
 # Default v2 A/B root. Override with --ckpt-dir (relativo al ROOT del repo).
 CKPT_DIR_REL = "rl/ckpts_v2"
 CKPT_DIR = ROOT / CKPT_DIR_REL
@@ -132,6 +141,14 @@ CHECK_EVERY_S = 15
 # Heartbeat de idle: no spamear cada check; solo cada N s o hitos.
 IDLE_LOG_EVERY_S = 300
 GPU_LOW_THRESHOLD = 15  # GPU >= esto = collect/update en vuelo, no es cuelgue
+# Phase 1.5: umbral mas corto cuando GPU~0 durante un tramo largo.
+# No aplica si GPU esta busy (PPO update sano).
+GPU_IDLE_HANG_S = 600
+# Segundos acumulados de GPU baja antes de apretar el umbral.
+GPU_LOW_STREAK_FOR_TIGHT_S = 180
+# Rate-limit de force-recreate (evita loop infinito train<->docker).
+RECREATE_MAX_PER_HOUR = 4
+RECREATE_COOLDOWN_S = 90
 
 # Cuelgue Docker: cada URL de GAME_URLS tiene su servicio compose.
 # Recreate toca TODOS los daemons que estaban up, no solo openra-rl.
@@ -229,6 +246,66 @@ def hang_threshold() -> int:
     if _onboard and _onboard.get("phase") in ("A", "B", "C", "D", "E"):
         return ONBOARD_A_THRESHOLD_S
     return THRESHOLD_S
+
+
+# Phase 1.5: recreate rate-limit state (module-level for tests).
+_recreate_history: list[float] = []
+
+
+def reset_recreate_history() -> None:
+    """Test helper — clear recreate timestamps."""
+    global _recreate_history
+    _recreate_history = []
+
+
+def effective_hang_threshold(gpu: int | None, gpu_low_streak: int) -> int:
+    """Base hang threshold, tightened when GPU stays ~0 for a stretch.
+
+    Mid-update (GPU busy) is handled separately by the watchdog (never kill
+    while util >= GPU_LOW_THRESHOLD). Collect with GPU~0 for a long stretch
+    uses GPU_IDLE_HANG_S so we do not wait a full onboard 1200s.
+    """
+    base = hang_threshold()
+    low_for = int(gpu_low_streak) * CHECK_EVERY_S
+    if (gpu is not None
+            and gpu < GPU_LOW_THRESHOLD
+            and low_for >= GPU_LOW_STREAK_FOR_TIGHT_S):
+        return min(base, GPU_IDLE_HANG_S)
+    return base
+
+
+def recreate_allowed(now: float | None = None) -> tuple[bool, str]:
+    """Backoff / max-per-hour gate for docker force-recreate."""
+    global _recreate_history
+    now = time.time() if now is None else float(now)
+    _recreate_history = [t for t in _recreate_history if now - t < 3600.0]
+    if _recreate_history and (now - _recreate_history[-1]) < RECREATE_COOLDOWN_S:
+        left = RECREATE_COOLDOWN_S - (now - _recreate_history[-1])
+        return False, f"cooldown {left:.0f}s"
+    if len(_recreate_history) >= RECREATE_MAX_PER_HOUR:
+        return False, f"max {RECREATE_MAX_PER_HOUR}/h reached"
+    return True, "ok"
+
+
+def note_recreate(now: float | None = None) -> None:
+    global _recreate_history
+    _recreate_history.append(time.time() if now is None else float(now))
+
+
+def should_recreate_on_python_hang(
+    *, markers: int, gpu: int | None, idle: float, thr: int,
+) -> bool:
+    """True when markers=0 idle hang should still recreate Docker (Phase 1.5).
+
+    Classic path required markers>=1. Silent daemon hangs leave markers=0
+    and GPU~0; killing only Python re-hangs against the same containers.
+    """
+    if idle < thr:
+        return False
+    if gpu is not None and gpu >= GPU_LOW_THRESHOLD:
+        return False
+    # markers>=1 already took recreate path; markers=0 is the new case.
+    return int(markers) == 0
 
 
 def collapse_active(phase, collapse_flag: bool) -> bool:
@@ -563,10 +640,22 @@ def recreate_docker() -> bool:
     log(f"ADVERTENCIA: /health incompleto tras recreate, live={live_game_urls()}")
     return True
 
-def recover_from_docker_hang(proc) -> subprocess.Popen:
-    """Mata el train PRIMERO (evita 1012 mid-recreate), recrea daemons, relanza."""
-    log("matando train ANTES de recrear contenedores")
+def recover_from_docker_hang(proc, *, reason: str = "") -> subprocess.Popen:
+    """Mata el train PRIMERO (evita 1012 mid-recreate), recrea daemons, relanza.
+
+    Phase 1.5: rate-limited. If recreate is blocked by backoff/max-per-hour,
+    falls back to kill+relaunch train only (same as old Python-hang path).
+    """
+    ok, why = recreate_allowed()
+    tag = f" ({reason})" if reason else ""
+    if not ok:
+        log(f"recreate Docker BLOQUEADO ({why}){tag} — solo mato/relanzo train")
+        kill_train(proc)
+        time.sleep(5)
+        return launch_train()
+    log(f"matando train ANTES de recrear contenedores{tag}")
     kill_train(proc)
+    note_recreate()
     recreate_docker()
     time.sleep(2)
     return launch_train()
@@ -1078,6 +1167,8 @@ def main():
     last_idle_milestone = -1
     gpu_low_streak = 0
     last_restore_iter = 0
+    last_hb: dict | None = read_heartbeat(CKPT_DIR)
+    last_hb_log = 0.0
     # arranque inicial
     proc = launch_train()
     time.sleep(CHECK_EVERY_S)
@@ -1246,19 +1337,41 @@ def main():
                     last_progress = time.time()
                     gpu_low_streak = 0
                 continue
+            # Phase 1.5: heartbeat advance = collect still moving even if
+            # metrics.jsonl is idle mid-iter. Do this BEFORE idle calc.
+            hb = read_heartbeat(CKPT_DIR)
+            if heartbeat_advanced(last_hb, hb):
+                age = heartbeat_age_s(hb) or 0.0
+                phase = (hb or {}).get("phase", "?")
+                tick = (hb or {}).get("tick")
+                now_hb = time.time()
+                # Heartbeat alone is progress — do NOT reset idle-log
+                # timers (that spammed idle 0s every ~15s).
+                if now_hb - last_hb_log >= IDLE_LOG_EVERY_S:
+                    last_hb_log = now_hb
+                    log(f"heartbeat — phase={phase} tick={tick} "
+                        f"age={age:.0f}s file={HEARTBEAT_NAME}")
+                last_hb = hb
+                last_progress = time.time()
+            elif hb is not None:
+                last_hb = hb
+
             idle = time.time() - last_progress
             # GPU baja en collect es NORMAL. Un marker suelto también
             # (retry de 20s). Cascada de 3+ markers = daemon podrido:
             # recrear YA, no esperar 300s con GPU al 1%.
             score = docker_dead_marker_count()
             if score >= 3:
-                log(f"daemon podrido — {score} markers, recreando YA (idle {idle:.0f}s){gpu_tag}")
-                proc = recover_from_docker_hang(proc)
+                log(f"daemon podrido — {score} markers, recreando YA "
+                    f"(idle {idle:.0f}s){gpu_tag}")
+                proc = recover_from_docker_hang(
+                    proc, reason=f"markers>={score}")
                 last_mtime = metrics_mtime()
                 last_progress = time.time()
+                last_hb = read_heartbeat(CKPT_DIR)
                 gpu_low_streak = 0
                 continue
-            thr = hang_threshold()
+            thr = effective_hang_threshold(gpu, gpu_low_streak)
             if idle >= thr:
                 if gpu is not None and gpu >= GPU_LOW_THRESHOLD:
                     # Update/inferencia en vuelo: el jsonl se escribe al FINAL
@@ -1267,28 +1380,51 @@ def main():
                     log(f"en vuelo — idle {idle:.0f}s pero GPU {gpu}%, no mato")
                     last_progress = time.time()
                     continue
-                log(f"CUELGUE — idle {idle:.0f}s >= {thr}s{gpu_tag} markers={score}")
-                if score >= 1:
-                    log("cuelgue es del daemon Docker (no del train) — recreando contenedor")
-                    proc = recover_from_docker_hang(proc)
+                hb_age = heartbeat_age_s(hb)
+                hb_extra = ""
+                if hb_age is not None:
+                    hb_extra = (f" hb_age={hb_age:.0f}s "
+                                f"hb_phase={(hb or {}).get('phase')}")
+                log(f"CUELGUE — idle {idle:.0f}s >= {thr}s{gpu_tag} "
+                    f"markers={score}{hb_extra}")
+                # Phase 1.5: markers=0 + GPU low also recreates Docker
+                # (silent daemon hang). markers>=1 kept as before.
+                if score >= 1 or should_recreate_on_python_hang(
+                        markers=score, gpu=gpu, idle=idle, thr=thr):
+                    why = ("daemon markers" if score >= 1
+                           else "python-idle markers=0 GPU-low")
+                    log(f"cuelgue → recreate Docker ({why})")
+                    proc = recover_from_docker_hang(proc, reason=why)
                 else:
-                    log("cuelgue parece de proceso Python — matando train y relanzando")
+                    log("cuelgue — matando train y relanzando "
+                        "(recreate no aplica)")
                     kill_train(proc)
                     time.sleep(5)
                     proc = launch_train()
                 last_mtime = metrics_mtime()
                 last_progress = time.time()
+                last_hb = read_heartbeat(CKPT_DIR)
                 gpu_low_streak = 0
             else:
-                thr_now = hang_threshold()
+                thr_now = effective_hang_threshold(gpu, gpu_low_streak)
                 now = time.time()
-                milestone = int((idle / max(thr_now, 1)) * 4)  # 0..3
-                due = (now - last_idle_log) >= IDLE_LOG_EVERY_S
-                if due or milestone > last_idle_milestone:
-                    last_idle_milestone = milestone
-                    last_idle_log = now
-                    extra = f" markers={score}" if score else ""
-                    log(f"idle {idle:.0f}s/{thr_now}s{gpu_tag}{extra}")
+                # Healthy collect keeps idle~0 via heartbeat — stay quiet.
+                # Only log when idle has grown (milestones) or every 5 min.
+                if idle < 60:
+                    pass
+                else:
+                    milestone = int((idle / max(thr_now, 1)) * 4)  # 0..3
+                    due = (now - last_idle_log) >= IDLE_LOG_EVERY_S
+                    if due or milestone > last_idle_milestone:
+                        last_idle_milestone = milestone
+                        last_idle_log = now
+                        extra = f" markers={score}" if score else ""
+                        if thr_now < hang_threshold():
+                            extra += f" thr_tight={thr_now}"
+                        hb_age = heartbeat_age_s(hb)
+                        if hb_age is not None:
+                            extra += f" hb_age={hb_age:.0f}s"
+                        log(f"idle {idle:.0f}s/{thr_now}s{gpu_tag}{extra}")
     except KeyboardInterrupt:
         log("Ctrl+C — terminando train y saliendo")
         if proc and proc.poll() is None:
