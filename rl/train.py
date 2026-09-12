@@ -35,8 +35,10 @@ from rl.network import AlphaLiteNet
 from rl.rollout import (add_advantages, center_advantage_by_episode,
                         smdp_k_ref, collect_one_episode, flatten_samples)
 from rl.collect_heartbeat import write_heartbeat
+from rl.collect_timeout import close_env_now, is_collect_timeout, note_collect_timeout
 from rl.metrics_lock import metrics_lock
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
+from rl.hyper_health import HyperHealthMonitor, resolve_auto_hyper
 from rl.best_ckpt import batch_is_dead, batch_is_wipe, maybe_update_best
 from rl.pfsp import BotPFSP, parse_pool
 from rl.imitation import (
@@ -174,7 +176,11 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
                     getattr(args, "ckpt_dir", "") or "",
                     "collect_heartbeat.json") if getattr(args, "ckpt_dir", None) else None,
                 heartbeat_iter=int(getattr(args, "_heartbeat_iter", 0) or 0) or None,
-                heartbeat_worker=i)
+                heartbeat_worker=i,
+                idle_truncate_after_tick=int(
+                    getattr(args, "idle_truncate_after_tick", 35000) or 0),
+                idle_truncate_idle_ticks=int(
+                    getattr(args, "idle_truncate_idle_ticks", 5000) or 0))
         except Exception as e:
             print(f"  [bc] teacher game {i + 1}/{n} fail: {e}", flush=True)
             return None
@@ -283,6 +289,21 @@ async def amain(args):
         print(f"[roles-vocab] {len(vocab.type_to_id)} roles", flush=True)
 
 
+
+    # HyperHealth: multi-signal PPO self-reg (off in A; ON by default B+).
+    _hyper_on = resolve_auto_hyper(args)
+    hyper = HyperHealthMonitor(enabled=_hyper_on)
+    if _hyper_on:
+        if getattr(args, 'reset_opt', False) or getattr(args, 'hyper_pause', False):
+            _hp = int(getattr(args, 'hyper_pause_iters', 0) or 0)
+            hyper.pause(_hp or None)
+            print(f'[hyper] ON — pause {hyper._pause_left} iters '
+                  f'(reset_opt/promote)', flush=True)
+        else:
+            print('[hyper] ON (auto-hyper)', flush=True)
+    elif getattr(args, 'onboard_phase', None) == 'A':
+        print('[hyper] OFF (phase A)', flush=True)
+
     infer_net = AlphaLiteNet().to(device)
     infer_net.load_state_dict(net.state_dict())
     infer_net.eval()
@@ -336,13 +357,16 @@ async def amain(args):
     ) else 0
     pool_size = max(1, min(args.concurrency, max(args.episodes, teach_n)))
     pool = []
-    # El timeout del WebSocket DEBE escalar con la duración del episodio.
-    # Con max_steps fijo 160 fue el cuello: en partidas largas (max_steps alto
-    # o macro_ticks real) un advance legítimo tarda mas que 160s y el cliente
-    # cortaba con TimeoutError aunque el daemon siguiera trabajando
-    # (fix 2026-08-25). Factor ~3s por decisión (cada una simula macro_ticks)
-    # da margen real para episodios largos; --msg-timeout actua como piso.
-    ws_timeout = max(args.msg_timeout, args.max_steps * 3.0)
+    # Per-dialogue WS timeout must stay near FastAdvance deadline (~90s+slack).
+    # Episode wall-time is many advances; do NOT scale with max_steps (that
+    # made ws_timeout≈3000s and hid hung advances for ~10min until auto_train
+    # CUELGUE). reset() still uses this floor; CreateSession is ≤60s.
+    import os as _os
+    try:
+        _fa_deadline = float(_os.environ.get("OPENRA_RL_FAST_ADVANCE_DEADLINE_S", "90") or 90)
+    except ValueError:
+        _fa_deadline = 90.0
+    ws_timeout = max(float(args.msg_timeout), _fa_deadline + 30.0)
     for i in range(pool_size):
         base_url = urls[i % len(urls)]
         pool.append(OpenRAEnv(base_url=base_url, message_timeout_s=ws_timeout))
@@ -515,26 +539,33 @@ async def amain(args):
                                     getattr(args, "_heuristic_p_cur", 1.0)),
                                 heartbeat_path=hb_path,
                                 heartbeat_iter=it_now,
-                                heartbeat_worker=idx)
+                                heartbeat_worker=idx,
+                                idle_truncate_after_tick=int(
+                                    getattr(args, "idle_truncate_after_tick",
+                                            35000) or 0),
+                                idle_truncate_idle_ticks=int(
+                                    getattr(args, "idle_truncate_idle_ticks",
+                                            5000) or 0))
                             break
                         except Exception as e:
                             msg = str(e)
-                            is_deadline = "DEADLINE" in msg or "Deadline" in msg
+                            is_deadline = is_collect_timeout(e)
                             is_bridge = ("bridge failed to start" in msg
                                          or "Session failed" in msg)
                             if is_deadline:
-                                print(f"  [reset] DEADLINE en worker {idx} "
-                                      f"intento {intento+1}/2 — recreando WS")
-                                try:
-                                    await pool[idx].close()
-                                except Exception:
-                                    pass
+                                print(f"  [reset] TIMEOUT/DEADLINE en worker {idx} "
+                                      f"intento {intento+1}/2 — recreando WS "
+                                      f"({msg[:80]})")
+                                note_collect_timeout(
+                                    hb_path, error="worker_timeout",
+                                    iter=it_now, worker=idx)
+                                await close_env_now(pool[idx])
                                 # Recrear la entrada del pool con nueva conexión
                                 base_url = urls[idx % len(urls)]
                                 pool[idx] = OpenRAEnv(base_url=base_url,
                                                       message_timeout_s=ws_timeout)
                                 try:
-                                    await pool[idx].connect()
+                                    await asyncio.wait_for(pool[idx].connect(), timeout=15)
                                 except Exception as ce:
                                     print(f"  [reset] reconnect falló: {ce}")
                                     continue
@@ -562,22 +593,52 @@ async def amain(args):
                             await asyncio.wait_for(
                                 pool[idx].reset(**ep_kwargs), timeout=30)
                         except Exception:
-                            # Si el saneamiento cuelga, recrear WS como arriba
-                            try:
-                                await pool[idx].close()
-                            except Exception:
-                                pass
+                            await close_env_now(pool[idx])
                             base_url = urls[idx % len(urls)]
                             pool[idx] = OpenRAEnv(base_url=base_url,
                                                   message_timeout_s=ws_timeout)
                             try:
-                                await pool[idx].connect()
+                                await asyncio.wait_for(pool[idx].connect(), timeout=15)
                             except Exception:
                                 pass
                     results.append((traj, outcome))
 
-            await asyncio.gather(*(worker(i, n)
-                                   for i, n in enumerate(per_worker)))
+            tasks = [
+                asyncio.create_task(worker(i, n), name=f"collect-w{i}")
+                for i, n in enumerate(per_worker)
+            ]
+            pending = set(tasks)
+            slice_s = float(ws_timeout) + 30.0
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending, timeout=slice_s,
+                    return_when=asyncio.FIRST_COMPLETED)
+                if done:
+                    for _t in done:
+                        exc = _t.exception() if not _t.cancelled() else None
+                        if exc is not None:
+                            for pnd in pending:
+                                pnd.cancel()
+                            if pending:
+                                await asyncio.wait(pending, timeout=5.0)
+                            raise exc
+                    continue
+                from rl.collect_heartbeat import read_heartbeat, heartbeat_age_s
+                hb = read_heartbeat(hb_path)
+                age = heartbeat_age_s(hb)
+                if age is not None and age < slice_s:
+                    continue
+                note_collect_timeout(
+                    hb_path, error="gather_stall", iter=it_now)
+                print(
+                    f"  [collect] gather stall {slice_s:.0f}s "
+                    f"hb_age={age} — cancelling {len(pending)} worker(s)",
+                    flush=True)
+                for _t in pending:
+                    _t.cancel()
+                if pending:
+                    await asyncio.wait(pending, timeout=5.0)
+                break
             return results
 
         # Esperamos la tanda anterior antes de reusar los envs del pool
@@ -917,6 +978,9 @@ async def amain(args):
                         bc_samples, lmb_bc, epochs=bc_epochs,
                         batch_size=args.batch_size)
                     st["lambda_bc"] = round(lmb_bc, 4)
+                # Phase A / bc_only: never regulate; still drain pause.
+                hyper.step(trainer, st, epochs=1, skipped=True)
+                st["_hyper"] = hyper.last
                 return st
 
             stats = await asyncio.to_thread(_imitation_only)
@@ -934,8 +998,15 @@ async def amain(args):
                     st = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
                           "clip_frac": 0.0, "kl": 0.0, "grad_norm": 0.0,
                           "adv_mean": 0.0, "n": len(samples)}
+                    hyper.step(trainer, st, epochs=int(args.epochs),
+                               skipped=True)
+                    st["_hyper"] = hyper.last
                 else:
-                    st = trainer.update(samples, args.epochs, args.batch_size)
+                    _ep = hyper.consume_epochs_override(args.epochs)
+                    st = trainer.update(samples, _ep, args.batch_size)
+                    hyper.step(trainer, st, epochs=int(args.epochs),
+                               skipped=False)
+                    st["_hyper"] = hyper.last
                 if lmb_bc > 0.0 and bc_samples:
                     st["bc_nll"] = trainer.imitation_update(
                         bc_samples, lmb_bc, epochs=bc_epochs,
@@ -1154,6 +1225,12 @@ async def amain(args):
                             / sum(len(vc) for vc in vcs), 3)}
                        if vcs else {}),
                     **({"update_skipped": True} if skipped_update else {}),
+                    "lr": round(float(trainer.opt.param_groups[0]["lr"]), 8),
+                    "entropy_coef": round(float(getattr(trainer, "ent_lo", 0.0)), 5),
+                    **(stats.get("_hyper").as_metrics()
+                       if hasattr(stats.get("_hyper"), "as_metrics") else
+                       {"hyper_action": "off", "hyper_reason": "no_monitor",
+                        "hyper_paused": False}),
             }
             with metrics_lock(args.metrics, exclusive=True):
                 with open(args.metrics, "a", encoding="utf-8") as f:
@@ -1191,7 +1268,7 @@ async def amain(args):
 
 
 def compute_heuristic_p(args, iteration: int) -> float:
-    """P1.4 anneal for stage/guard army cell heuristics.
+    """P1.4 anneal for guard_army_push_cell (stage/remap stay always-on).
 
     Knobs:
       --heuristic-p            fixed override (0..1); skips anneal when set
@@ -1313,12 +1390,12 @@ def main():
                          "ROLES funcionales estables (rl.roles) en vez de "
                          "nombres concretos por facción. Al resume descarta el "
                          "vocab viejo del ckpt pero conserva los pesos de la red.")
-    ap.add_argument("--msg-timeout", type=float, default=160.0,
-                    help="Timeout (s) por DIALOGO agente<->motor. Los episodios "
-                         "del daemon .NET a veces se cuelgan a mitad de un "
-                         "advance(); con 600s quemaban ~11min de GPU esperando "
-                         "el timeout. 160s recupera el throghput (a costa de "
-                         "mas falsos engine_error si el daemon está lento).")
+    ap.add_argument("--msg-timeout", type=float, default=120.0,
+                    help="Timeout (s) por DIALOGO agente<->motor (piso). "
+                         "Effective timeout is max(msg-timeout, "
+                         "OPENRA_RL_FAST_ADVANCE_DEADLINE_S+30). Hung "
+                         "FastAdvance must fail ~100s; episode length is many "
+                         "advances (no max_steps*3 scaling).")
     ap.add_argument("--shaper-preset", choices=SHAPER_PRESETS,
                     default="eradicate",
                     help="Régimen de reward: 'eradicate' (combate asimétrico + "
@@ -1354,14 +1431,21 @@ def main():
                     choices=("A", "B", "C", "D", "E"),
                     help="Marca la fase A-E en metrics.jsonl (lo setea auto_train).")
     ap.add_argument("--heuristic-p", type=float, default=None,
-                    help="P1.4 fixed override for stage/guard army heuristics "
-                         "(0..1). Default None = anneal from phase start.")
+                    help="P1.4 fixed override for guard_army_push_cell "
+                         "(0..1). stage/remap always on. Default None = anneal.")
     ap.add_argument("--heuristic-anneal-iters", type=int, default=60,
                     help="P1.4 iters to anneal heuristic_p 1→0 after "
-                         "--heuristic-phase-start (default 60). Phase A stays 1.0.")
+                         "--heuristic-phase-start (default 60). Phase A stays 1.0. "
+                         "Only guard anneals; stage stays on.")
     ap.add_argument("--heuristic-phase-start", type=int, default=0,
                     help="P1.4 iteration where heuristic anneal begins "
                          "(Phase B start from curriculum). 0 = keep p=1.0.")
+    ap.add_argument("--idle-truncate-after-tick", type=int, default=35000,
+                    help="After this many ticks, allow idle early-truncate "
+                         "(0=off). Cuts 53k-tick timeout poison.")
+    ap.add_argument("--idle-truncate-idle-ticks", type=int, default=5000,
+                    help="Consecutive ticks with no combat and no income "
+                         "before idle-truncate (0=off).")
     ap.add_argument("--bc-teacher-mode", default="rush",
                     choices=("rush", "expand"),
                     help="ScriptedTeacher: rush (A/B rifle) o expand "
@@ -1412,6 +1496,18 @@ def main():
                          "episodios win en teacher_wins/ (default 40).")
     ap.add_argument("--lambda-sil", type=float, default=0.5,
                     help="Peso SIL cuando --sil (default 0.5).")
+    ap.add_argument("--auto-hyper", action=argparse.BooleanOptionalAction,
+                    default=None,
+                    help="PPO multi-signal hyper self-reg. Default ON for "
+                         "onboard B+; OFF for phase A / non-onboard. "
+                         "Use --auto-hyper / --no-auto-hyper to force.")
+    ap.add_argument("--hyper-pause", action="store_true",
+                    help="Pause HyperHealth for --hyper-pause-iters "
+                         "(auto_train passes this on promote).")
+    ap.add_argument("--hyper-pause-iters", type=int, default=8,
+                    help="Iters to pause after promote / --reset-opt "
+                         "(default 8, range 5-10).")
+
     args = ap.parse_args()
 
     try:

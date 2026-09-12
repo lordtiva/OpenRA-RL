@@ -153,6 +153,8 @@ IDENTITY_ITEMS = frozenset({
     "e7", "medi", "mech", "spy",
     "pdox", "iron", "mslo", "gap", "atek", "stek",
     "ctnk", "stnk", "mh60",
+    # Storage, not a proc substitute. cheapest_of(refinery) was always silo.
+    "silo",
 })
 
 
@@ -208,6 +210,12 @@ def cheapest_of(items) -> str:
     its = [str(x).lower() for x in (items or []) if x]
     if not its:
         return ""
+    # silo ($150) is ore storage, not a refinery. If it shares a bucket
+    # with proc ($1400), cheapest_of would always emit silo.
+    if "proc" in its:
+        its = [x for x in its if x != "silo"]
+        if not its:
+            return "proc"
     return min(its, key=lambda it: (item_cost(it), it))
 
 

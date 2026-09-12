@@ -12,6 +12,7 @@ from rl.network import (
     _building_kind_legal, _building_kind_legal_loop, COMBAT_PUSH_TYPES,
 )
 from rl.rollout import add_advantages, smdp_k_ref, STEP_TICKS
+from rl.trainer import _split_segments
 
 
 def test_smdp_k_ref_defaults():
@@ -163,6 +164,69 @@ def test_building_kind_legal_parity():
         )
 
 
+def _step(i, ep=0, push=False):
+    s = {"_ep": ep, "i": i}
+    if push:
+        s["_k2_push"] = True
+    return s
+
+
+def _trainable(seg):
+    return [s for s in seg if not s.get("_burn")]
+
+
+def test_split_segments_plain_chunks():
+    samples = [_step(i) for i in range(5)]
+    segs = _split_segments(samples, bptt_len=2)
+    assert [[s["i"] for s in seg] for seg in segs] == [[0, 1], [2, 3], [4]]
+
+
+def test_split_segments_k2_pair_not_cut_at_boundary():
+    """bptt_len=32 with eco at 31 and push at 32 must stay in one unroll."""
+    samples = [_step(i, push=(i == 32)) for i in range(40)]
+    samples[31] = _step(31)  # eco
+    samples[32] = _step(32, push=True)
+    segs = _split_segments(samples, bptt_len=32)
+    first = _trainable(segs[0])
+    ids = [s["i"] for s in first]
+    assert 31 in ids and 32 in ids
+    assert ids[-2:] == [31, 32]
+    assert not any(s.get("_k2_push") for s in _trainable(segs[1]))
+    for seg in segs:
+        train = _trainable(seg)
+        if train and train[0].get("_k2_push"):
+            raise AssertionError("segment opened on K=2 push")
+
+
+def test_split_segments_k2_odd_bptt_len():
+    samples = []
+    for i in range(6):
+        samples.append(_step(i, push=(i % 2 == 1)))
+    segs = _split_segments(samples, bptt_len=3)
+    chunks = [[s["i"] for s in _trainable(seg)] for seg in segs]
+    for chunk in chunks:
+        for a, b in zip(chunk, chunk[1:]):
+            if b % 2 == 1:
+                assert a == b - 1
+    assert all(not _trainable(seg)[0].get("_k2_push") for seg in segs if _trainable(seg))
+
+
+def test_split_segments_k2_with_burn_in():
+    samples = [_step(i, push=(i == 32)) for i in range(40)]
+    segs = _split_segments(samples, bptt_len=32, burn_in_len=4)
+    first = _trainable(segs[0])
+    assert [s["i"] for s in first[-2:]] == [31, 32]
+    assert all(s.get("_burn") for s in segs[1][:4])
+    assert not _trainable(segs[1])[0].get("_k2_push")
+
+
+def test_split_segments_orphan_push_at_episode_start():
+    samples = [_step(0, push=True), _step(1), _step(2)]
+    segs = _split_segments(samples, bptt_len=2)
+    assert segs[0][0].get("_k2_push")
+    assert [s["i"] for s in segs[0]] == [0, 1]
+
+
 if __name__ == "__main__":
     test_smdp_k_ref_defaults()
     test_smdp_gamma_eff_math()
@@ -170,4 +234,9 @@ if __name__ == "__main__":
     test_k2_micro_hidden_differs()
     test_topk_mha_ln_present_and_near_identity()
     test_building_kind_legal_parity()
+    test_split_segments_plain_chunks()
+    test_split_segments_k2_pair_not_cut_at_boundary()
+    test_split_segments_k2_odd_bptt_len()
+    test_split_segments_k2_with_burn_in()
+    test_split_segments_orphan_push_at_episode_start()
     print("OK training corrections tests")

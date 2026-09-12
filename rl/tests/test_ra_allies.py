@@ -132,6 +132,22 @@ def test_identity_items_not_cheapest_of():
         assert aidx.rol_a_concreto[it] == it
 
 
+def test_silo_does_not_hijack_refinery():
+    from rl.roles import IDENTITY_ITEMS, cheapest_of
+    assert "silo" in IDENTITY_ITEMS
+    assert cheapest_of(["proc", "silo"]) == "proc"
+    obs = _Obs(
+        units=[_U(actor_id=1, type="harv")],
+        buildings=[_B("proc"), _B("powr", aid=2)],
+        available=["proc", "silo", "powr"],
+    )
+    aidx = _aidx(obs)
+    assert "refinery" in aidx.build_items
+    assert "silo" in aidx.build_items
+    assert aidx.rol_a_concreto.get("refinery") == "proc"
+    assert aidx.rol_a_concreto.get("silo") == "silo"
+
+
 def test_patrol_emits():
     obs = _Obs(units=[_U(actor_id=1, type="e1", can_attack=True)])
     aidx = _aidx(obs)

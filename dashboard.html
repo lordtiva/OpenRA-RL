@@ -122,6 +122,25 @@
     <div class="sub">own − enemy / 1k ticks</div>
   </section>
 
+
+  <section class="card span12" id="hyperCard">
+    <h2>HyperHealth <span id="hyperPill" class="pill off" style="margin-left:8px">—</span></h2>
+    <div class="row" style="margin-bottom:10px" id="hyperChips">
+      <div class="chip"><div class="l">lr</div><div class="v accent" id="hLr">—</div></div>
+      <div class="chip"><div class="l">entropy_coef</div><div class="v" id="hEntCoef">—</div></div>
+      <div class="chip"><div class="l">última acción</div><div class="v" id="hAct">—</div></div>
+      <div class="chip"><div class="l">razón</div><div class="v" id="hReason" style="font-size:13px;font-weight:500">—</div></div>
+      <div class="chip"><div class="l">paused</div><div class="v" id="hPaused">—</div></div>
+    </div>
+    <canvas id="cHyper" height="120"></canvas>
+    <div class="legend">
+      <span style="--c:var(--accent)">kl×10</span>
+      <span style="--c:var(--warn)">clip</span>
+      <span style="--c:var(--good)">lr×1e4</span>
+      <span style="--c:var(--purple)">entropy</span>
+    </div>
+  </section>
+
   <section class="card span8">
     <h2>Winrate · rolling20 · iter</h2>
     <canvas id="cWr" class="tall"></canvas>
@@ -525,6 +544,8 @@ function buildAlerts(rows, pfsp, collapse) {
     if (weak.length)
       a.push(["accent", "PFSP flojo vs: " + weak.join(", ")]);
   }
+  if (r.hyper_action && r.hyper_action !== "noop" && r.hyper_action !== "off")
+    a.push(["accent", "HyperHealth: " + r.hyper_action + " — " + (r.hyper_reason || "")]);
   a.push(["", fmtLastCollapse(collapse) + " · " + rows.length + " iters"]);
   $("alerts").innerHTML = a.map(([cls,msg]) =>
     `<div style="padding:8px 0;border-bottom:1px solid var(--border)" class="${cls||""}">${msg}</div>`
@@ -660,6 +681,48 @@ function render(rows, pfsp, best, collapse) {
     { ys: rows.map(x => x.n_buildings && x.n_buildings.own), color: "#3dd68c" },
     { ys: rows.map(x => x.n_buildings && x.n_buildings.enemy), color: "#ff6b7a" },
   ]);
+
+
+  // HyperHealth panel
+  {
+    const pill = $("hyperPill");
+    const act = r.hyper_action;
+    const paused = !!r.hyper_paused;
+    if (pill) {
+      if (act == null || act === "off") {
+        pill.textContent = "off";
+        pill.className = "pill off";
+      } else if (paused) {
+        pill.textContent = "paused";
+        pill.className = "pill";
+        pill.style.color = "var(--warn)";
+      } else if (act === "noop") {
+        pill.textContent = "idle";
+        pill.className = "pill on";
+      } else {
+        pill.textContent = act;
+        pill.className = "pill on";
+      }
+    }
+    const hLr = $("hLr"); if (hLr) hLr.textContent = r.lr == null ? "—" : Number(r.lr).toExponential(2);
+    const hEc = $("hEntCoef"); if (hEc) hEc.textContent = fmtNum(r.entropy_coef, 3);
+    const hAct = $("hAct"); if (hAct) {
+      hAct.textContent = act || "—";
+      hAct.className = "v " + (act && act !== "noop" && act !== "off" ? "warn" : "");
+    }
+    const hRe = $("hReason"); if (hRe) hRe.textContent = r.hyper_reason || "—";
+    const hPa = $("hPaused"); if (hPa) {
+      hPa.textContent = paused ? "sí" : "no";
+      hPa.className = "v " + (paused ? "warn" : "good");
+    }
+    const lastN = rows.slice(-40);
+    drawLines($("cHyper"), [
+      { ys: lastN.map(x => x.kl == null || !isFinite(x.kl) ? null : Math.min(x.kl * 10, 2.5)), color: "#6ea8fe" },
+      { ys: lastN.map(x => x.clip_frac), color: "#f5c542" },
+      { ys: lastN.map(x => x.lr == null ? null : x.lr * 1e4), color: "#3dd68c" },
+      { ys: lastN.map(x => x.entropy), color: "#b794f6" },
+    ], { ymin: 0 });
+  }
 
   buildAlerts(rows, pfsp, collapse);
 }

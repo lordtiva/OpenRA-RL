@@ -134,7 +134,7 @@ def test_item_slot_fallback_logs_and_counts(caplog):
 
 
 def test_heuristic_p_gates_stage_and_guard_seeded():
-    """heuristic_p=0 skips stage/guard; remap still always called."""
+    """heuristic_p=0 skips guard only; remap+stage always called."""
     calls = {"remap": 0, "stage": 0, "guard": 0}
 
     def fake_remap(obs, aidx, cx, cy, actor_id=0):
@@ -186,7 +186,7 @@ def test_heuristic_p_gates_stage_and_guard_seeded():
         aa.index_to_command_effective(
             _Obs(), t, 0, cell, 0, _Aidx(), heuristic_p=0.0)
         assert calls["remap"] == 1
-        assert calls["stage"] == 0
+        assert calls["stage"] == 1
         assert calls["guard"] == 0
 
         calls["remap"] = calls["stage"] = calls["guard"] = 0
@@ -197,15 +197,19 @@ def test_heuristic_p_gates_stage_and_guard_seeded():
         assert calls["stage"] == 1
         assert calls["guard"] == 1
 
-        # Seeded stochastic: with p=0.5 some fire, some don't
+        # Seeded stochastic: stage always on; guard anneals with p=0.5
         n_stage = 0
+        n_guard = 0
         for i in range(40):
             calls["stage"] = 0
+            calls["guard"] = 0
             random.seed(i)
             aa.index_to_command_effective(
                 _Obs(), t, 0, cell, 0, _Aidx(), heuristic_p=0.5)
             n_stage += calls["stage"]
-        assert 5 <= n_stage <= 35  # not always 0 or 40
+            n_guard += calls["guard"]
+        assert n_stage == 40
+        assert 5 <= n_guard <= 35
 
 
 def test_metrics_lock_smoke():

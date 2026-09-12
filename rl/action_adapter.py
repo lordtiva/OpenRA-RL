@@ -1225,9 +1225,10 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
                                heuristic_p: float = 1.0):
     """Igual que index_to_command pero TAMBIÉN devuelve los índices EFECTIVOS.
 
-    heuristic_p (P1.4): probabilidad de aplicar stage_army_attack_cell +
-    guard_army_push_cell en army/infantry/vehicle_attack_move. remap_move_cell
-    siempre corre (safety). Phase A / default = 1.0; anneal post Phase B.
+    heuristic_p (P1.4): probabilidad de aplicar guard_army_push_cell en
+    army/infantry/vehicle_attack_move. remap_move_cell y
+    stage_army_attack_cell siempre corren (safety: orilla de lago / choke).
+    Phase A / default = 1.0; anneal post Phase B solo apaga guard.
 
     Las correcciones de seguridad mutan la acción muestreada (ej. 'train'
     con ítem de edificio -> primer entrenable). Guardar el log_prob de la
@@ -1360,11 +1361,12 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         cx, cy = remap_move_cell(obs, aidx, cx, cy, actor_id)
         if t_name in ("army_attack_move", "infantry_attack_move",
                       "vehicle_attack_move"):
-            # P1.4: annealable staging/guard heuristics (safety remap always on).
+            # Lake/choke staging is always-on safety (like remap). Binary
+            # heuristic_p=0 left armies stuck on the west shore.
+            cx, cy = stage_army_attack_cell(obs, aidx, cx, cy)
+            # P1.4: only fog-east / no-west-yank guard anneals to 0.
             hp = 1.0 if heuristic_p is None else float(heuristic_p)
             if hp >= 1.0 or (hp > 0.0 and random.random() < hp):
-                cx, cy = stage_army_attack_cell(obs, aidx, cx, cy)
-                # After stage/remap: block west ore yank + fog-east retarget.
                 cx, cy = guard_army_push_cell(obs, aidx, cx, cy)
     eff_cell_flat = int(cy) * aidx.w + int(cx)
     if t_name in ("train", "build", "place_building", "cancel_production"):

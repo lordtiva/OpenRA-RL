@@ -12,6 +12,7 @@ Protocol:
 
 import base64
 import logging
+import os
 import time
 from typing import Optional
 
@@ -20,6 +21,32 @@ import grpc
 from openra_env.generated import rl_bridge_pb2, rl_bridge_pb2_grpc
 
 logger = logging.getLogger(__name__)
+
+# Align with C# RLSessionManager.FastAdvanceDeadlineSeconds /
+# OPENRA_RL_FAST_ADVANCE_DEADLINE_S (docker-compose default 90).
+DEFAULT_FAST_ADVANCE_DEADLINE_S = 90.0
+
+
+def fast_advance_deadline_s() -> float:
+    """C# FastAdvance hard deadline (seconds), from env or default 90."""
+    raw = os.environ.get("OPENRA_RL_FAST_ADVANCE_DEADLINE_S", "")
+    try:
+        val = float(raw) if str(raw).strip() else DEFAULT_FAST_ADVANCE_DEADLINE_S
+    except (TypeError, ValueError):
+        val = DEFAULT_FAST_ADVANCE_DEADLINE_S
+    return max(5.0, val)
+
+
+def fast_advance_grpc_timeout_s(ticks: int, deadline_s: float | None = None) -> float:
+    """gRPC timeout for FastAdvance: hard-capped to the C# deadline.
+
+    Previously ``max(90, ticks+30)`` grew unbounded past the server deadline,
+    so a wedged advance could outlive C# abort while the WS layer waited
+    even longer. Always use the deadline (env/default); ticks do not inflate it.
+    """
+    d = float(deadline_s) if deadline_s is not None else fast_advance_deadline_s()
+    _ = ticks  # ticks kept for call-site clarity; must not inflate past deadline
+    return max(5.0, float(d))
 
 
 class BridgeClient:
@@ -64,55 +91,56 @@ class BridgeClient:
         self._connected = True
         logger.info(f"Connected to OpenRA bridge at {self.host}:{self.port}")
 
-    def wait_for_ready(self, max_retries: int = 30, retry_interval: float = 1.0) -> bool:
+    def wait_for_ready(self, max_retries: int = 30, retry_interval: float = 1.0,
+                       deadline_s: float | None = None) -> bool:
         """Wait for the gRPC server / session to become available.
 
-        Phases accepted as "ready":
-          - "playing" : game world running (single-session and multi-session after
-                        the client calls FastAdvance the first time).
-          - "paused"  : multi-session daemon has created the world and is waiting
-                        for the first FastAdvance call — this IS ready.
-          - "ready"   : future-proof alias used by some daemon versions.
+        Wall-clock `deadline_s` (default FastAdvance deadline) is the hard
+        cap. GetState used to use timeout_s=30; 40 retries x 30s = 20 min
+        with no WS progress — that is the 10 min collect hang if the client
+        is stuck in reset send/recv or the server executor.
 
-        Avoids reconnecting on every attempt: the gRPC channel is created once
-        and reused.  Reconnecting in a tight loop (as the old code did) floods
-        the HTTP/2 handshake path and makes recovery slower when the daemon is
-        under load.
+        Phases accepted as "ready": playing / paused / ready.
         """
-        # Establish the channel once; subsequent calls reuse it.
         if not self._connected:
             self.connect()
+        if deadline_s is not None:
+            wall = max(0.2, float(deadline_s))
+        else:
+            wall = max(5.0, fast_advance_deadline_s())
+        t0 = time.monotonic()
+        probe_t = min(5.0, wall)
         for attempt in range(max_retries):
+            left = wall - (time.monotonic() - t0)
+            if left <= 0:
+                logger.error(f"Bridge wait_for_ready wall {wall:.0f}s exceeded")
+                return False
             try:
-                state = self.get_state()
+                state = self.get_state(timeout_s=min(probe_t, left))
                 phase = getattr(state, "phase", "")
-                # "paused" = world created and frozen, awaiting first FastAdvance.
-                # "playing" = already advancing (single-session or resumed).
                 if phase in ("playing", "paused", "ready"):
                     logger.info(f"Bridge ready after {attempt + 1} attempts, phase={phase}")
                     return True
-                # Hard-fail: daemon signalled a terminal error on this session.
                 if phase == "error":
                     logger.error(
                         f"Session in error phase after {attempt + 1} attempts — aborting wait"
                     )
                     return False
                 logger.debug(f"Bridge not ready (attempt {attempt + 1}), phase={phase!r}")
-                time.sleep(retry_interval)
-                continue
             except grpc.RpcError as e:
-                if attempt < max_retries - 1:
-                    logger.debug(f"Bridge not ready (attempt {attempt + 1}): {e.code()}")
-                    time.sleep(retry_interval)
-                else:
+                if attempt >= max_retries - 1:
                     logger.error(f"Bridge failed to become ready after {max_retries} attempts")
                     return False
+                logger.debug(f"Bridge not ready (attempt {attempt + 1}): {e.code()}")
             except Exception as e:
-                if attempt < max_retries - 1:
-                    logger.debug(f"Connection attempt {attempt + 1} failed: {e}")
-                    time.sleep(retry_interval)
-                else:
+                if attempt >= max_retries - 1:
                     return False
+                logger.debug(f"Connection attempt {attempt + 1} failed: {e}")
+            left = wall - (time.monotonic() - t0)
+            if left <= 0:
+                logger.error(f"Bridge wait_for_ready wall {wall:.0f}s exceeded")
+                return False
+            time.sleep(min(float(retry_interval), left))
         return False
 
     @property
@@ -157,13 +185,22 @@ class BridgeClient:
             request.peer_commands.extend(peer_commands)
             request.peer_slot = peer_slot or "Multi0"
 
-        # Timeout adaptativo: batallas grandes usan FastAdvance de 50 ticks
-        # en ráfagas; 120s fijo mataba partidas de 51k ticks. 90s mínimo
-        # + ticks*1.0+30 da 110s para 80 ticks y 80s para 50 ticks: falla
-        # rápido (2 min) si hay cuelgue, sin esperar 460s. El rollout ya
-        # trata DEADLINE como engine_error y sigue.
-        timeout = max(90.0, ticks * 1.0 + 30.0)
-        return self._stub.FastAdvance(request, timeout=timeout)
+        # Hard-cap to C# OPENRA_RL_FAST_ADVANCE_DEADLINE_S (default 90).
+        # Do NOT use ticks+30 unbounded — that outgrew the server deadline and
+        # left the client/WS layer waiting while C# had already aborted.
+        timeout = fast_advance_grpc_timeout_s(ticks)
+        try:
+            return self._stub.FastAdvance(request, timeout=timeout)
+        except grpc.RpcError as e:
+            code = e.code()
+            if code in (grpc.StatusCode.DEADLINE_EXCEEDED, grpc.StatusCode.ABORTED):
+                details = e.details() or "hung or poisoned session"
+                raise RuntimeError(
+                    f"FastAdvance {code.name}: session={self.session_id!r} "
+                    f"ticks={ticks} timeout_s={timeout:.0f} — {details}; "
+                    f"destroy session and CreateSession required"
+                ) from e
+            raise
 
     def get_observation(self, player_slot: str = "") -> rl_bridge_pb2.GameObservation:
         """Snapshot observation for a player slot (RL-vs-RL peer after FastAdvance)."""
@@ -175,12 +212,13 @@ class BridgeClient:
         )
         return self._stub.GetObservation(request, timeout=self.timeout_s)
 
-    def get_state(self) -> rl_bridge_pb2.GameState:
+    def get_state(self, timeout_s: float | None = None) -> rl_bridge_pb2.GameState:
         """Query current game state via unary RPC."""
         if not self._connected or self._stub is None:
             raise RuntimeError("Not connected. Call connect() first.")
         request = rl_bridge_pb2.StateRequest(session_id=self.session_id)
-        return self._stub.GetState(request, timeout=self.timeout_s)
+        t = float(self.timeout_s if timeout_s is None else timeout_s)
+        return self._stub.GetState(request, timeout=max(0.5, t))
 
     def create_session(self, map_name: str, bots: str, seed: int = 0,
                        player_faction: str = "", enemy_faction: str = "") -> str:

@@ -117,6 +117,10 @@ def _split_segments(samples: list, bptt_len: int,
     Si burn_in_len>0, cada segmento (salvo el arranque de episodio) antepone
     hasta burn_in_len pasos previos marcados `_burn=True`: la GRU los propaga
     sin entrar al loss (R2D2-style burn-in).
+
+    Pares K=2 (eco + ``_k2_push``) son atómicos: el corte no abre un
+    segmento en el push. Si el límite cae en un push, el segmento se
+    alarga para incluirlo y el GRU eco→push queda en el mismo unroll.
     """
     if not samples:
         return []
@@ -125,10 +129,14 @@ def _split_segments(samples: list, bptt_len: int,
         episodes.setdefault(s.get("_ep", 0), []).append(s)
     segs = []
     burn_in_len = max(0, int(burn_in_len))
+    step = max(1, int(bptt_len))
     for ep_samples in episodes.values():
         n = len(ep_samples)
-        for start in range(0, n, bptt_len):
-            end = min(start + bptt_len, n)
+        start = 0
+        while start < n:
+            end = min(start + step, n)
+            while end < n and ep_samples[end].get("_k2_push"):
+                end += 1
             b_start = max(0, start - burn_in_len)
             n_burn = start - b_start
             seg = []
@@ -141,6 +149,7 @@ def _split_segments(samples: list, bptt_len: int,
                     seg.append(s)
             if seg:
                 segs.append(seg)
+            start = end
     return segs
 
 

@@ -1,4 +1,4 @@
-﻿"""Lightweight collect/update heartbeat for auto_train hang detection (Phase 1.5).
+"""Lightweight collect/update heartbeat for auto_train hang detection (Phase 1.5).
 
 Train/rollout writes ckpt-dir/collect_heartbeat.json so stalls are visible even
 when metrics.jsonl is idle mid-iter. auto_train treats an advancing heartbeat as
@@ -51,8 +51,10 @@ def write_heartbeat(
     if p.suffix.lower() != ".json":
         p = p / HEARTBEAT_NAME
     now = time.time()
+    mono = time.monotonic()
     with _lock:
-        if not force and (now - _last_write_mono) < float(min_interval_s):
+        # Throttle on monotonic clock (wall clock jumps must not freeze hb).
+        if not force and (mono - _last_write_mono) < float(min_interval_s):
             return False
         payload: dict[str, Any] = {
             "ts": now,
@@ -89,7 +91,7 @@ def write_heartbeat(
                 except OSError:
                     pass
                 raise
-            _last_write_mono = now
+            _last_write_mono = mono
             return True
         except OSError:
             return False

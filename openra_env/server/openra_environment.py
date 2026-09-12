@@ -45,7 +45,7 @@ from openra_env.models import (
 )
 from openra_env.config import OpenRARLConfig, load_config, should_register_tool
 from openra_env.reward import OpenRARewardFunction, RewardWeights
-from openra_env.server.bridge_client import BridgeClient, commands_to_proto, observation_to_dict
+from openra_env.server.bridge_client import (BridgeClient, commands_to_proto, observation_to_dict, fast_advance_deadline_s)
 # grpc_worker removed: per-session channels + asyncio.to_thread
 from openra_env.server.openra_process import OpenRAConfig, OpenRAProcessManager
 
@@ -327,7 +327,19 @@ class OpenRAEnvironment(MCPEnvironment):
                 import functools
                 @functools.wraps(fn)
                 async def async_wrapper(*args, **kwargs):
-                    return await asyncio.to_thread(fn, *args, **kwargs)
+                    # FastAdvance gRPC timeout can fail to interrupt a hung
+                    # native call; without this, the WS handler never reads
+                    # again and the host client's next send hangs forever.
+                    fut = asyncio.to_thread(fn, *args, **kwargs)
+                    if fn.__name__ == "advance":
+                        cap = fast_advance_deadline_s() + 15.0
+                        try:
+                            return await asyncio.wait_for(fut, timeout=cap)
+                        except (TimeoutError, asyncio.TimeoutError) as e:
+                            raise TimeoutError(
+                                f"advance to_thread timed out after {cap:.0f}s"
+                            ) from e
+                    return await fut
                 return mcp.tool()(async_wrapper)
             return mcp.tool()(fn)
 
@@ -3146,7 +3158,9 @@ class OpenRAEnvironment(MCPEnvironment):
             # 20s (40 * 0.5s): a poison InitSession holding WorldCreateLock
             # must fail fast so we DestroySession instead of blocking 120s
             # and leaking the half-created id.
-            ready = self._bridge.wait_for_ready(max_retries=40, retry_interval=0.5)
+            ready = self._bridge.wait_for_ready(
+                max_retries=40, retry_interval=0.5,
+                deadline_s=min(45.0, fast_advance_deadline_s()))
         else:
             # Single-session mode: launch a new OpenRA process.
             # Serialized via semaphore to prevent CPU starvation from JIT.
@@ -3158,7 +3172,9 @@ class OpenRAEnvironment(MCPEnvironment):
                 # Wait for gRPC server to be ready (still under semaphore so the
                 # next launch doesn't start until this game's gRPC is responsive)
                 logger.info("Waiting for gRPC bridge to become ready...")
-                ready = self._bridge.wait_for_ready(max_retries=120, retry_interval=2.0)
+                ready = self._bridge.wait_for_ready(
+                    max_retries=120, retry_interval=2.0,
+                    deadline_s=fast_advance_deadline_s())
 
         if not ready:
             if self._multi_session:

@@ -70,6 +70,12 @@ check("mismo rol de tanque en ambas facciones (equivalencia funcional)",
 
 check("pbox más barato que gun/agun",
       R.cheapest_of(["gun", "agun", "pbox"]) == "pbox")
+check("proc gana a silo en el bucket refinery",
+      R.cheapest_of(["proc", "silo"]) == "proc")
+check("silo es IDENTITY_ITEMS (no se pliega a refinery)",
+      "silo" in R.IDENTITY_ITEMS)
+check("silo sigue siendo rol refinery en entidad",
+      R.role_of("silo") == R.ROLE_REFINERY)
 check("ftur más barato que tsla",
       R.cheapest_of(["tsla", "ftur", "sam"]) == "ftur")
 check("e7 Tanya es specialist (no misc)", R.role_of("e7") == R.ROLE_COMMANDO_SPY)

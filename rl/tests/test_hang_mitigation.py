@@ -76,17 +76,21 @@ def test_effective_hang_threshold_onboard_tightens(monkeypatch):
 
 
 def test_should_recreate_on_python_hang():
+    # Default consecutive=0 → no recreate (need streak)
     assert at.should_recreate_on_python_hang(
-        markers=0, gpu=0, idle=700, thr=600) is True
+        markers=0, gpu=0, idle=1000, thr=900) is False
     # GPU busy → never
     assert at.should_recreate_on_python_hang(
-        markers=0, gpu=40, idle=700, thr=600) is False
+        markers=0, gpu=40, idle=1000, thr=900,
+        consecutive_python_idles=5) is False
     # Not yet idle enough
     assert at.should_recreate_on_python_hang(
-        markers=0, gpu=0, idle=100, thr=600) is False
+        markers=0, gpu=0, idle=100, thr=900,
+        consecutive_python_idles=5) is False
     # markers>=1 is other branch (function is for markers==0 case)
     assert at.should_recreate_on_python_hang(
-        markers=2, gpu=0, idle=700, thr=600) is False
+        markers=2, gpu=0, idle=1000, thr=900,
+        consecutive_python_idles=5) is False
 
 
 def test_recreate_allowed_cooldown_and_max():
@@ -111,3 +115,167 @@ def test_recreate_allowed_cooldown_and_max():
     ok5, _ = at.recreate_allowed(now=t0 + 3600 + 10)
     assert ok5
     at.reset_recreate_history()
+
+
+def test_should_recreate_requires_consecutive_streak():
+    """No Docker recreate on first python-idle; yes after streak."""
+    # First idle hang → train-only (consecutive=1 < default 3)
+    assert at.should_recreate_on_python_hang(
+        markers=0, gpu=0, idle=1000, thr=900,
+        consecutive_python_idles=1) is False
+    assert at.should_recreate_on_python_hang(
+        markers=0, gpu=0, idle=1000, thr=900,
+        consecutive_python_idles=2) is False
+    assert at.should_recreate_on_python_hang(
+        markers=0, gpu=0, idle=1000, thr=900,
+        consecutive_python_idles=3) is True
+    # Configurable recreate_after=2
+    assert at.should_recreate_on_python_hang(
+        markers=0, gpu=0, idle=1000, thr=900,
+        consecutive_python_idles=1, recreate_after=2) is False
+    assert at.should_recreate_on_python_hang(
+        markers=0, gpu=0, idle=1000, thr=900,
+        consecutive_python_idles=2, recreate_after=2) is True
+    # GPU busy / not idle enough still False
+    assert at.should_recreate_on_python_hang(
+        markers=0, gpu=40, idle=1000, thr=900,
+        consecutive_python_idles=5) is False
+    assert at.should_recreate_on_python_hang(
+        markers=0, gpu=0, idle=100, thr=900,
+        consecutive_python_idles=5) is False
+    # markers!=0 is other branch
+    assert at.should_recreate_on_python_hang(
+        markers=2, gpu=0, idle=1000, thr=900,
+        consecutive_python_idles=5) is False
+
+
+def test_gpu_idle_hang_raised():
+    assert at.GPU_IDLE_HANG_S >= 900
+    assert at.PYTHON_IDLE_RECREATE_STREAK >= 2
+
+
+def test_fast_advance_timeout_hard_capped(monkeypatch):
+    from openra_env.server import bridge_client as bc
+    monkeypatch.delenv("OPENRA_RL_FAST_ADVANCE_DEADLINE_S", raising=False)
+    assert bc.fast_advance_deadline_s() == 90.0
+    # ticks must NOT inflate past deadline (old bug: max(90, ticks+30))
+    assert bc.fast_advance_grpc_timeout_s(50) == 90.0
+    assert bc.fast_advance_grpc_timeout_s(200) == 90.0
+    assert bc.fast_advance_grpc_timeout_s(1) == 90.0
+    monkeypatch.setenv("OPENRA_RL_FAST_ADVANCE_DEADLINE_S", "75")
+    assert bc.fast_advance_deadline_s() == 75.0
+    assert bc.fast_advance_grpc_timeout_s(500, deadline_s=75) == 75.0
+    monkeypatch.setenv("OPENRA_RL_FAST_ADVANCE_DEADLINE_S", "bad")
+    assert bc.fast_advance_deadline_s() == 90.0
+
+
+def test_op_message_timeout_near_deadline(monkeypatch):
+    from openra_env import client as cl
+    monkeypatch.delenv("OPENRA_RL_FAST_ADVANCE_DEADLINE_S", raising=False)
+    t = cl.default_op_message_timeout_s()
+    assert 90.0 < t <= 120.0
+    monkeypatch.setenv("OPENRA_RL_FAST_ADVANCE_DEADLINE_S", "90")
+    assert cl.default_op_message_timeout_s() == 110.0
+
+
+def test_is_collect_timeout_empty_asyncio():
+    from rl.collect_timeout import is_collect_timeout
+    assert is_collect_timeout(TimeoutError())
+    assert is_collect_timeout(TimeoutError(""))
+    assert is_collect_timeout(TimeoutError("WS op timed out after 110s"))
+    assert is_collect_timeout(RuntimeError("FastAdvance DEADLINE_EXCEEDED"))
+    assert not is_collect_timeout(RuntimeError("bridge failed to start"))
+
+
+def test_wait_for_ready_wall_clock():
+    """GetState hang must not run 40x30s — wall clock wins."""
+    import time
+    from openra_env.server.bridge_client import BridgeClient
+    bc = BridgeClient()
+    bc._connected = True
+    bc._stub = object()
+
+    def slow(_timeout_s=None):
+        time.sleep(0.2)
+        raise RuntimeError("hung GetState")
+
+    bc.get_state = slow
+    t0 = time.monotonic()
+    assert bc.wait_for_ready(max_retries=40, retry_interval=0.5, deadline_s=0.45) is False
+    elapsed = time.monotonic() - t0
+    assert elapsed < 1.5, elapsed
+
+
+def test_send_and_receive_op_times_out(monkeypatch):
+    """Whole send+recv (not just recv) fails within the cap."""
+    import asyncio
+    import time
+    from openra_env.client import OpenRAEnv
+
+    env = OpenRAEnv.__new__(OpenRAEnv)
+    env._message_timeout = 3000.0
+
+    async def hang(_msg):
+        await asyncio.sleep(30)
+
+    env._send_and_receive = hang
+    monkeypatch.setenv("OPENRA_RL_FAST_ADVANCE_DEADLINE_S", "1")
+
+    async def run():
+        t0 = time.monotonic()
+        try:
+            await env._send_and_receive_op({"type": "mcp"}, timeout_s=0.35)
+            raise AssertionError("should have timed out")
+        except TimeoutError as e:
+            assert "timed out" in str(e).lower()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 2.0, elapsed
+
+    asyncio.run(run())
+
+
+def test_hung_advance_cannot_block_past_timeout(tmp_path):
+    """Simulated hung advance must fail ~timeout and write collect_timeout hb."""
+    import asyncio
+    import time
+    from rl.collect_heartbeat import read_heartbeat
+    from rl.collect_timeout import await_env_op
+
+    class Hung:
+        async def advance(self, ticks):
+            await asyncio.sleep(3600)
+
+    async def run():
+        t0 = time.monotonic()
+        try:
+            await await_env_op(
+                Hung().advance(50),
+                timeout_s=0.3,
+                heartbeat_path=tmp_path,
+                what="advance",
+                error="advance_deadline",
+                iter=124, worker=0,
+            )
+            raise AssertionError("hung advance must timeout")
+        except TimeoutError as e:
+            assert "timed out" in str(e)
+        elapsed = time.monotonic() - t0
+        assert elapsed < 2.0, elapsed
+        hb = read_heartbeat(tmp_path)
+        assert hb is not None
+        assert hb["phase"] == "collect_timeout"
+        assert hb["error"] == "advance_deadline"
+        assert hb["iter"] == 124
+
+    asyncio.run(run())
+
+
+def test_heartbeat_written_on_timeout_path(tmp_path):
+    from rl.collect_heartbeat import read_heartbeat
+    from rl.collect_timeout import note_collect_timeout
+    write_heartbeat(tmp_path, phase="collect", force=True, tick=100)
+    note_collect_timeout(tmp_path, error="step_timeout", iter=7, worker=2)
+    hb = read_heartbeat(tmp_path)
+    assert hb["phase"] == "collect_timeout"
+    assert hb["error"] == "step_timeout"
+    assert hb["iter"] == 7

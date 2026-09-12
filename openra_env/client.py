@@ -11,6 +11,7 @@ Sobre advance():
   interrupted/interrupt_reason/actual_ticks_advanced.
 """
 
+import asyncio
 import os
 from typing import Any, Dict
 
@@ -19,6 +20,26 @@ from openenv.core.env_client import EnvClient
 from websockets.asyncio.client import connect as ws_connect
 
 from openra_env.mcp_ws_client import OpenRAMCPClient
+
+
+def _fast_advance_deadline_s() -> float:
+    """Match C# / bridge_client OPENRA_RL_FAST_ADVANCE_DEADLINE_S (default 90)."""
+    raw = os.environ.get("OPENRA_RL_FAST_ADVANCE_DEADLINE_S", "")
+    try:
+        val = float(raw) if str(raw).strip() else 90.0
+    except (TypeError, ValueError):
+        val = 90.0
+    return max(5.0, val)
+
+
+def default_op_message_timeout_s() -> float:
+    """Per-advance/step WS recv timeout: deadline + slack, fail-fast on hung call.
+
+    Episode wall-time is many advances; a single stuck dialogue must not sit
+    for max_steps*3 (~3000s).
+    """
+    return _fast_advance_deadline_s() + 20.0
+
 from openra_env.models import (
     BuildingInfoModel,
     EconomyInfo,
@@ -125,12 +146,71 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
             done=data.get("done", obs_data.get("done", False)),
         )
 
+    async def _send_and_receive_op(self, message: dict, timeout_s: float | None = None):
+        """Fail-fast send+recv. Recv-only timeout is not enough.
+
+        EnvClient._receive times out _ws.recv, but a wedged server that is
+        not reading (stuck in to_thread FastAdvance) makes _ws.send hang
+        forever. Wrap the whole dialogue so TimeoutError always surfaces
+        with a non-empty message within ~deadline+slack.
+        """
+        op_t = float(timeout_s if timeout_s is not None else default_op_message_timeout_s())
+        configured = float(getattr(self, "_message_timeout", op_t) or op_t)
+        use_t = min(configured, op_t) if configured > 0 else op_t
+        old = self._message_timeout
+        self._message_timeout = use_t
+        try:
+            return await asyncio.wait_for(
+                self._send_and_receive(message), timeout=use_t)
+        except (TimeoutError, asyncio.TimeoutError) as e:
+            raise TimeoutError(
+                f"WS op timed out after {use_t:.0f}s "
+                f"(type={message.get('type')})"
+            ) from e
+        finally:
+            self._message_timeout = old
+
+    async def reset(self, **kwargs):
+        """Reset with the same per-op WS cap as advance (CreateSession <=60s)."""
+        message = {"type": "reset", "data": kwargs}
+        response = await self._send_and_receive_op(message)
+        return self._parse_result(response.get("data", {}))
+
+    async def close(self) -> None:
+        """Disconnect in <=5s so a wedged server cannot hold gather."""
+        try:
+            await asyncio.wait_for(self.disconnect(), timeout=5.0)
+        except Exception:
+            self._ws = None
+        provider = getattr(self, "_provider", None)
+        if provider is None:
+            return
+        try:
+            if hasattr(provider, "stop_container"):
+                provider.stop_container()
+            elif hasattr(provider, "stop"):
+                provider.stop()
+        except Exception:
+            pass
+
+    async def step(self, action, **kwargs):
+        """Step with per-op WS timeout (hung FastAdvance fails ~deadline+slack)."""
+        message = {
+            "type": "step",
+            "data": self._step_payload(action),
+        }
+        response = await self._send_and_receive_op(message)
+        return self._parse_result(response.get("data", {}))
+
     async def advance(self, ticks: int) -> dict:
         """Avanza hasta N ticks (clamp server: 50/llamada) vía el tool MCP
         `advance` sobre la MISMA sesion /ws (reset/step/advance comparten
         conexion). Devuelve el resumen con interrupted/interrupt_reason/
         actual_ticks_advanced que el rollout usa para cerrar el bloque macro.
         Se habla JSON-RPC MCP ({"type":"mcp",...}) igual que mcp_ws_client.
+
+        Per-call WS timeout is capped near OPENRA_RL_FAST_ADVANCE_DEADLINE_S
+        (+20s slack), not the episode-scaled message_timeout (~3000s).
         """
         self._rpc_advance = getattr(self, "_rpc_advance", 0) + 1
         rpc_request = {
@@ -139,7 +219,7 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
             "params": {"name": "advance", "arguments": {"ticks": int(ticks)}},
             "id": f"adv{self._rpc_advance}",
         }
-        response = await self._send_and_receive({"type": "mcp", "data": rpc_request})
+        response = await self._send_and_receive_op({"type": "mcp", "data": rpc_request})
         data = response.get("data", {})
         result = data.get("result", {})
         return (OpenRAMCPClient._unwrap_mcp_result(result)

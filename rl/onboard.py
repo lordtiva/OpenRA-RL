@@ -74,6 +74,7 @@ DEFAULTS = {
 _STORE_TRUE = {
     "--pfsp", "--pfsp-rl", "--bc", "--bc-only", "--sil",
     "--reset-opt", "--bc-keep-incomplete", "--bc-replay",
+    "--auto-hyper", "--no-auto-hyper", "--hyper-pause",
     "--bc-collect-only", "--no-amp",
 }
 _STRIP = {
@@ -91,6 +92,7 @@ _STRIP = {
     "--amp-init-scale", "--no-amp",
     "--map-pool",
     "--heuristic-p", "--heuristic-anneal-iters", "--heuristic-phase-start",
+    "--auto-hyper", "--no-auto-hyper", "--hyper-pause", "--hyper-pause-iters",
 }
 
 
@@ -293,6 +295,7 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--adv-mode", "episode",
             "--iters", str(int(cfg["bc_iters"])),
             "--onboard-phase", "A",
+            "--no-auto-hyper",
         ]
     if phase == "B":
         bc_start = int(cfg.get("b_bc_start_iter") or 0)
@@ -327,8 +330,8 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--no-amp",
             "--iters", str(int(cfg["bc_iters"])),
             "--onboard-phase", "B",
-            # P1.4: anneal stage/guard after Phase B start (Phase A stays 1.0)
-            # First B iter (= phase_started_iter+1) → p=1.0 at boundary
+            # P1.4: anneal guard_army_push_cell after Phase B start.
+            # stage/remap stay always-on. First B iter → p=1.0 at boundary.
             "--heuristic-phase-start", str(int(
                 cfg.get("heuristic_phase_start")
                 or ((int(cfg.get("phase_started_iter") or 0) + 1)
@@ -337,6 +340,7 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--heuristic-anneal-iters", str(int(
                 cfg.get("heuristic_anneal_iters")
                 or DEFAULTS.get("heuristic_anneal_iters", 60))),
+            "--auto-hyper",
         ]
     if phase in EXPAND_PHASES:
         return _expand_phase_flags(phase, cfg)
@@ -384,8 +388,7 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
         "--mix-start-iter", str(max(1, mix_start_iter)),
         "--iters", str(int(cfg["bc_iters"])),
         "--onboard-phase", phase,
-        # P1.4: continue anneal from this phase's start iter
-        # Prefer frozen B-start so anneal continues across C/D/E
+        # P1.4: continue guard anneal from frozen B-start across C/D/E.
         "--heuristic-phase-start", str(int(
             cfg.get("heuristic_phase_start")
             or ((int(cfg.get("phase_started_iter") or 0) + 1)
@@ -394,6 +397,7 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
         "--heuristic-anneal-iters", str(int(
             cfg.get("heuristic_anneal_iters")
             or DEFAULTS.get("heuristic_anneal_iters", 60))),
+        "--auto-hyper",
     ]
 
 

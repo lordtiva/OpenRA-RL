@@ -20,8 +20,11 @@ import time
 import numpy as np
 import torch
 
-from openra_env.client import OpenRAEnv
+from openra_env.client import OpenRAEnv, default_op_message_timeout_s
 from rl.collect_heartbeat import write_heartbeat
+from rl.collect_timeout import (
+    await_env_op, close_env_now, is_collect_timeout, note_collect_timeout,
+)
 from rl.peer_obs import peer_obs_from_metadata
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.action_adapter import (ActionIndex, Vocab, apply_passability,
@@ -49,6 +52,49 @@ from rl.auto_support import apply_dest_credit, support_commands
 # Closing NO_OP (+2) is obs-refresh overhead beyond the macro_ticks budget
 # and is NOT included in delta_t (matches restante = macro_ticks - 2).
 STEP_TICKS = 2
+
+# Early-stop turtle/timeout: 53k-tick incompletes poison V(s) via mining/naked.
+IDLE_TRUNCATE_AFTER_TICK = 35000
+IDLE_TRUNCATE_IDLE_TICKS = 5000
+_COMBAT_INTERRUPTS = frozenset({
+    "unit_destroyed", "under_attack",
+    "enemy_building_destroyed", "own_building_destroyed",
+})
+
+
+def episode_progress(obs, gs=None):
+    """Tick + combat cost + earned for idle-truncate."""
+    mil = getattr(obs, "military", None)
+    kills = int(getattr(mil, "kills_cost", 0) or 0) if mil is not None else 0
+    deaths = int(getattr(mil, "deaths_cost", 0) or 0) if mil is not None else 0
+    earned = 0
+    if isinstance(gs, dict):
+        try:
+            earned = int((gs.get("own") or {}).get("earned", 0) or 0)
+        except (TypeError, ValueError):
+            earned = 0
+    tick = int(getattr(obs, "tick", 0) or 0)
+    return tick, kills, deaths, earned
+
+
+def is_progress_activity(kills, deaths, earned, prev_kills, prev_deaths,
+                         prev_earned, interrupt_reason=None) -> bool:
+    if kills > prev_kills or deaths > prev_deaths or earned > prev_earned:
+        return True
+    return str(interrupt_reason or "") in _COMBAT_INTERRUPTS
+
+
+def should_idle_truncate(tick, last_activity_tick, *,
+                         after_tick=IDLE_TRUNCATE_AFTER_TICK,
+                         idle_ticks=IDLE_TRUNCATE_IDLE_TICKS) -> bool:
+    """True after `after_tick` with `idle_ticks` of no combat and no income."""
+    after = int(after_tick or 0)
+    idle = int(idle_ticks or 0)
+    if after <= 0 or idle <= 0:
+        return False
+    if int(tick) < after:
+        return False
+    return (int(tick) - int(last_activity_tick or 0)) >= idle
 
 
 def smdp_k_ref(macro_ticks: int = 0, k_skip: int = 8, explicit: float | None = None) -> float:
@@ -176,7 +222,9 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                               smdp_k_ref_ticks: float | None = None,
                               heartbeat_path: str | None = None,
                               heartbeat_iter: int | None = None,
-                              heartbeat_worker: int | None = None):
+                              heartbeat_worker: int | None = None,
+                              idle_truncate_after_tick: int = IDLE_TRUNCATE_AFTER_TICK,
+                              idle_truncate_idle_ticks: int = IDLE_TRUNCATE_IDLE_TICKS):
     """Juega UNA partida completa; devuelve (trayectoria, resumen).
 
     max_steps limita los env.step (cada uno avanza 2 ticks del juego):
@@ -193,7 +241,19 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     """
     use_macro = macro_ticks > 0
     k_ref = smdp_k_ref(macro_ticks, k_skip, smdp_k_ref_ticks)
-    result = await env.reset(**(reset_kwargs or {}))
+    op_t = default_op_message_timeout_s()
+    # Heartbeat *before* reset — a hung CreateSession/wait_for_ready used
+    # to freeze hb at the previous decision's phase=collect.
+    if heartbeat_path:
+        write_heartbeat(
+            heartbeat_path, phase="collect_reset", force=True,
+            iter=heartbeat_iter, worker=heartbeat_worker)
+    result = await await_env_op(
+        env.reset(**(reset_kwargs or {})),
+        timeout_s=op_t,
+        heartbeat_path=heartbeat_path,
+        what="reset", error="reset_timeout",
+        iter=heartbeat_iter, worker=heartbeat_worker)
     obs = result.observation
 
     hidden = torch.zeros(1, HIDDEN_DIM, device=device)
@@ -256,6 +316,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     last_push_cell = None  # (x, y) del último army/attack_move
     last_army_push_cell = None  # hysteresis for executed army_attack_move
     atype = "no_op"  # ultimo tipo efectivo; NO_OP en shell / pre-lock
+    last_activity_tick = int(getattr(obs, "tick", 0) or 0)
+    _idle_kills = _idle_deaths = _idle_earned = 0
 
     for step in range(max_steps):
         # Decidir SIEMPRE cada k_skip (o cada iteracion en modo macro).
@@ -589,8 +651,27 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
 
         result = None
         try:
-            result = await env.step(pending_cmd)
-        except RuntimeError as e:
+            result = await await_env_op(
+                env.step(pending_cmd),
+                timeout_s=op_t,
+                heartbeat_path=heartbeat_path,
+                what="step", error="step_timeout",
+                iter=heartbeat_iter, worker=heartbeat_worker,
+                step=int(step))
+        except Exception as e:
+            if is_collect_timeout(e):
+                print(f"  [engine] step {step}: TIMEOUT/DEADLINE — "
+                      f"abortando episodio ({str(e)[:100]})")
+                outcome_error = True
+                note_collect_timeout(
+                    heartbeat_path, error="step_timeout",
+                    iter=heartbeat_iter, worker=heartbeat_worker,
+                    step=int(step),
+                    tick=int(getattr(obs, "tick", 0) or 0))
+                await close_env_now(env)
+                break
+            if not isinstance(e, RuntimeError):
+                raise
             # Crash del handler C# (ej. atacar un actor que murió entre la
             # obs y la ejecución — solo pasa con combate activo). Degradamos
             # el paso a NO_OP; si se repite demasiado, abortamos el episodio
@@ -602,9 +683,26 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 outcome_error = True
                 break
             try:
-                result = await env.step(OpenRAAction(
-                    commands=[CommandModel(action=ActionType.NO_OP)]))
-            except RuntimeError as e2:
+                result = await await_env_op(
+                    env.step(OpenRAAction(
+                        commands=[CommandModel(action=ActionType.NO_OP)])),
+                    timeout_s=op_t,
+                    heartbeat_path=heartbeat_path,
+                    what="step_recovery", error="step_timeout",
+                    iter=heartbeat_iter, worker=heartbeat_worker,
+                    step=int(step))
+            except Exception as e2:
+                if is_collect_timeout(e2):
+                    print(f"  [engine] recovery {step}: TIMEOUT — abortando")
+                    outcome_error = True
+                    note_collect_timeout(
+                        heartbeat_path, error="step_timeout",
+                        iter=heartbeat_iter, worker=heartbeat_worker,
+                        step=int(step))
+                    await close_env_now(env)
+                    break
+                if not isinstance(e2, RuntimeError):
+                    raise
                 # El paso de RECUPERACIÓN también puede chocar contra el
                 # mismo handler roto (dos crashes seguidos mataban el run
                 # completo — expuesto por v4-macro con combate activo).
@@ -642,7 +740,14 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
             restante = max(0, macro_ticks - 2)
             try:
                 while restante > 0 and not done:
-                    adv = await env.advance(min(50, restante))
+                    adv = await await_env_op(
+                        env.advance(min(50, restante)),
+                        timeout_s=op_t,
+                        heartbeat_path=heartbeat_path,
+                        what="advance", error="advance_deadline",
+                        iter=heartbeat_iter, worker=heartbeat_worker,
+                        step=int(step),
+                        tick=int(getattr(obs, "tick", 0) or 0))
                     _adv_n = int(adv.get("actual_ticks_advanced", 0) or 0)
                     advanced_total += _adv_n
                     decision_adv_ticks += _adv_n
@@ -666,8 +771,14 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     # decisión Y para moldear los deltas acumulados del bloque
                     # (advance() no trae military: sin este paso, todo lo
                     # pasado dentro del bloque no pagaría nada).
-                    result = await env.step(OpenRAAction(
-                        commands=[CommandModel(action=ActionType.NO_OP)]))
+                    result = await await_env_op(
+                        env.step(OpenRAAction(
+                            commands=[CommandModel(action=ActionType.NO_OP)])),
+                        timeout_s=op_t,
+                        heartbeat_path=heartbeat_path,
+                        what="step_close", error="step_timeout",
+                        iter=heartbeat_iter, worker=heartbeat_worker,
+                        step=int(step))
                     obs = result.observation
                     done = bool(result.done)
                     last_gs = getattr(race, "_last_gs", None)
@@ -692,22 +803,30 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                              own_wealth=own_w, enemy_wealth=ene_w)
             except Exception as e:
                 msg = str(e)
-                is_deadline = "DEADLINE" in msg or "Deadline" in msg
-                # DEADLINE_EXCEEDED = sesión envenenada (World.Tick() colgado).
-                # El retry sobre el mismo session_id solo reproduce el cuelgue.
-                # Romper rápido, marcar el episodio como timeout y dejar el
-                # env en estado que el caller (train.py::worker) saneará con
-                # un reset fresco en el próximo episodio del pool.
+                is_deadline = is_collect_timeout(e)
+                # DEADLINE_EXCEEDED / ABORTED = sesión envenenada (World.Tick
+                # colgado o C# deadline). Retry sobre el mismo session_id solo
+                # reproduce el cuelgue. Romper rápido, marcar episodio timeout,
+                # heartbeat force (watchdog ve death/life), destroy ≤5s, seguir
+                # el pool — NO requiere Docker recreate por un solo advance.
                 if is_deadline:
-                    print(f"  [engine] advance {step}: DEADLINE_EXCEEDED "
-                          f"(ticks={macro_ticks}, batalla grande) — "
-                          f"sesión envenenada, abortando episodio")
+                    print(f"  [engine] advance {step}: DEADLINE/ABORT "
+                          f"(ticks={macro_ticks}) — sesión envenenada, "
+                          f"abortando episodio ({msg[:100]})")
                     outcome_error = True
-                    # Best-effort: intentar cerrar la sesión colgada sin
-                    # bloquear el rollout.  El destroy puede colgar si el
-                    # canal gRPC está en el mismo estado que causó el
-                    # DEADLINE, por eso lo corremos en un thread daemon con
-                    # join(5s): el rollout sigue en ≤5s pase lo que pase.
+                    try:
+                        _hb(force=True, step_i=step)
+                        note_collect_timeout(
+                            heartbeat_path,
+                            error="advance_deadline",
+                            iter=heartbeat_iter,
+                            worker=heartbeat_worker,
+                            tick=int(getattr(obs, "tick", 0) or 0),
+                            step=int(step),
+                        )
+                    except Exception:
+                        pass
+                    await close_env_now(env)
                     import threading as _threading
                     br = getattr(env, "_bridge", None) or getattr(env, "bridge", None)
                     if br is not None and hasattr(br, "destroy_session"):
@@ -764,6 +883,22 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
         if use_macro and telemetry is not None and pending_sample is not None:
             telemetry[-1]["macro_ticks"] = macro_ticks
             telemetry[-1]["interrupt_reason"] = interrupt_reason
+
+        gs_now = getattr(race, "_last_gs", None)
+        tick_now, kills_now, deaths_now, earned_now = episode_progress(
+            obs, gs_now)
+        if is_progress_activity(
+                kills_now, deaths_now, earned_now,
+                _idle_kills, _idle_deaths, _idle_earned,
+                interrupt_reason=interrupt_reason):
+            last_activity_tick = tick_now
+        _idle_kills, _idle_deaths, _idle_earned = (
+            kills_now, deaths_now, earned_now)
+        if (not done) and should_idle_truncate(
+                tick_now, last_activity_tick,
+                after_tick=idle_truncate_after_tick,
+                idle_ticks=idle_truncate_idle_ticks):
+            break
 
         if done:
             break

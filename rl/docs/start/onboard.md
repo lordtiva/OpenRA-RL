@@ -13,10 +13,10 @@ Comando: `.\.venv\Scripts\python.exe rl\auto_train.py --scratch --onboard` (desp
 
 **Army push (runtime adapter, 2026-09-07):** pipeline en `index_to_command_effective` + hysteresis en live/rollout. Live/eval lo toma al **reiniciar el proceso** (sin `--scratch`).
 
-1. `stage_army_attack_cell`: `n_advanced>=8` / `cen.x>35` / attractor guard — flank N/S **solo** en opening choke.
+1. `stage_army_attack_cell`: always-on safety (like remap). `n_advanced>=8` / `cen.x>35` / attractor guard — flank N/S **solo** en opening choke. `heuristic_p` no lo apaga.
 2. `remap_move_cell`: `nearest_passable` cerca del click — **sin** funnel south-flank/ore.
 3. hysteresis (`should_emit_army_push` / `filter_army_push_hysteresis`, eps=8): no spamea el mismo `army_attack_move`.
-4. `guard_army_push_cell`: no tira al oeste una vanguardia `x>70`; fog-east retarget (beacon/mental/front) si no hay edificios enemigos visibles.
+4. `guard_army_push_cell`: annealable (`heuristic_p`). No tira al oeste una vanguardia `x>70`; fog-east retarget (beacon/mental/front) si no hay edificios enemigos visibles.
 
 **2026-09-06 — Phase A inactivity:** Phase A / `--onboard` forces `--qsa-topk 0` and `--xf-topk 0` (dense). `balance_bc_samples` defaults **512/512**. Teacher `_push_cell`: visible/leftover/ghost/mental-base first; only when belief empty, `resolve_beacon` is the opening-SFT prior. `bc_only` eval usa **temperature=0.0**. Schema `eco_and_combat_mental_v4`.
 

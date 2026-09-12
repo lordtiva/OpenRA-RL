@@ -62,7 +62,9 @@ from rl.live_lobby import (
     resolve_episode_spawn,
 )
 from rl.obs_encoding import BEACON_BY_MAP, EnemyBeliefStore, decode_spatial
-from rl.rollout import _batch_of
+from rl.rollout import (
+    _batch_of, episode_progress, is_progress_activity, should_idle_truncate,
+)
 from rl.action_adapter import index_to_command_effective, filter_army_push_hysteresis
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.reward_shaping import PRESETS, ShapedReward
@@ -524,6 +526,9 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
     macro_final = None
     last_push_cell = None
     last_army_push_cell = None  # hysteresis for executed army_attack_move
+    last_activity_tick = int(getattr(obs, "tick", 0) or 0)
+    _idle_kills = _idle_deaths = _idle_earned = 0
+    last_gs = None
     belief = EnemyBeliefStore()
     ep_id = (
         f"live_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -708,6 +713,9 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                     done = bool(adv.get("done", False))
                     if done:
                         macro_final = adv.get("result")
+                    gs_adv = adv.get("global_summary")
+                    if isinstance(gs_adv, dict):
+                        last_gs = gs_adv
                     restante -= int(adv.get("actual_ticks_advanced", 0) or 0)
                 if not done:
                     result = await env.step(OpenRAAction(commands=[CommandModel(action=ActionType.NO_OP)]))
@@ -746,6 +754,20 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                               + len(obs.visible_enemy_buildings or [])),
                 })
             _push(obs, f"dec {decs} tick {obs.tick}", done, getattr(obs, "result", "") or macro_final or "")
+
+        tick_now, kills_now, deaths_now, earned_now = episode_progress(
+            obs, last_gs)
+        if is_progress_activity(
+                kills_now, deaths_now, earned_now,
+                _idle_kills, _idle_deaths, _idle_earned):
+            last_activity_tick = tick_now
+        _idle_kills, _idle_deaths, _idle_earned = (
+            kills_now, deaths_now, earned_now)
+        if (not done) and should_idle_truncate(
+                tick_now, last_activity_tick,
+                after_tick=int(getattr(args, "idle_truncate_after_tick", 35000) or 0),
+                idle_ticks=int(getattr(args, "idle_truncate_idle_ticks", 5000) or 0)):
+            break
 
         if done:
             break
@@ -928,7 +950,7 @@ def main():
     ap.add_argument("--ai-slot", default=None, help='slot IA: "Multi0" (default) o "" para sin enemigo')
     ap.add_argument("--scenario", default="a_short")
     ap.add_argument("--episodes", type=int, default=0, help="0 = loop infinito; recarga latest.pt entre partidas")
-    ap.add_argument("--pause-sec", type=float, default=15.0,
+    ap.add_argument("--pause-sec", type=float, default=10.0,
                     help="segundos a retener el frame final entre partidas (0 = turbo)")
     ap.add_argument("--step-delay", type=float, default=0.0,
                     help="segundos extra por decisión (0.2 hace el canvas seguible)")
@@ -938,6 +960,10 @@ def main():
     ap.add_argument("--k-skip", type=int, default=8)
     ap.add_argument("--macro-ticks", type=int, default=50)
     ap.add_argument("--max-steps", type=int, default=1000)
+    ap.add_argument("--idle-truncate-after-tick", type=int, default=35000,
+                    help="After this many ticks, allow idle early-truncate (0=off).")
+    ap.add_argument("--idle-truncate-idle-ticks", type=int, default=5000,
+                    help="No combat/income ticks before idle-truncate (0=off).")
     ap.add_argument("--shaper-preset", default="eradicate_v4", choices=list(PRESETS))
     ap.add_argument("--auto-support", action=argparse.BooleanOptionalAction, default=True,
                     help="harvest/repair/power automático (Pilar B); default on como el train")
@@ -959,7 +985,7 @@ def main():
         help="facción del bot: Random|RandomAllies|RandomSoviet|england|france|germany|russia|ukraine",
     )
     ap.add_argument(
-        "--spawn", default="random",
+        "--spawn", default="sw",
         help="spawn del agent: random|sw|ne (pin via LockSpawn en el .oramap; agent=Multi1)",
     )
     ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")
