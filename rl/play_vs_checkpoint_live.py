@@ -29,8 +29,9 @@ Al terminar cada partida (win/lose/incomplete) append a
 rl/ckpts_v2/live_games.jsonl y el tape completo a rl/ckpts_v2/live_tape.jsonl.
 El visor puede grabar WebM (mapa+HUD) a {ckpt_dir}/live_recordings/{episode_id}.webm
 con el mismo episode_id que va en el jsonl.
-Ctrl+C / DEADLINE no escriben: un chequeo corto no deja basura del run
-siguiente. No pisa el train.
+Ctrl+C / session-dead no escriben log incompleto. On NO-PROGRESS /
+DEADLINE / UNAVAILABLE / poisoned: recreate session on --url and
+restart the episode (caps: 3/ep, 20/process). No pisa el train.
 """
 import argparse
 import asyncio
@@ -66,6 +67,7 @@ from rl.war_objective import war_objective
 from rl.rollout import (
     _batch_of, episode_progress, is_progress_activity, should_idle_truncate,
 )
+from rl.collect_timeout import close_env_now, is_live_session_dead
 from rl.action_adapter import index_to_command_effective, filter_army_push_hysteresis
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.reward_shaping import PRESETS, ShapedReward
@@ -435,6 +437,43 @@ def _obs_to_live_state(obs, beacon, hist, decs, rew, adv_ticks, last_action_str,
     }
 
 
+
+# Session recreate caps (live only — train URLs / auto_train untouched).
+LIVE_RECOVER_PER_EP = 3
+LIVE_RECOVER_PROCESS = 20
+LIVE_RECOVER_SLEEP_S = 0.75
+
+
+def _live_session_dead_outcome(exc, *, pf=None, ef=None, hist=None,
+                               decs=0, episode_reward=0.0, adv_total=0,
+                               ticks=0):
+    """Mark episode aborted so amain recreates env and restarts from reset."""
+    reason = str(exc)[:160] if exc is not None else "unknown"
+    return {
+        "result": "session_dead",
+        "ticks": int(ticks or 0),
+        "decisions": int(decs or 0),
+        "episode_reward": round(float(episode_reward or 0.0), 3),
+        "hist": dict(hist or {}),
+        "advanced_ticks": int(adv_total or 0),
+        "dist_to_beacon": None,
+        "player_faction": pf,
+        "enemy_faction": ef,
+        "session_dead": True,
+        "session_dead_reason": reason,
+        "aborted": True,
+    }
+
+
+async def _recreate_live_env(old_env, *, url: str, ws_timeout: float):
+    """close_env_now + new OpenRAEnv(base_url=url) + connect."""
+    await close_env_now(old_env, timeout_s=5.0)
+    await asyncio.sleep(LIVE_RECOVER_SLEEP_S)
+    env = OpenRAEnv(base_url=url, message_timeout_s=ws_timeout)
+    await env.connect()
+    return env
+
+
 async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                            broadcaster: LiveBroadcaster, ckpt_iter: int = 0,
                            ep_index: int = 1):
@@ -499,7 +538,21 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
             },
         })
 
-    result = await env.reset(**reset_kwargs)
+    try:
+        result = await env.reset(**reset_kwargs)
+    except Exception as e:
+        if is_live_session_dead(e):
+            print(
+                f"  [live] session dead on reset ({e}) — recreating on {args.url}",
+                flush=True,
+            )
+            if broadcaster is not None:
+                broadcaster.update({
+                    "status": f"session dead — recreando…",
+                    "done": False,
+                })
+            return _live_session_dead_outcome(e)
+        raise
     obs = result.observation
     pf, ef = _faction_pair(obs)
     try:
@@ -699,11 +752,42 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
 
         try:
             result = await env.step(action)
-        except RuntimeError as e:
-            # degradar a NO_OP
+        except Exception as e:
+            if is_live_session_dead(e):
+                print(
+                    f"  [live] session dead (step: {e}) — recreating on {args.url}",
+                    flush=True,
+                )
+                if broadcaster is not None:
+                    broadcaster.update({
+                        "status": "session dead — recreando…",
+                        "done": False,
+                    })
+                return _live_session_dead_outcome(
+                    e, pf=pf, ef=ef, hist=hist, decs=decs,
+                    episode_reward=episode_reward, adv_total=adv_total,
+                    ticks=getattr(obs, "tick", 0) or 0)
+            if not isinstance(e, RuntimeError):
+                raise
+            # degradar a NO_OP (handler C# one-off)
             try:
                 result = await env.step(OpenRAAction(commands=[CommandModel(action=ActionType.NO_OP)]))
-            except Exception:
+            except Exception as e2:
+                if is_live_session_dead(e2):
+                    print(
+                        f"  [live] session dead (step recovery: {e2}) — "
+                        f"recreating on {args.url}",
+                        flush=True,
+                    )
+                    if broadcaster is not None:
+                        broadcaster.update({
+                            "status": "session dead — recreando…",
+                            "done": False,
+                        })
+                    return _live_session_dead_outcome(
+                        e2, pf=pf, ef=ef, hist=hist, decs=decs,
+                        episode_reward=episode_reward, adv_total=adv_total,
+                        ticks=getattr(obs, "tick", 0) or 0)
                 aborted = True
                 break
         obs = result.observation
@@ -732,10 +816,24 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                     r_close = shaper.step(obs, done=done, action_type=atype_str, closing=True)
                     episode_reward += r_close
             except Exception as e:
-                if "DEADLINE" in str(e):
-                    broadcaster.update({"status": "DEADLINE — sesión envenenada, abortando"})
-                    aborted = True
-                    break
+                if is_live_session_dead(e):
+                    print(
+                        f"  [live] session dead ({e}) — recreating on {args.url}",
+                        flush=True,
+                    )
+                    if broadcaster is not None:
+                        broadcaster.update({
+                            "status": "session dead — recreando…",
+                            "done": False,
+                        })
+                    return _live_session_dead_outcome(
+                        e, pf=pf, ef=ef, hist=hist, decs=decs,
+                        episode_reward=episode_reward, adv_total=adv_total,
+                        ticks=getattr(obs, "tick", 0) or 0)
+                # non-fatal advance glitch: abort this episode (no retry storm)
+                print(f"  [live] advance error (non-recoverable): {e}", flush=True)
+                aborted = True
+                break
 
         # push live cada decisión (throttle: solo si can_decide para no spamear)
         if can_decide:
@@ -907,6 +1005,7 @@ async def amain(args):
 
     last_mtime = ckpt_path.stat().st_mtime if ckpt_path.exists() else 0.0
     ep = 0
+    process_recovers = 0
     try:
         while True:
             ep += 1
@@ -925,8 +1024,66 @@ async def amain(args):
             label = str(ep) if args.episodes <= 0 else f"{ep}/{args.episodes}"
             print(f"\n=== Episodio {label} ===")
             bc.update({"status": f"episodio {label} — iniciando…", "done": False, "ckpt_iter": it, "episode_id": ""})
-            outcome = await run_episode_live(
-                env, net, vocab, device, args, bc, ckpt_iter=it, ep_index=ep)
+            # Full episode restart on dead session (prefer clear abort+reset
+            # over mid-game resume). Caps avoid infinite recreate loops.
+            ep_recovers = 0
+            while True:
+                outcome = await run_episode_live(
+                    env, net, vocab, device, args, bc, ckpt_iter=it, ep_index=ep)
+                if not outcome.get("session_dead"):
+                    break
+                reason = outcome.get("session_dead_reason") or "unknown"
+                ep_recovers += 1
+                process_recovers += 1
+                print(
+                    f"[live] session dead ({reason}) — recreating on {args.url} "
+                    f"(ep_recover={ep_recovers}/{LIVE_RECOVER_PER_EP}, "
+                    f"proc={process_recovers}/{LIVE_RECOVER_PROCESS})",
+                    flush=True,
+                )
+                bc.update({
+                    "status": f"session dead — recreando ({ep_recovers}/{LIVE_RECOVER_PER_EP})…",
+                    "done": False,
+                })
+                if process_recovers > LIVE_RECOVER_PROCESS:
+                    print(
+                        f"[live] abort: process recover cap "
+                        f"({LIVE_RECOVER_PROCESS}) exceeded — exiting",
+                        flush=True,
+                    )
+                    return
+                if ep_recovers > LIVE_RECOVER_PER_EP:
+                    print(
+                        f"[live] abort episode {label}: recover cap "
+                        f"({LIVE_RECOVER_PER_EP}) exceeded — next episode",
+                        flush=True,
+                    )
+                    outcome = {
+                        **outcome,
+                        "result": "session_dead_gave_up",
+                    }
+                    break
+                try:
+                    env = await _recreate_live_env(
+                        env, url=args.url, ws_timeout=ws_timeout)
+                    print(f"[live] reconnected to {args.url} — restarting episode",
+                          flush=True)
+                except Exception as re_exc:
+                    print(f"[live] recreate failed: {re_exc}", flush=True)
+                    if process_recovers > LIVE_RECOVER_PROCESS:
+                        return
+                    # still count toward caps; brief sleep already in helper
+                    await asyncio.sleep(LIVE_RECOVER_SLEEP_S)
+                    try:
+                        env = await _recreate_live_env(
+                            None, url=args.url, ws_timeout=ws_timeout)
+                    except Exception as re_exc2:
+                        print(f"[live] recreate retry failed: {re_exc2} — exiting",
+                              flush=True)
+                        return
+            if outcome.get("session_dead") and outcome.get("result") == "session_dead_gave_up":
+                # skip pause noise; go next episode
+                continue
             print(f"  result={outcome['result']} ticks={outcome['ticks']} "
                   f"decs={outcome['decisions']} rew={outcome['episode_reward']} "
                   f"faction={outcome.get('player_faction') or '?'} "
@@ -949,7 +1106,7 @@ async def amain(args):
         pass
     finally:
         try:
-            await env.close()
+            await close_env_now(env, timeout_s=5.0)
         except Exception:
             pass
         bc.stop()

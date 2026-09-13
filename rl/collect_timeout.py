@@ -40,6 +40,31 @@ def is_collect_timeout(exc: BaseException | None) -> bool:
     )
 
 
+
+
+def is_live_session_dead(exc: BaseException | None) -> bool:
+    """True when live viewer must stop advance/step and recreate the session.
+
+    Covers collect timeouts plus C# NO-PROGRESS / UNAVAILABLE (and the usual
+    poisoned / CreateSession / DEADLINE / ABORTED strings). Used only by the
+    live path — train keeps using is_collect_timeout.
+    """
+    if exc is None:
+        return False
+    if is_collect_timeout(exc):
+        return True
+    msg = str(exc)
+    low = msg.lower()
+    return (
+        "NO-PROGRESS" in msg or "no-progress" in low
+        or "UNAVAILABLE" in msg or "unavailable" in low
+        or "DEADLINE" in msg
+        or "poisoned" in low
+        or "CreateSession required" in msg
+        or "ABORTED" in msg or "Aborted" in msg
+    )
+
+
 def note_collect_timeout(
     heartbeat_path,
     *,
