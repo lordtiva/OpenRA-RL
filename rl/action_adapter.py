@@ -208,6 +208,105 @@ def economy_ready_for_combat(obs) -> bool:
     return False
 
 
+# Low-power plant: e1 ($100) vacuums cash+ore so a $300 powr never queues.
+# Same style as proc-before-combat. Runtime — no scratch. PLACE stays legal.
+POWR_COST = 300
+POWER_PLANT_CAP = 8
+_POWER_ITEMS = frozenset({"powr", "apwr", "power"})
+_BUILDING_QUEUE = frozenset(
+    {"building", "buildings", "structure", "structures"})
+
+
+def spendable_resources(obs) -> int:
+    """Cash + silo ore. OpenRA spends the combined pool."""
+    eco = getattr(obs, "economy", None)
+    return (int(getattr(eco, "cash", 0) or 0)
+            + int(getattr(eco, "ore", 0) or 0))
+
+
+def power_in_deficit(obs) -> bool:
+    eco = getattr(obs, "economy", None)
+    try:
+        provided = int(getattr(eco, "power_provided", 0) or 0)
+        drained = int(getattr(eco, "power_drained", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return drained > provided
+
+
+def building_queue_busy(obs) -> bool:
+    for p in getattr(obs, "production", None) or []:
+        qt = str(getattr(p, "queue_type", "") or "").lower()
+        if qt not in _BUILDING_QUEUE:
+            continue
+        try:
+            if float(getattr(p, "progress", 0) or 0) < 0.99:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def power_in_flight(obs) -> bool:
+    """True if a plant is queued or ready to PLACE."""
+    for p in getattr(obs, "production", None) or []:
+        if str(getattr(p, "item", "") or "").lower() in _POWER_ITEMS:
+            return True
+    pending = pending_place_item(obs)
+    return bool(pending) and str(pending).lower() in _POWER_ITEMS
+
+
+def can_produce_power(obs) -> bool:
+    for it in getattr(obs, "available_production", None) or []:
+        if str(it or "").lower() in _POWER_ITEMS:
+            return True
+    return False
+
+
+def n_power_plants(obs) -> int:
+    n = 0
+    for b in getattr(obs, "buildings", None) or []:
+        if str(getattr(b, "type", "") or "").lower() in ("powr", "apwr"):
+            n += 1
+    return n
+
+
+def needs_power_build(obs) -> bool:
+    """Deficit + can pay + queue free + plant not already in flight."""
+    if not power_in_deficit(obs) or not owns_proc(obs):
+        return False
+    if spendable_resources(obs) < POWR_COST:
+        return False
+    if power_in_flight(obs) or building_queue_busy(obs):
+        return False
+    if n_power_plants(obs) >= POWER_PLANT_CAP:
+        return False
+    return can_produce_power(obs)
+
+
+def _apply_power_priority(obs, t_name: str, item_type: str, aidx):
+    """When low-power: PLACE/BUILD powr beats train e1 / build pbox."""
+    if not power_in_deficit(obs) or not owns_proc(obs):
+        return t_name, item_type
+    pending = pending_place_item(obs)
+    if pending and str(pending).lower() in _POWER_ITEMS:
+        if t_name in ("train", "build", "no_op"):
+            return "place_building", pending
+        return t_name, item_type
+    item = str(item_type or "")
+    has_power_slot = "power" in (getattr(aidx, "build_items", None) or [])
+    if t_name == "train" and item in COMBAT_TRAIN_ROLES:
+        if needs_power_build(obs) and has_power_slot:
+            return "build", "power"
+        return "no_op", item_type
+    if t_name == "build" and item not in _POWER_ITEMS:
+        if needs_power_build(obs) and has_power_slot:
+            return "build", "power"
+        if power_in_flight(obs):
+            return "no_op", item_type
+    return t_name, item_type
+
+
 def _is_combat_unit(u) -> bool:
     ut = str(getattr(u, "type", "") or "").lower()
     return not any(tag in ut for tag in _NON_COMBAT_TAGS)
@@ -1140,6 +1239,28 @@ class ActionIndex:
             if not bool(self.train_slot_mask.any()):
                 m[TYPE_TO_IDX["train"]] = False
                 self.type_mask = torch.from_numpy(m)
+        # Low-power: e1/pbox cannot steal the $300 plant. PLACE stays on.
+        if power_in_deficit(obs) and owns_proc(obs):
+            for slot, role in enumerate(self.train_items):
+                if slot >= n_vocab:
+                    break
+                if role in COMBAT_TRAIN_ROLES:
+                    self.train_slot_mask[slot] = False
+                    self.item_mask[slot] = False
+            if not bool(self.train_slot_mask.any()):
+                m[TYPE_TO_IDX["train"]] = False
+            freeze_build = needs_power_build(obs) or power_in_flight(obs)
+            if freeze_build:
+                for slot, role in enumerate(self.build_items):
+                    bslot = n_train + slot
+                    if bslot >= n_vocab:
+                        break
+                    if role != "power":
+                        self.build_slot_mask[bslot] = False
+                        self.item_mask[bslot] = False
+                if not bool(self.build_slot_mask.any()):
+                    m[TYPE_TO_IDX["build"]] = False
+            self.type_mask = torch.from_numpy(m)
         # Pack-12: group push with a real army anywhere (Run 44 field remate).
         if n_combat_total(obs) < PACK_ARMY:
             m[TYPE_TO_IDX["army_attack_move"]] = False
@@ -1348,6 +1469,7 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     elif t_name == "train" and not economy_ready_for_combat(obs):
         if item_type in COMBAT_TRAIN_ROLES:
             t_name = "no_op"
+    t_name, item_type = _apply_power_priority(obs, t_name, item_type, aidx)
 
     # Índices EFECTIVOS tras las correcciones (para el log_prob honesto).
     # Se computan ANTES de armar el comando, reflejando cada mutación.

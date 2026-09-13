@@ -157,7 +157,7 @@ def apply_beacon(spatial, cx: int, cy: int, height: int, width: int,
     return spatial
 
 
-SCALAR_DIM = 33  # 29 + own/ene naval+air (P4 append-only; soft-pad via adapt_scalar)
+SCALAR_DIM = 34  # 33 + signed power_balance (append-only; soft-pad via adapt_scalar)
 # Scalar layout (indices):
 #  0 cash, 1 ore, 2 silo_full, 3 power_ratio, 4 low_power, 5 harvs,
 #  6 n_units, 7 n_buildings, 8 n_enemies, 9 n_enemy_bldgs,
@@ -167,6 +167,9 @@ SCALAR_DIM = 33  # 29 + own/ene naval+air (P4 append-only; soft-pad via adapt_sc
 # 25 has_enemy_base_belief, 26 base_rel_dx (vs own CY / map), 27 base_rel_dy,
 # 28 base_conf (count/BASE_STRENGTH_NOM). Mental base from sightings — not GPS.
 # 29 own_naval, 30 own_air, 31 ene_naval (visible), 32 ene_air (visible).
+# 33 power_balance (provided-drained)/400 clipped [-1,1]. Index 3 saturates
+#    at 2× drain; this keeps magnitude past that (ck103 was 100/570).
+POWER_BALANCE_NOM = 400.0
 #    Domain counts /10 clipped — distinguish navy/air from land vehicle globally.
 #    Per-token domain still via role_emb (ROLE_SHIP_* / ROLE_AIR* / heli).
 #    Engine spatial Ch6/Ch8 stay domain-agnostic (no C# channel bump).
@@ -190,6 +193,13 @@ def scalar_features(obs, belief=None) -> np.ndarray:
     silo_full = eco.ore / capacity  # señal separada: silos llenos => construir más
     power_in = max(eco.power_provided, 1)
     power_ratio = min(eco.power_drained / power_in, 2.0) / 2.0
+    try:
+        power_balance = (
+            float(eco.power_provided) - float(eco.power_drained)
+        ) / float(POWER_BALANCE_NOM)
+    except (TypeError, ValueError):
+        power_balance = 0.0
+    power_balance = max(-1.0, min(1.0, power_balance))
     n_units = len(obs.units)
     n_buildings = len(obs.buildings)
     n_enemies = len(obs.visible_enemies)
@@ -305,6 +315,7 @@ def scalar_features(obs, belief=None) -> np.ndarray:
         min(own_air / 10.0, 1.0),
         min(ene_naval / 10.0, 1.0),
         min(ene_air / 10.0, 1.0),
+        power_balance,
     ], dtype=np.float32)
 
 

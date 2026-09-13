@@ -214,6 +214,7 @@ def test_send_and_receive_op_times_out(monkeypatch):
 
     env = OpenRAEnv.__new__(OpenRAEnv)
     env._message_timeout = 3000.0
+    env._ws = object()
 
     async def hang(_msg):
         await asyncio.sleep(30)
@@ -230,6 +231,7 @@ def test_send_and_receive_op_times_out(monkeypatch):
             assert "timed out" in str(e).lower()
         elapsed = time.monotonic() - t0
         assert elapsed < 2.0, elapsed
+        assert env._ws is None
 
     asyncio.run(run())
 
@@ -279,3 +281,118 @@ def test_heartbeat_written_on_timeout_path(tmp_path):
     assert hb["phase"] == "collect_timeout"
     assert hb["error"] == "step_timeout"
     assert hb["iter"] == 7
+
+
+def test_send_and_receive_op_uncancellable_clears_ws(monkeypatch):
+    """Wedged send that ignores CancelledError still times out and drops _ws."""
+    import asyncio
+    import time
+    from openra_env.client import OpenRAEnv
+
+    env = OpenRAEnv.__new__(OpenRAEnv)
+    env._message_timeout = 3000.0
+    env._ws = object()  # sentinel; must be cleared on timeout
+
+    async def uncancellable(_msg):
+        # Ignore first CancelledError briefly (wedged ws.send), then cooperate
+        # so asyncio.run shutdown cannot hang.
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.4)
+            raise
+
+    env._send_and_receive = uncancellable
+    monkeypatch.setenv("OPENRA_RL_FAST_ADVANCE_DEADLINE_S", "1")
+
+    async def run():
+        t0 = time.monotonic()
+        try:
+            await env._send_and_receive_op({"type": "mcp"}, timeout_s=0.25)
+            raise AssertionError("should have timed out")
+        except TimeoutError as e:
+            assert "timed out" in str(e).lower()
+            assert "force-dropped" in str(e).lower() or "timed out" in str(e).lower()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 2.0, elapsed
+        assert env._ws is None
+
+    asyncio.run(run())
+
+
+def test_await_env_op_uncancellable_bounded(tmp_path):
+    """await_env_op must not hang waiting for cancel of an uncancellable coro."""
+    import asyncio
+    import time
+    from rl.collect_heartbeat import read_heartbeat
+    from rl.collect_timeout import await_env_op
+
+    async def uncancellable():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.4)
+            raise
+
+    async def run():
+        t0 = time.monotonic()
+        try:
+            await await_env_op(
+                uncancellable(),
+                timeout_s=0.25,
+                heartbeat_path=tmp_path,
+                what="uncancellable_op",
+                error="op_timeout",
+                iter=1,
+            )
+            raise AssertionError("must timeout")
+        except TimeoutError as e:
+            assert "timed out" in str(e)
+        elapsed = time.monotonic() - t0
+        # timeout 0.25 + cancel join <=1s + slack
+        assert elapsed < 2.0, elapsed
+        hb = read_heartbeat(tmp_path)
+        assert hb is not None
+        assert hb["phase"] == "collect_timeout"
+
+    asyncio.run(run())
+
+
+def test_hang_threshold_for_dead_hb():
+    """markers=0 + GPU low + dead collect hb → ~HB_DEAD_HANG_S, not 900."""
+    base = 900
+    # Healthy: hb fresh during collect → no tighten
+    thr = at.hang_threshold_for_dead_hb(
+        base, markers=0, gpu=0,
+        hb={"phase": "collect"}, hb_age=30.0)
+    assert thr == base
+    # Dead hb age during collect → tight
+    thr2 = at.hang_threshold_for_dead_hb(
+        base, markers=0, gpu=0,
+        hb={"phase": "collect"}, hb_age=float(at.HB_DEAD_HANG_S))
+    assert thr2 == at.HB_DEAD_HANG_S
+    assert thr2 < base
+    # Missing hb → tight
+    thr3 = at.hang_threshold_for_dead_hb(
+        base, markers=0, gpu=0, hb=None, hb_age=None)
+    assert thr3 == at.HB_DEAD_HANG_S
+    # GPU busy → never tighten
+    thr4 = at.hang_threshold_for_dead_hb(
+        base, markers=0, gpu=40,
+        hb={"phase": "collect"}, hb_age=999.0)
+    assert thr4 == base
+    # markers>=1 → other branch; leave base
+    thr5 = at.hang_threshold_for_dead_hb(
+        base, markers=2, gpu=0,
+        hb={"phase": "collect"}, hb_age=999.0)
+    assert thr5 == base
+    # Non-collect phase with dead age → do not tighten
+    thr6 = at.hang_threshold_for_dead_hb(
+        base, markers=0, gpu=0,
+        hb={"phase": "update"}, hb_age=999.0)
+    assert thr6 == base
+    # collect_timeout phase → tight when dead
+    thr7 = at.hang_threshold_for_dead_hb(
+        base, markers=0, gpu=0,
+        hb={"phase": "collect_timeout"}, hb_age=999.0)
+    assert thr7 == at.HB_DEAD_HANG_S

@@ -1534,8 +1534,8 @@ def adapt_capa2c_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
 def adapt_scalar_state_dict(net: AlphaLiteNet, raw: dict) -> dict:
     """Net2Net: pad scalar_mlp.0.weight when SCALAR_DIM grows (zero new cols).
 
-    Ckpts viejos (in=21/25/29) cargan en redes nuevas (in=33); AOA + mental-base
-    + P4 naval/air cols nacen en 0 y el tronco economico/militar se conserva 1:1.
+    Ckpts viejos (in=21/25/29/33) cargan en redes nuevas (in=34); AOA + mental-base
+    + P4 naval/air + power_balance cols nacen en 0 y el tronco se conserva 1:1.
     """
     out = dict(raw)
     key = "scalar_mlp.0.weight"

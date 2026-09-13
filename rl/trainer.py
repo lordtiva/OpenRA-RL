@@ -460,6 +460,39 @@ class PPOTrainer:
         return nlls
 
 
+
+def _adapted_shapes_changed(raw: dict, adapted: dict) -> bool:
+    """True if any shared key differs in tensor shape after Net2Net adapt.
+
+    Soft-pad grows (e.g. scalar_mlp.0.weight 33->34) keep missing/unexpected
+    empty, so Adam moments for the old shape would still load unless we
+    detect the grow and force a fresh optimizer.
+    """
+    for key, at in adapted.items():
+        rt = raw.get(key)
+        if rt is None:
+            continue
+        if not (hasattr(rt, "shape") and hasattr(at, "shape")):
+            continue
+        if tuple(rt.shape) != tuple(at.shape):
+            return True
+    return False
+
+
+def _first_adapted_shape_change(raw: dict, adapted: dict):
+    """Return (key, old_shape, new_shape) for the first grown/shrunk tensor."""
+    for key, at in adapted.items():
+        rt = raw.get(key)
+        if rt is None:
+            continue
+        if not (hasattr(rt, "shape") and hasattr(at, "shape")):
+            continue
+        old_s, new_s = tuple(rt.shape), tuple(at.shape)
+        if old_s != new_s:
+            return key, old_s, new_s
+    return None
+
+
 def save_checkpoint(path: str, net, opt, iteration: int, extra: dict | None = None):
     ckpt = {"net": net.state_dict(), "opt": opt.state_dict(),
             "iteration": iteration, "time": time.time()}
@@ -503,9 +536,12 @@ def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False,
         old_cell = raw.get("cell_head.2.weight")  # Sequential: ultimo conv
     old_shape = tuple(old_cell.shape) if old_cell is not None else ()
     new_shape = cell_head_weight_shape(net.cell_head)
+    shape_changed = _adapted_shapes_changed(raw, adapted)
+    shape_chg = _first_adapted_shape_change(raw, adapted) if shape_changed else None
     arch_changed = (
         n_miss > 0 or n_unex > 0
         or (bool(old_shape) and bool(new_shape) and old_shape != new_shape)
+        or shape_changed
     )
     if n_miss or n_unex:
         print(f"[ckpt] Net2Net/adapt missing={n_miss} unexpected={n_unex} "
@@ -518,7 +554,12 @@ def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False,
             print(f"[ckpt] Adam fresco (opt no carga: {e})", flush=True)
             do_reset = True
     if do_reset:
-        print("[ckpt] Adam fresco (reset-opt)", flush=True)
+        if shape_chg is not None:
+            k, old_s, new_s = shape_chg
+            print(f"[ckpt] Adam fresco (adapt shape change: "
+                  f"{k} {old_s}->{new_s})", flush=True)
+        else:
+            print("[ckpt] Adam fresco (reset-opt)", flush=True)
     if vocab is not None and isinstance(ckpt.get("vocab"), dict):
         vocab.type_to_id = dict(ckpt["vocab"])
     if extra_out is not None:

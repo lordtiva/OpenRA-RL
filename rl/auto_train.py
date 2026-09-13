@@ -149,6 +149,12 @@ GPU_LOW_THRESHOLD = 15  # GPU >= esto = collect/update en vuelo, no es cuelgue
 # GPU~0; thr_tight must not hair-trigger while heartbeat is merely slow.
 # If hb_age is truly stale for this long, still act.
 GPU_IDLE_HANG_S = 900
+# When markers=0, GPU low, and collect heartbeat is clearly dead/missing,
+# CUELGUE much sooner than GPU_IDLE_HANG_S (do not wait 15min).
+HB_DEAD_HANG_S = 210
+HB_DEAD_COLLECT_PHASES = (
+    "collect", "collect_reset", "collect_timeout", "",
+)
 # Segundos acumulados de GPU baja antes de apretar el umbral.
 GPU_LOW_STREAK_FOR_TIGHT_S = 300
 # Rate-limit de force-recreate (evita loop infinito train<->docker).
@@ -281,6 +287,39 @@ def effective_hang_threshold(gpu: int | None, gpu_low_streak: int) -> int:
             and low_for >= GPU_LOW_STREAK_FOR_TIGHT_S):
         return min(base, GPU_IDLE_HANG_S)
     return base
+
+
+def hang_threshold_for_dead_hb(
+    base_thr: int,
+    *,
+    markers: int = 0,
+    gpu: int | None = None,
+    hb: dict | None = None,
+    hb_age: float | None = None,
+) -> int:
+    """Tighten CUELGUE when markers=0, GPU low, and collect hb is dead.
+
+    Healthy long collects keep advancing hb — do not kill those. When hb is
+    missing or age >= HB_DEAD_HANG_S during collect-ish phase, use
+    ~HB_DEAD_HANG_S instead of waiting full GPU_IDLE_HANG_S=900.
+    """
+    thr = int(base_thr)
+    if int(markers) != 0:
+        return thr
+    if gpu is not None and gpu >= GPU_LOW_THRESHOLD:
+        return thr
+    phase = "" if hb is None else str(hb.get("phase") or "")
+    if phase not in HB_DEAD_COLLECT_PHASES and hb is not None:
+        return thr
+    # Missing hb, or age clearly past dead threshold.
+    dead = (
+        hb is None
+        or hb_age is None
+        or float(hb_age) >= float(HB_DEAD_HANG_S)
+    )
+    if dead:
+        return min(thr, int(HB_DEAD_HANG_S))
+    return thr
 
 
 def recreate_allowed(now: float | None = None) -> tuple[bool, str]:
@@ -1394,6 +1433,9 @@ def main():
                 python_idle_streak = 0
                 continue
             thr = effective_hang_threshold(gpu, gpu_low_streak)
+            hb_age_pre = heartbeat_age_s(hb)
+            thr = hang_threshold_for_dead_hb(
+                thr, markers=score, gpu=gpu, hb=hb, hb_age=hb_age_pre)
             if idle >= thr:
                 if gpu is not None and gpu >= GPU_LOW_THRESHOLD:
                     # Update/inferencia en vuelo: el jsonl se escribe al FINAL
@@ -1402,7 +1444,7 @@ def main():
                     log(f"en vuelo — idle {idle:.0f}s pero GPU {gpu}%, no mato")
                     last_progress = time.time()
                     continue
-                hb_age = heartbeat_age_s(hb)
+                hb_age = hb_age_pre if hb_age_pre is not None else heartbeat_age_s(hb)
                 # Safety: if heartbeat file is still fresh relative to thr,
                 # never CUELGUE (heal idle clock). Key: idle progress tracks hb.
                 if hb_age is not None and hb_age < thr:
@@ -1446,6 +1488,9 @@ def main():
                 gpu_low_streak = 0
             else:
                 thr_now = effective_hang_threshold(gpu, gpu_low_streak)
+                thr_now = hang_threshold_for_dead_hb(
+                    thr_now, markers=score, gpu=gpu, hb=hb,
+                    hb_age=heartbeat_age_s(hb))
                 now = time.time()
                 # Healthy collect keeps idle~0 via heartbeat — stay quiet.
                 # Only log when idle has grown (milestones) or every 5 min.

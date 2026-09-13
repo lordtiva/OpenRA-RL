@@ -105,8 +105,8 @@ def test_gps_beacon_not_used_for_belief_or_scalars():
     assert bel.enemy_base_xy is None
     assert resolve_beacon(obs) == (95, 11)
     sc = scalar_features(obs, belief=bel)
-    assert SCALAR_DIM == 33
-    assert sc.shape == (33,)
+    assert SCALAR_DIM == 34
+    assert sc.shape == (34,)
     assert float(sc[25]) == 0.0  # has_enemy_base_belief
     # After a real sighting, scalars light up from belief — still not GPS.
     bel.update(_obs(enemy_bldgs=[_b("proc", 201, 70, 22)]))

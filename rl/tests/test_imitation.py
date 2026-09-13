@@ -399,7 +399,7 @@ check("push uses mental base after leftovers cleared",
 check("mental base push != GPS beacon", cell_mb != (95, 11))
 
 sc = scalar_features(obs_fog_base, belief=th4.belief)
-check("SCALAR_DIM is 33", SCALAR_DIM == 33 and sc.shape == (33,))
+check("SCALAR_DIM is 34", SCALAR_DIM == 34 and sc.shape == (34,))
 check("has_enemy_base_belief scalar on", float(sc[25]) == 1.0)
 check("base_conf > 0", float(sc[28]) > 0.0)
 
@@ -607,7 +607,7 @@ try:
             cap_steps=50, path=rush_on_expand, schema=TAPE_SCHEMA_EXPAND)
         check("TW rush schema no hidrata en expand", tw_exp.n_episodes == 0)
         check("TW expand schema string",
-              TAPE_SCHEMA_EXPAND == "eco_and_combat_expand_v1")
+              TAPE_SCHEMA_EXPAND == "eco_and_combat_expand_v2")
     finally:
         shutil.rmtree(rush_on_expand, ignore_errors=True)
 finally:

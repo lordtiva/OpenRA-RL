@@ -38,7 +38,7 @@ _BC_COMBAT_READY_N = 8
 # Manifest de TeacherWinBuffer. Cintas viejas (solo TRAIN) no se hidratan.
 TAPE_SCHEMA = "eco_and_combat_mental_v4"
 # C/D/E expand teacher (weap/1tnk/e3). Rush tapes must not hydrate here.
-TAPE_SCHEMA_EXPAND = "eco_and_combat_expand_v1"
+TAPE_SCHEMA_EXPAND = "eco_and_combat_expand_v2"
 
 
 def tape_schema_for_mode(mode: str) -> str:

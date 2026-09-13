@@ -699,7 +699,7 @@ try:
     # Phase C resume with EXPAND tapes: replay.
     (td / "teacher_wins" / "manifest.json").write_text(
         json.dumps({
-            "schema": "eco_and_combat_expand_v1",
+            "schema": "eco_and_combat_expand_v2",
             "episodes": [{"file": "ep_0000.pt"} for _ in range(10)],
         }), encoding="utf-8")
     at._replay_tapes = False

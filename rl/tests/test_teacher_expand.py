@@ -135,3 +135,45 @@ def test_rush_mode_does_not_force_weap():
     obs = _Obs(available=["weap", "pbox", "e1"], units=_rifles(8), cash=5000)
     out = t._optional_tech_defense(obs, [])
     assert out and out[0].item_type in ("pbox", "hbox", "ftur")
+
+
+def test_expand_low_power_builds_powr_before_weap():
+    t = _T(verbose=False, mode="expand")
+    t.phase = "attack"
+    obs = _Obs(available=["weap", "pbox", "powr", "e1", "1tnk"],
+               units=_rifles(8), cash=5000)
+    obs.economy.power_provided = 100
+    obs.economy.power_drained = 460
+    obs.economy.ore = 12000
+    out = t._apply_expand(obs, [])
+    assert len(out) == 1
+    assert out[0].action == ActionType.BUILD
+    assert out[0].item_type == "powr"
+
+
+def test_optional_tech_low_power_before_pbox():
+    t = _T(verbose=False, mode="rush")
+    t.phase = "attack"
+    obs = _Obs(available=["pbox", "powr", "dome"], units=_rifles(8), cash=0)
+    obs.economy.power_provided = 100
+    obs.economy.power_drained = 200
+    obs.economy.ore = 8000
+    out = t._optional_tech_defense(obs, [])
+    assert len(out) == 1
+    assert out[0].item_type == "powr"
+
+
+def test_handle_production_strips_e1_when_low_power():
+    t = _T(verbose=False, mode="rush")
+    t.phase = "attack"
+    obs = _Obs(available=["powr", "e1", "pbox"], units=_rifles(8), cash=5000)
+    obs.economy.power_provided = 100
+    obs.economy.power_drained = 300
+    from openra_env.models import CommandModel
+    # parent-like e1 already in the list
+    t._can_produce_item = lambda obs, item: item in (obs.available_production or [])
+    out = t._handle_production(obs)
+    assert not any(c.action == ActionType.TRAIN and c.item_type == "e1"
+                   for c in out)
+    assert any(c.action == ActionType.BUILD and c.item_type == "powr"
+               for c in out)

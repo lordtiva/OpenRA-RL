@@ -67,13 +67,13 @@ def test_domain_type_helpers():
 
 
 def test_scalar_dim_append_naval_air():
-    assert SCALAR_DIM == 33
+    assert SCALAR_DIM == 34
     obs = _Obs(
         units=[_U("dd", 1), _U("ca", 2), _U("heli", 3), _U("1tnk", 4)],
         enemies=[_U("ss", 10), _U("mig", 11), _U("yak", 12)],
     )
     sc = scalar_features(obs)
-    assert sc.shape == (33,)
+    assert sc.shape == (34,)
     # indices 29..32 = own_naval, own_air, ene_naval, ene_air (/10)
     assert abs(float(sc[29]) - 0.2) < 1e-5  # 2/10
     assert abs(float(sc[30]) - 0.1) < 1e-5  # 1/10
@@ -83,6 +83,8 @@ def test_scalar_dim_append_naval_air():
     sc0 = scalar_features(_Obs(units=[_U("e1"), _U("1tnk")]))
     assert float(sc0[29]) == 0.0 and float(sc0[30]) == 0.0
     assert float(sc0[31]) == 0.0 and float(sc0[32]) == 0.0
+    # index 33 = signed power balance; default obs is 100-50 / 400 = 0.125
+    assert abs(float(sc0[33]) - 0.125) < 1e-5
 
 
 def test_role_ids_distinguish_naval_air_from_vehicle():
@@ -111,14 +113,13 @@ def test_role_ids_distinguish_naval_air_from_vehicle():
     assert int(role_ids[MAX_UNITS + 1]) == role_id_of("mig")
 
 
-def test_adapt_scalar_soft_pad_29_to_33():
-    """Old SCALAR_DIM=29 ckpt pads new naval/air cols to 0 (MAIN-safe)."""
+def test_adapt_scalar_soft_pad_29_to_34():
+    """Old SCALAR_DIM=29 ckpt pads new naval/air + power_balance cols to 0."""
     net = AlphaLiteNet()
     raw = net.state_dict()
-    # simulate older ckpt with in=29
     key = "scalar_mlp.0.weight"
     w = raw[key].clone()
-    assert w.shape[1] == 33
+    assert w.shape[1] == 34
     old = {k: v.clone() for k, v in raw.items()}
     old[key] = w[:, :29].contiguous()
     adapted = adapt_scalar_state_dict(net, old)
@@ -126,11 +127,24 @@ def test_adapt_scalar_soft_pad_29_to_33():
     assert aw.shape == w.shape
     assert torch.allclose(aw[:, :29], w[:, :29])
     assert torch.allclose(aw[:, 29:], torch.zeros_like(aw[:, 29:]))
-    # soft load into fresh net
     net2 = AlphaLiteNet()
-    incompat = net2.load_state_dict(adapted, strict=False)
-    assert incompat.missing_keys == [] or True  # missing ok under soft
-    assert net2.scalar_mlp[0].weight.shape[1] == 33
+    net2.load_state_dict(adapted, strict=False)
+    assert net2.scalar_mlp[0].weight.shape[1] == 34
+
+
+def test_adapt_scalar_soft_pad_33_to_34():
+    """best_B / ck103 (in=33) pads power_balance col to 0."""
+    net = AlphaLiteNet()
+    raw = net.state_dict()
+    key = "scalar_mlp.0.weight"
+    w = raw[key].clone()
+    old = {k: v.clone() for k, v in raw.items()}
+    old[key] = w[:, :33].contiguous()
+    adapted = adapt_scalar_state_dict(net, old)
+    aw = adapted[key]
+    assert aw.shape == w.shape
+    assert torch.allclose(aw[:, :33], w[:, :33])
+    assert torch.allclose(aw[:, 33:], torch.zeros_like(aw[:, 33:]))
 
 
 def test_dashboard_attack_keys_documented():

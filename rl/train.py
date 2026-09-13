@@ -197,11 +197,62 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
         return samples, outcome
 
     episodes = []
+    # Same gather-stall watchdog as run_batch: bare gather can hang forever
+    # on a wedged WS with no cancel path.
+    _mt = float(getattr(envs[0], "_message_timeout", 0) or 0)
+    slice_s = (_mt if _mt > 0 else 120.0) + 30.0
+    hb_path = None
+    if getattr(args, "ckpt_dir", None):
+        hb_path = os.path.join(args.ckpt_dir, "collect_heartbeat.json")
+    it_now = int(getattr(args, "_heartbeat_iter", 0) or 0) or None
+
     for start in range(0, n, len(envs)):
         chunk = list(range(start, min(start + len(envs), n)))
-        parts = await asyncio.gather(*[
-            _one(i, envs[j % len(envs)]) for j, i in enumerate(chunk)
-        ])
+        tasks = [
+            asyncio.create_task(
+                _one(i, envs[j % len(envs)]), name=f"bc-w{i}")
+            for j, i in enumerate(chunk)
+        ]
+        pending = set(tasks)
+        stall_streak = 0
+        parts = []
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, timeout=slice_s,
+                return_when=asyncio.FIRST_COMPLETED)
+            if done:
+                stall_streak = 0
+                for _t in done:
+                    if _t.cancelled():
+                        continue
+                    exc = _t.exception()
+                    if exc is not None:
+                        for pnd in pending:
+                            pnd.cancel()
+                        if pending:
+                            await asyncio.wait(pending, timeout=5.0)
+                        raise exc
+                    parts.append(_t.result())
+                continue
+            stall_streak += 1
+            from rl.collect_heartbeat import read_heartbeat, heartbeat_age_s
+            hb = read_heartbeat(hb_path) if hb_path else None
+            age = heartbeat_age_s(hb)
+            if (age is not None and age < slice_s
+                    and stall_streak < 2):
+                continue
+            note_collect_timeout(
+                hb_path, error="bc_gather_stall", iter=it_now)
+            print(
+                f"  [bc] gather stall {slice_s:.0f}s "
+                f"hb_age={age} streak={stall_streak} — "
+                f"cancelling {len(pending)} teacher task(s)",
+                flush=True)
+            for _t in pending:
+                _t.cancel()
+            if pending:
+                await asyncio.wait(pending, timeout=5.0)
+            break
         for p in parts:
             if p is not None:
                 episodes.append(p)
@@ -609,11 +660,13 @@ async def amain(args):
             ]
             pending = set(tasks)
             slice_s = float(ws_timeout) + 30.0
+            stall_streak = 0
             while pending:
                 done, pending = await asyncio.wait(
                     pending, timeout=slice_s,
                     return_when=asyncio.FIRST_COMPLETED)
                 if done:
+                    stall_streak = 0
                     for _t in done:
                         exc = _t.exception() if not _t.cancelled() else None
                         if exc is not None:
@@ -623,16 +676,22 @@ async def amain(args):
                                 await asyncio.wait(pending, timeout=5.0)
                             raise exc
                     continue
+                stall_streak += 1
                 from rl.collect_heartbeat import read_heartbeat, heartbeat_age_s
                 hb = read_heartbeat(hb_path)
                 age = heartbeat_age_s(hb)
-                if age is not None and age < slice_s:
+                # Cancel if hb dead/missing, OR after 2 consecutive wait
+                # timeouts with no completion (hb may look "fresh" from a
+                # sibling path that is not finishing the gather).
+                if (age is not None and age < slice_s
+                        and stall_streak < 2):
                     continue
                 note_collect_timeout(
                     hb_path, error="gather_stall", iter=it_now)
                 print(
                     f"  [collect] gather stall {slice_s:.0f}s "
-                    f"hb_age={age} — cancelling {len(pending)} worker(s)",
+                    f"hb_age={age} streak={stall_streak} — "
+                    f"cancelling {len(pending)} worker(s)",
                     flush=True)
                 for _t in pending:
                     _t.cancel()

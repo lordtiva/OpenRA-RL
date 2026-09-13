@@ -34,7 +34,15 @@ from typing import List, Optional, Tuple
 
 from examples.scripted_bot import ScriptedBot
 from openra_env.models import ActionType, CommandModel, OpenRAObservation
-from rl.action_adapter import PACK_ARMY, n_combat_total
+from rl.action_adapter import (
+    PACK_ARMY,
+    POWR_COST,
+    building_queue_busy,
+    n_combat_total,
+    power_in_deficit,
+    power_in_flight,
+    spendable_resources,
+)
 from rl.auto_support import (
     ARRIVED_CELLS,
     DEFEND_CELLS,
@@ -149,6 +157,11 @@ class ScriptedTeacher(ScriptedBot):
                 and obs.economy.cash >= 1100):
             commands.append(CommandModel(action=ActionType.TRAIN, item_type="harv"))
             self._log("Training harv (teacher eco)")
+        if power_in_deficit(obs):
+            commands = self._strip_power_competitors(commands)
+            commands.extend(self._try_build_power(obs, "low-power"))
+            commands.extend(self._optional_naval_air(obs, commands))
+            return commands
         if self.mode == "expand":
             commands = self._apply_expand(obs, commands)
             commands.extend(self._optional_naval_air(obs, commands))
@@ -191,6 +204,35 @@ class ScriptedTeacher(ScriptedBot):
         return (self.phase == "attack"
                 or n_combat_total(obs) >= self.RUSH_ATTACK_MOVE)
 
+    def _strip_power_competitors(
+        self, commands: List[CommandModel],
+    ) -> List[CommandModel]:
+        """Drop e1 / non-power BUILD so a plant can actually queue."""
+        out: List[CommandModel] = []
+        for c in commands or []:
+            act = getattr(c, "action", None)
+            item = str(getattr(c, "item_type", "") or "").lower()
+            if act == ActionType.TRAIN and item == "e1":
+                continue
+            if act == ActionType.BUILD and item not in ("powr", "apwr", "power"):
+                continue
+            out.append(c)
+        return out
+
+    def _try_build_power(
+        self, obs: OpenRAObservation, reason: str,
+    ) -> List[CommandModel]:
+        if building_queue_busy(obs) or power_in_flight(obs):
+            return []
+        if spendable_resources(obs) < POWR_COST:
+            return []
+        if self._count_type(obs, "powr", "apwr") >= 8:
+            return []
+        if not self._can_produce_item(obs, "powr"):
+            return []
+        self._log(f"{reason} BUILD powr (low power)")
+        return [CommandModel(action=ActionType.BUILD, item_type="powr")]
+
     def _apply_expand(
         self, obs: OpenRAObservation, commands: List[CommandModel],
     ) -> List[CommandModel]:
@@ -200,6 +242,10 @@ class ScriptedTeacher(ScriptedBot):
         a 3rd proc. Skip optional dome-first tech so weap is the C lesson.
         """
         if not self._rush_rolling(obs):
+            return commands
+        if power_in_deficit(obs):
+            commands = self._strip_power_competitors(commands)
+            commands.extend(self._try_build_power(obs, "Expand"))
             return commands
         cash = int(getattr(obs.economy, "cash", 0) or 0)
         own = {
@@ -305,6 +351,8 @@ class ScriptedTeacher(ScriptedBot):
         }
         if not (own & self.BARRACKS_TYPES) or "proc" not in own:
             return []
+        if power_in_deficit(obs):
+            return self._try_build_power(obs, "P3 low-power")
         n_combat = n_combat_total(obs)
         # Do not divert cash from the a_short rifle rush.
         if not (self.phase == "attack" or n_combat >= self.RUSH_ATTACK_MOVE):
@@ -362,7 +410,8 @@ class ScriptedTeacher(ScriptedBot):
                 1 for b in (obs.buildings or [])
                 if str(getattr(b, "type", "") or "").lower() in ("powr", "apwr")
             )
-            if (n_powr < 3 and cash >= 350 and not building_busy
+            if (n_powr < 3 and spendable_resources(obs) >= POWR_COST
+                    and not building_busy
                     and self._can_produce_item(obs, "powr")):
                 self._log("P3 tech/defense BUILD powr (power cushion)")
                 return [CommandModel(action=ActionType.BUILD, item_type="powr")]

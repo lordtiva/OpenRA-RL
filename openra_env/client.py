@@ -146,27 +146,60 @@ class OpenRAEnv(EnvClient[OpenRAAction, OpenRAObservation, OpenRAState]):
             done=data.get("done", obs_data.get("done", False)),
         )
 
+    async def _force_drop_ws(self, join_s: float = 1.0) -> None:
+        """Clear _ws and best-effort abort so a wedged send can unblock.
+
+        asyncio.wait_for cancel alone is not enough: if ws.send ignores
+        CancelledError, wait_for hangs forever. Drop the socket first.
+        Bound close/abort to ~0.5-1s; never wait unbounded.
+        """
+        ws = getattr(self, "_ws", None)
+        self._ws = None
+        if ws is None:
+            return
+        # Abort transport first — close() can also hang on a wedged peer.
+        for attr in ("transport", "_transport"):
+            tr = getattr(ws, attr, None)
+            if tr is not None and hasattr(tr, "abort"):
+                try:
+                    tr.abort()
+                except Exception:
+                    pass
+                break
+        try:
+            await asyncio.wait_for(ws.close(), timeout=min(0.5, float(join_s)))
+        except Exception:
+            pass
+
     async def _send_and_receive_op(self, message: dict, timeout_s: float | None = None):
         """Fail-fast send+recv. Recv-only timeout is not enough.
 
         EnvClient._receive times out _ws.recv, but a wedged server that is
         not reading (stuck in to_thread FastAdvance) makes _ws.send hang
-        forever. Wrap the whole dialogue so TimeoutError always surfaces
-        with a non-empty message within ~deadline+slack.
+        forever. Use asyncio.wait + force-drop socket on timeout so a
+        cancel-ignoring send cannot hang wait_for forever.
         """
         op_t = float(timeout_s if timeout_s is not None else default_op_message_timeout_s())
         configured = float(getattr(self, "_message_timeout", op_t) or op_t)
         use_t = min(configured, op_t) if configured > 0 else op_t
         old = self._message_timeout
         self._message_timeout = use_t
+        task = asyncio.create_task(self._send_and_receive(message))
         try:
-            return await asyncio.wait_for(
-                self._send_and_receive(message), timeout=use_t)
-        except (TimeoutError, asyncio.TimeoutError) as e:
+            done, _pending = await asyncio.wait({task}, timeout=use_t)
+            if task in done:
+                return task.result()
+            # Timeout: force-drop so wedged send unblocks, then cancel + <=1s join.
+            await self._force_drop_ws(join_s=1.0)
+            task.cancel()
+            try:
+                await asyncio.wait({task}, timeout=1.0)
+            except Exception:
+                pass
             raise TimeoutError(
                 f"WS op timed out after {use_t:.0f}s "
-                f"(type={message.get('type')})"
-            ) from e
+                f"(type={message.get('type')}; socket force-dropped)"
+            )
         finally:
             self._message_timeout = old
 

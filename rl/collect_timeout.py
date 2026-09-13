@@ -68,14 +68,24 @@ async def await_env_op(
     error: str = "op_timeout",
     **hb: Any,
 ):
-    """`asyncio.wait_for` around send+recv+close. Always annotate TimeoutError."""
+    """Bounded wait around send+recv+close. Always annotate TimeoutError.
+
+    Uses asyncio.wait + cancel + <=1s join — never unbounded wait_for on a
+    cancel-ignoring coro (wedged ws.send can ignore CancelledError).
+    """
+    task = asyncio.ensure_future(coro)
+    done, _pending = await asyncio.wait({task}, timeout=float(timeout_s))
+    if task in done:
+        return task.result()
+    note_collect_timeout(heartbeat_path, error=error, **hb)
+    task.cancel()
     try:
-        return await asyncio.wait_for(coro, timeout=float(timeout_s))
-    except (TimeoutError, asyncio.TimeoutError) as e:
-        note_collect_timeout(heartbeat_path, error=error, **hb)
-        raise TimeoutError(
-            f"{what} timed out after {float(timeout_s):.0f}s"
-        ) from e
+        await asyncio.wait({task}, timeout=1.0)
+    except Exception:
+        pass
+    raise TimeoutError(
+        f"{what} timed out after {float(timeout_s):.0f}s"
+    )
 
 
 async def close_env_now(env, timeout_s: float = 5.0) -> None:
