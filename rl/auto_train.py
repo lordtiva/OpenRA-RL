@@ -46,7 +46,7 @@ Ctrl+C para parar todo.
 
 Flags del launcher (no van a rl.train):
   --scratch       pesos random; ignora latest/seed
-  --onboard       curriculum A→E (SFT rifle vs beginner, PPO+BC beginner,
+  --onboard       curriculum A→B→S→C→E (SFT rifle, PPO+BC beginner, PFSP bridge,
                   expand BC vs easy/medium/hard). Ver rl/docs/start/onboard.md.
   --onboard-rewind N
                   Una vez, en B: latest <- best/iterN, trunca metrics/race.
@@ -152,9 +152,10 @@ GPU_LOW_THRESHOLD = 15  # GPU >= esto = collect/update en vuelo, no es cuelgue
 GPU_IDLE_HANG_S = 900
 # When markers=0, GPU low, and collect heartbeat is clearly dead/missing,
 # CUELGUE much sooner than GPU_IDLE_HANG_S (do not wait 15min).
-HB_DEAD_HANG_S = 210
+HB_DEAD_HANG_S = 480
 HB_DEAD_COLLECT_PHASES = (
-    "collect", "collect_reset", "collect_timeout", "",
+    "collect", "collect_reset", "collect_timeout",
+    "collect_wait", "collect_refill", "bc_wait", "bc_refill", "",
 )
 # Segundos acumulados de GPU baja antes de apretar el umbral.
 GPU_LOW_STREAK_FOR_TIGHT_S = 300
@@ -164,7 +165,7 @@ RECREATE_COOLDOWN_S = 90
 # Docker recreate on markers=0 only after N consecutive python-idle hangs.
 # Prefer train-only relaunch on the first 1..(N-1) so a single hung advance
 # (now ≤~100s) does not force-recreate containers.
-PYTHON_IDLE_RECREATE_STREAK = 3
+PYTHON_IDLE_RECREATE_STREAK = 2
 
 # Cuelgue Docker: cada URL de GAME_URLS tiene su servicio compose.
 # Recreate toca TODOS los daemons que estaban up, no solo openra-rl.
@@ -262,7 +263,7 @@ def live_game_urls() -> str:
 def hang_threshold() -> int:
     # A: teacher SFT. B: 4 PPO + 2 teacher games; primer iter post-launch
     # puede pasar 540s (THRESHOLD_S) antes de escribir metrics.
-    if _onboard and _onboard.get("phase") in ("A", "B", "C", "D", "E"):
+    if _onboard and _onboard.get("phase") in ("A", "B", "S", "C", "D", "E"):
         return ONBOARD_A_THRESHOLD_S
     return THRESHOLD_S
 
@@ -352,7 +353,7 @@ def should_recreate_on_python_hang(
     """True when markers=0 idle hang should recreate Docker (Phase 1.5).
 
     Prefer train-only relaunch on early consecutive hangs. Docker recreate
-    only after ``PYTHON_IDLE_RECREATE_STREAK`` (default 3) consecutive
+    only after ``PYTHON_IDLE_RECREATE_STREAK`` (default 2) consecutive
     python-idle hangs (or markers>=3 elsewhere). Silent daemon hangs still
     get recreate once the streak is met; a single hung FastAdvance must not.
     """
@@ -753,7 +754,7 @@ def last_iter_from_metrics() -> int:
 
 
 def try_promote(last_iter: int) -> str | None:
-    """Avanza A→B→C→D→E→done. Devuelve la fase nueva, o None."""
+    """Avanza A→B→S→C→D→E→done. Devuelve la fase nueva, o None."""
     global _onboard, _replay_tapes
     if not _onboard:
         return None
@@ -762,30 +763,45 @@ def try_promote(last_iter: int) -> str | None:
     if not nxt:
         return None
     old = _onboard.get("phase")
+    old_started = int(_onboard.get("phase_started_iter") or 0)
     log(f"onboard PROMOTE {old} -> {nxt} @ iter {last_iter}")
     _onboard["phase"] = nxt
     _onboard["phase_started_iter"] = int(last_iter)
     notes = {
         "B": ("onboard phase B beginner PPO+BC", "beginner"),
+        "S": ("onboard phase S PFSP-RL bridge (beginner anchor)", "beginner"),
         "C": ("onboard phase C easy expand BC", "easy"),
         "D": ("onboard phase D medium expand BC", "medium"),
         "E": ("onboard phase E hard expand BC", "hard"),
         "done": ("onboard DONE wr20 vs hard", "hard"),
     }
     if nxt == "B":
-        # P1.4: freeze anneal origin at first B iter (continues into C/D/E).
+        # P1.4: freeze anneal origin at first B iter (continues into S/C/D/E).
         _onboard["heuristic_phase_start"] = int(last_iter) + 1
         # Same rush schema as A. Resume already passes --bc-replay; a hot
         # promote in this process used to keep collecting.
         if arm_replay_for_phase("B"):
             log("  reusando teacher_wins/ (promote A->B no re-juega al teacher)")
+    if nxt == "S":
+        # Pin B BC origin so λ stays at floor through S and into C.
+        if int(_onboard.get("b_bc_start_iter") or 0) <= 0:
+            _onboard["b_bc_start_iter"] = old_started or 1
+        snap = ob.snapshot_phase_best(CKPT_DIR, "B" if old == "B" else old)
+        if snap:
+            log(f"onboard snapshot {snap.name} (best {old})")
+        # Same rush/mental tapes as B.
+        if arm_replay_for_phase("S"):
+            log("  reusando teacher_wins/ (promote B->S rush schema)")
     if nxt in ("C", "D", "E"):
         _replay_tapes = False
         snap = ob.snapshot_phase_best(CKPT_DIR, old)
         if snap:
             log(f"onboard snapshot {snap.name} (best {old})")
-        _onboard["c_reset_opt_done"] = True
-        # Rifle tapes must not clone into expand BC.
+        # First C launch passes --reset-opt via promote relaunch; mark after
+        # launch in _after_onboard_launch. Do not pre-set True here for C.
+        if nxt != "C":
+            _onboard["c_reset_opt_done"] = True
+        # Rifle/S tapes must not clone into expand BC.
         tw = CKPT_DIR / "teacher_wins"
         if tw.is_dir():
             shutil.rmtree(tw, ignore_errors=True)
@@ -807,18 +823,26 @@ def _history_promote_side_effects(earned: list[str], last_iter: int) -> None:
         return
     notes = {
         "B": ("onboard phase B beginner PPO+BC", "beginner"),
+        "S": ("onboard phase S PFSP-RL bridge (beginner anchor)", "beginner"),
         "C": ("onboard phase C easy expand BC", "easy"),
         "D": ("onboard phase D medium expand BC", "medium"),
         "E": ("onboard phase E hard expand BC", "hard"),
         "done": ("onboard DONE wr20 vs hard", "hard"),
     }
-    prev = {"B": "A", "C": "B", "D": "C", "E": "D", "done": "E"}
+    prev = {"B": "A", "S": "B", "C": "S", "D": "C", "E": "D", "done": "E"}
     for nxt in earned:
         log(f"onboard HISTORY-PROMOTE -> {nxt} @ iter {last_iter} "
             f"(kept metrics)")
         if nxt == "B":
             if arm_replay_for_phase("B"):
                 log("  reusando teacher_wins/ (history A->B)")
+        if nxt == "S":
+            old = prev.get(nxt, "B")
+            snap = ob.snapshot_phase_best(CKPT_DIR, old)
+            if snap:
+                log(f"onboard snapshot {snap.name} (best {old})")
+            if arm_replay_for_phase("S"):
+                log("  reusando teacher_wins/ (history B->S)")
         if nxt in ("C", "D", "E"):
             _replay_tapes = False
             old = prev.get(nxt, "B")
@@ -893,8 +917,8 @@ def would_pass_bc_replay(replay_tapes: bool = None, onboard=None,
     if co:
         return False
     phase = (ob_cfg or {}).get("phase")
-    # A/B rush tapes; C/D/E expand tapes (schema mismatch refuses load).
-    return bool(rt and phase in ("A", "B", "C", "D", "E"))
+    # A/B/S rush tapes; C/D/E expand tapes (schema mismatch refuses load).
+    return bool(rt and phase in ("A", "B", "S", "C", "D", "E"))
 
 
 def launch_train(extra_args=None) -> subprocess.Popen:
@@ -950,14 +974,14 @@ def parse_auto_args(argv=None):
         help="Pesos aleatorios: no resume latest/seed.")
     ap.add_argument(
         "--onboard", action="store_true",
-        help="Curriculum A→B→C para clonar el repo sin .pt. "
+        help="Curriculum A→B→S→C→… para clonar el repo sin .pt. "
              "Ver rl/docs/start/onboard.md.")
     ap.add_argument("--onboard-sft-iters", type=int, default=20,
                     help="Iters de SFT (fase A).")
     ap.add_argument("--onboard-a-promote-wr20", type=float, default=0.25,
                     help="wr20 vs beginner para pasar A->B (sin streak).")
     ap.add_argument("--onboard-promote-wr20", type=float, default=0.50,
-                    help="wr20 vs beginner para pasar a easy.")
+                    help="wr20 vs beginner para pasar B→S (bridge).")
     ap.add_argument("--onboard-done-wr20", type=float, default=0.50,
                     help="wr20 vs hard para marcar DONE.")
     ap.add_argument("--onboard-streak", type=int, default=10,
@@ -1022,7 +1046,7 @@ def parse_auto_args(argv=None):
 def _maybe_set_replay_tapes(args, *, resume: bool = False) -> None:
     """Reuse teacher_wins/ when schema matches (sets _replay_tapes).
 
-    On resume, phase A or B wires replay (matches would_pass_bc_replay).
+    On resume, phase A/B/S (and CDE expand) wires replay (matches would_pass_bc_replay).
     Phase C never; collect flags keep live teacher collection (no --bc-replay).
     """
     global _replay_tapes
@@ -1051,7 +1075,7 @@ def _maybe_set_replay_tapes(args, *, resume: bool = False) -> None:
             f"(no --bc-replay)")
         return
     if resume and (_onboard is None or _onboard.get("phase") not in (
-            "A", "B", "C", "D", "E")):
+            "A", "B", "S", "C", "D", "E")):
         return
     _replay_tapes = True
     if resume:
@@ -1106,8 +1130,11 @@ def _init_onboard(args) -> None:
                   "b_bc_lambda_end",
                   "bc_win_cap", "bc_win_ep_cap", "bc_win_prefer_ticks",
                   "c_mix_from", "c_mix_warmup", "c_mix_start",
+                  "c_bc_lambda_start",
                   "c_promote_wr20", "d_promote_wr20",
-                  "d_mix_from", "e_mix_from"):
+                  "d_mix_from", "e_mix_from",
+                  "s_min_iters", "s_promote_wr20", "s_streak",
+                  "s_anchor_prob"):
             _onboard[k] = ob.DEFAULTS[k]
         if args.onboard_rewind is not None:
             keep = int(args.onboard_rewind)
@@ -1154,9 +1181,8 @@ def _init_onboard(args) -> None:
             log(f"onboard COLLECT-ONLY target={_collect_target} "
                 f"wins_so_far={n_eps} (no SFT, keep latest.pt)")
         else:
-            # Phase A/B: reuse tapes like --scratch --onboard.
-            # would_pass_bc_replay gates on phase in (A, B); C never gets
-            # --bc-replay from this flag alone.
+            # Phase A/B/S rush (+ CDE expand if schema matches): reuse tapes.
+            # would_pass_bc_replay gates replay; schema mismatch recollects.
             _maybe_set_replay_tapes(args, resume=True)
         log(f"onboard resume phase={_onboard['phase']} "
             f"(sft_iters={_onboard['sft_iters']} "
@@ -1283,7 +1309,11 @@ def main():
                         cw = "ON" if collapse_active(nxt, collapse_watch) else "OFF"
                         log(f"onboard relanza fase {nxt} collapse={cw}")
                         time.sleep(2)
-                        proc = launch_train()
+                        extra = ["--hyper-pause"]
+                        if (nxt == "C"
+                                and not _onboard.get("c_reset_opt_done")):
+                            extra = ["--reset-opt", "--hyper-pause"]
+                        proc = launch_train(extra_args=extra)
                         last_mtime = metrics_mtime()
                         last_progress = time.time()
                         continue
@@ -1359,10 +1389,15 @@ def main():
                         kill_train(proc)
                         time.sleep(2)
                         if nxt == "C":
-                            # Drought must not see B's wr20 peak as C's.
+                            # Drought must not see B/S wr20 peak as C's.
                             last_restore_iter = int(n)
                         # Pause HyperHealth a few iters after promote.
-                        proc = launch_train(extra_args=["--hyper-pause"])
+                        # First C: also --reset-opt (Adam fresco) if not done.
+                        extra = ["--hyper-pause"]
+                        if (nxt == "C"
+                                and not _onboard.get("c_reset_opt_done")):
+                            extra = ["--reset-opt", "--hyper-pause"]
+                        proc = launch_train(extra_args=extra)
                         last_mtime = metrics_mtime()
                         last_progress = time.time()
                         gpu_low_streak = 0

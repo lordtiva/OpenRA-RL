@@ -34,7 +34,11 @@ from rl.reward_shaping import PRESETS as SHAPER_PRESETS
 from rl.network import AlphaLiteNet
 from rl.rollout import (add_advantages, center_advantage_by_episode,
                         smdp_k_ref, collect_one_episode, flatten_samples)
-from rl.collect_heartbeat import write_heartbeat, gather_stall_should_cancel
+from rl.collect_heartbeat import (
+    write_heartbeat, gather_stall_should_cancel,
+    note_gather_wait, note_gather_refill,
+    MAX_GATHER_REFILL_ROUNDS, episodes_shortfall, should_refill,
+)
 from rl.collect_timeout import close_env_now, is_collect_timeout, note_collect_timeout
 from rl.metrics_lock import metrics_lock
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
@@ -147,7 +151,8 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
     teacher_bot = getattr(args, "bc_teacher_bot", None)
     if teacher_bot:
         t_kwargs["bot_type"] = teacher_bot
-    envs = list(pool or [])
+    # Same list as caller pool so stall-refill reconnects stick.
+    envs = pool if pool is not None else []
     if not envs:
         raise RuntimeError("collect_teacher_games: pool vacío")
 
@@ -215,13 +220,39 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
 
     for start in range(0, n, len(envs)):
         chunk = list(range(start, min(start + len(envs), n)))
-        tasks = [
-            asyncio.create_task(
-                _one(i, envs[j % len(envs)]), name=f"bc-w{i}")
-            for j, i in enumerate(chunk)
-        ]
+        async def recover_bc_env(eidx):
+            old = envs[eidx]
+            ws = getattr(old, "_ws_url", "") or ""
+            base_url = (
+                ws.replace("ws://", "http://")
+                  .replace("wss://", "https://")
+                  .rsplit("/ws", 1)[0]
+                or "http://localhost:8000"
+            )
+            mt = float(getattr(old, "_message_timeout", 0) or 0) or (
+                _mt if _mt > 0 else 120.0)
+            await close_env_now(old)
+            envs[eidx] = OpenRAEnv(
+                base_url=base_url, message_timeout_s=mt)
+            try:
+                await asyncio.wait_for(envs[eidx].connect(), timeout=15)
+                return True
+            except Exception as ce:
+                print(f"  [bc] refill reconnect env{eidx} failed: {ce}",
+                      flush=True)
+                return False
+
+        task_env = {}
+        tasks = []
+        for j, i in enumerate(chunk):
+            eidx = j % len(envs)
+            t = asyncio.create_task(
+                _one(i, envs[eidx]), name=f"bc-w{i}")
+            task_env[t] = (i, eidx)
+            tasks.append(t)
         pending = set(tasks)
         stall_streak = 0
+        refill_rounds = 0
         parts = []
         while pending:
             done, pending = await asyncio.wait(
@@ -230,6 +261,7 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
             if done:
                 stall_streak = 0
                 for _t in done:
+                    task_env.pop(_t, None)
                     if _t.cancelled():
                         continue
                     exc = _t.exception()
@@ -241,26 +273,75 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
                         raise exc
                     parts.append(_t.result())
                 continue
-            stall_streak += 1
+            # Wait-timeout (empty done): read worker age FIRST, then
+            # force keepalive so auto_train does not CUELGUE while the
+            # gather supervisor is alive (even if workers are wedged).
             from rl.collect_heartbeat import read_heartbeat, heartbeat_age_s
             hb = read_heartbeat(hb_path) if hb_path else None
             age = heartbeat_age_s(hb)
-            # Never cancel while hb is fresh (long episodes).
+            stall_streak += 1
+            note_gather_wait(
+                hb_path, phase="bc_wait", iter=it_now,
+                pending=len(pending), stall_streak=stall_streak)
+            # Never cancel while worker hb is fresh (long episodes).
             # Cancel only when hb missing/stale; streak is log-only.
+            # Use age from BEFORE keepalive so wait-hb does not mask stalls.
             if not gather_stall_should_cancel(age, slice_s):
                 continue
             note_collect_timeout(
                 hb_path, error="bc_gather_stall", iter=it_now)
+            cancelled = [
+                task_env[t] for t in pending if t in task_env
+            ]
+            cancelled_eidxs = sorted({e for _, e in cancelled})
             print(
                 f"  [bc] gather stall {slice_s:.0f}s "
                 f"hb_age={age} streak={stall_streak} — "
-                f"cancelling {len(pending)} teacher task(s)",
+                f"cancelling envs {cancelled_eidxs}",
                 flush=True)
-            for _t in pending:
+            for _t in list(pending):
                 _t.cancel()
             if pending:
                 await asyncio.wait(pending, timeout=5.0)
-            break
+            for _t in list(pending):
+                task_env.pop(_t, None)
+            pending.clear()
+
+            recovered = []
+            for eidx in cancelled_eidxs:
+                if await recover_bc_env(eidx):
+                    recovered.append(eidx)
+            # Refill this chunk toward its expected size (sums to bc_games).
+            need = episodes_shortfall(len(parts), len(chunk))
+            if not should_refill(need, refill_rounds) or not recovered:
+                print(
+                    f"  [bc] refill gave up with "
+                    f"{len(episodes) + len(parts)}/{n} teacher games "
+                    f"(need={need} rounds={refill_rounds}/"
+                    f"{MAX_GATHER_REFILL_ROUNDS})",
+                    flush=True)
+                break
+            refill_rounds += 1
+            note_gather_refill(
+                hb_path, phase="bc_refill", iter=it_now,
+                pending=need, refill_round=refill_rounds)
+            # Retry cancelled game indices first, then mint fresh ones.
+            retry_gis = [gi for gi, _ in cancelled]
+            print(
+                f"  [bc] refill round {refill_rounds}/"
+                f"{MAX_GATHER_REFILL_ROUNDS}: need={need} "
+                f"on envs {recovered}",
+                flush=True)
+            for k in range(need):
+                eidx = recovered[k % len(recovered)]
+                gi = retry_gis[k] if k < len(retry_gis) else (
+                    chunk[-1] + 1 + (k - len(retry_gis)))
+                t = asyncio.create_task(
+                    _one(gi, envs[eidx]),
+                    name=f"bc-w{gi}-r{refill_rounds}-{k}")
+                task_env[t] = (gi, eidx)
+                pending.add(t)
+            stall_streak = 0
         for p in parts:
             if p is not None:
                 episodes.append(p)
@@ -674,13 +755,34 @@ async def amain(args):
                                 pass
                     results.append((traj, outcome))
 
-            tasks = [
-                asyncio.create_task(worker(i, n), name=f"collect-w{i}")
-                for i, n in enumerate(per_worker)
-            ]
+            async def recover_pool_env(idx):
+                """close + recreate + connect (same as deadline reconnect)."""
+                await close_env_now(pool[idx])
+                base_url = urls[idx % len(urls)]
+                pool[idx] = OpenRAEnv(
+                    base_url=base_url, message_timeout_s=ws_timeout)
+                try:
+                    await asyncio.wait_for(pool[idx].connect(), timeout=15)
+                    return True
+                except Exception as ce:
+                    print(f"  [collect] refill reconnect w{idx} failed: {ce}",
+                          flush=True)
+                    return False
+
+            task_idx = {}
+            tasks = []
+            for i, n in enumerate(per_worker):
+                if n <= 0:
+                    continue
+                t = asyncio.create_task(
+                    worker(i, n), name=f"collect-w{i}")
+                task_idx[t] = i
+                tasks.append(t)
             pending = set(tasks)
             slice_s = float(ws_timeout) + 30.0
             stall_streak = 0
+            refill_rounds = 0
+            ep_target = int(args.episodes)
             while pending:
                 done, pending = await asyncio.wait(
                     pending, timeout=slice_s,
@@ -688,6 +790,7 @@ async def amain(args):
                 if done:
                     stall_streak = 0
                     for _t in done:
+                        task_idx.pop(_t, None)
                         exc = _t.exception() if not _t.cancelled() else None
                         if exc is not None:
                             for pnd in pending:
@@ -696,27 +799,77 @@ async def amain(args):
                                 await asyncio.wait(pending, timeout=5.0)
                             raise exc
                     continue
-                stall_streak += 1
+                # Wait-timeout (empty done): read worker age FIRST, then
+                # force keepalive so auto_train sees supervisor alive
+                # (phase=collect_wait) even if workers are wedged.
                 from rl.collect_heartbeat import read_heartbeat, heartbeat_age_s
                 hb = read_heartbeat(hb_path)
                 age = heartbeat_age_s(hb)
-                # Never cancel while hb is fresh (long episodes keep hb
-                # alive with no task completion). Cancel only when hb is
-                # missing/stale; stall_streak is log-only.
+                stall_streak += 1
+                note_gather_wait(
+                    hb_path, phase="collect_wait", iter=it_now,
+                    pending=len(pending), stall_streak=stall_streak)
+                # Never cancel while worker hb is fresh (long episodes keep
+                # hb alive with no task completion). Cancel only when hb is
+                # missing/stale; stall_streak is log-only. Age is from BEFORE
+                # keepalive so wait-hb does not mask real worker stalls.
                 if not gather_stall_should_cancel(age, slice_s):
                     continue
                 note_collect_timeout(
                     hb_path, error="gather_stall", iter=it_now)
+                cancelled_idxs = sorted({
+                    task_idx[t] for t in pending if t in task_idx
+                })
                 print(
                     f"  [collect] gather stall {slice_s:.0f}s "
                     f"hb_age={age} streak={stall_streak} — "
-                    f"cancelling {len(pending)} worker(s)",
+                    f"cancelling workers {cancelled_idxs}",
                     flush=True)
-                for _t in pending:
+                for _t in list(pending):
                     _t.cancel()
                 if pending:
                     await asyncio.wait(pending, timeout=5.0)
-                break
+                for _t in list(pending):
+                    task_idx.pop(_t, None)
+                pending.clear()
+
+                recovered = []
+                for idx in cancelled_idxs:
+                    if await recover_pool_env(idx):
+                        recovered.append(idx)
+                need = episodes_shortfall(len(results), ep_target)
+                if not should_refill(need, refill_rounds):
+                    print(
+                        f"  [collect] refill gave up with "
+                        f"{len(results)}/{ep_target} episodes "
+                        f"(need={need} rounds={refill_rounds}/"
+                        f"{MAX_GATHER_REFILL_ROUNDS})",
+                        flush=True)
+                    break
+                if not recovered:
+                    print(
+                        f"  [collect] refill gave up with "
+                        f"{len(results)}/{ep_target} episodes "
+                        f"(no recovered envs)",
+                        flush=True)
+                    break
+                refill_rounds += 1
+                note_gather_refill(
+                    hb_path, phase="collect_refill", iter=it_now,
+                    pending=need, refill_round=refill_rounds)
+                print(
+                    f"  [collect] refill round {refill_rounds}/"
+                    f"{MAX_GATHER_REFILL_ROUNDS}: need={need} "
+                    f"on workers {recovered}",
+                    flush=True)
+                for k in range(need):
+                    idx = recovered[k % len(recovered)]
+                    t = asyncio.create_task(
+                        worker(idx, 1),
+                        name=f"collect-w{idx}-r{refill_rounds}-{k}")
+                    task_idx[t] = idx
+                    pending.add(t)
+                stall_streak = 0
             return results
 
         # Esperamos la tanda anterior antes de reusar los envs del pool
@@ -946,8 +1099,10 @@ async def amain(args):
                     "(workers cancelled or no episodes finished)",
                     flush=True)
         lmb_bc = (1.0 if bc_only else
-                  (lambda_bc_at(it, bc_start_iter, args.bc_warmup,
-                                end=float(getattr(args, "bc_lambda_end", 0.0) or 0.0))
+                  (lambda_bc_at(
+                      it, bc_start_iter, args.bc_warmup,
+                      start=float(getattr(args, "bc_lambda_start", 1.0)),
+                      end=float(getattr(args, "bc_lambda_end", 0.0) or 0.0))
                    if args.bc else 0.0))
         lmb_sil = args.lambda_sil if args.sil else 0.0
         bc_samples = []
@@ -1528,8 +1683,8 @@ def main():
     ap.add_argument("--bc-epochs", type=int, default=1,
                     help="Epochs de NLL BC por iter (default 1).")
     ap.add_argument("--onboard-phase", default=None,
-                    choices=("A", "B", "C", "D", "E"),
-                    help="Marca la fase A-E en metrics.jsonl (lo setea auto_train).")
+                    choices=("A", "B", "S", "C", "D", "E"),
+                    help="Marca la fase A/B/S/C/D/E en metrics.jsonl (lo setea auto_train).")
     ap.add_argument("--heuristic-p", type=float, default=None,
                     help="P1.4 fixed override for guard_army_push_cell "
                          "(0..1). stage/remap always on. Default None = anneal.")
@@ -1556,11 +1711,15 @@ def main():
     ap.add_argument("--sil", action="store_true",
                     help="Capa 1: self-imitation de episodios win/raze>0.")
     ap.add_argument("--bc-warmup", type=int, default=80,
-                    help="Iters para bajar lambda_bc de 1.0 a --bc-lambda-end. "
-                         "Ignorado en --bc-only.")
+                    help="Iters para bajar lambda_bc de --bc-lambda-start "
+                         "a --bc-lambda-end. Ignorado en --bc-only.")
     ap.add_argument("--bc-lambda-end", type=float, default=0.0,
                     help="Piso de lambda_bc tras el warmup (default 0). "
                          "Fase B usa 0.25 para no apagar el teacher.")
+    ap.add_argument("--bc-lambda-start", type=float, default=1.0,
+                    help="lambda_bc al inicio del warmup (default 1.0). "
+                         "Onboard C/S pin near B floor (~0.10-0.25) so "
+                         "promote does not restart BC at ~1.0.")
     ap.add_argument("--bc-keep-incomplete", action="store_true",
                     help="Clonar incomplete largos del teacher (build order). "
                          "Default off (wins-only); solo si se pasa el flag.")

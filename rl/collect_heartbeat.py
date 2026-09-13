@@ -151,3 +151,69 @@ def gather_stall_should_cancel(age: float | None, slice_s: float) -> bool:
     if age is not None and age < float(slice_s):
         return False
     return True
+
+
+# After a gather-stall cancel, refill shortfall episodes in the same iter
+# instead of accepting a partial batch (2/3 of 4). Cap rounds to avoid loops.
+MAX_GATHER_REFILL_ROUNDS = 2
+
+
+def episodes_shortfall(have: int, target: int) -> int:
+    """How many more episodes needed to reach target (0 if already enough)."""
+    return max(0, int(target) - int(have))
+
+
+def should_refill(
+    need: int,
+    rounds_done: int,
+    max_rounds: int = MAX_GATHER_REFILL_ROUNDS,
+) -> bool:
+    """True if we should spawn another refill round after a gather stall."""
+    return int(need) > 0 and int(rounds_done) < int(max_rounds)
+
+
+def note_gather_wait(
+    ckpt_dir_or_path: str | os.PathLike | None,
+    *,
+    phase: str = "collect_wait",
+    iter: int | None = None,
+    pending: int | None = None,
+    **extra: Any,
+) -> bool:
+    """Force-write hb on gather wait-timeout (empty asyncio.wait done).
+
+    Call AFTER reading worker hb age for cancel decisions, so auto_train
+    sees supervisor progress (phase=collect_wait / bc_wait) even when
+    workers are wedged and no longer advancing tick/step.
+    """
+    return write_heartbeat(
+        ckpt_dir_or_path,
+        phase=phase,
+        force=True,
+        iter=iter,
+        pending=pending,
+        **extra,
+    )
+
+
+def note_gather_refill(
+    ckpt_dir_or_path: str | os.PathLike | None,
+    *,
+    phase: str = "collect_refill",
+    iter: int | None = None,
+    pending: int | None = None,
+    refill_round: int | None = None,
+    **extra: Any,
+) -> bool:
+    """Force-write hb when stall cancel + refill starts (ts must advance)."""
+    if refill_round is not None:
+        extra = {**extra, "refill_round": int(refill_round)}
+    return write_heartbeat(
+        ckpt_dir_or_path,
+        phase=phase,
+        force=True,
+        iter=iter,
+        pending=pending,
+        **extra,
+    )
+

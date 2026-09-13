@@ -958,7 +958,7 @@ async def amain(args):
 def main():
     ap = argparse.ArgumentParser(description="Checkpoint vs bot con visor EN VIVO en http://localhost:8786/")
     ap.add_argument("--ckpt", default="rl/ckpts_v2/latest.pt")
-    ap.add_argument("--url", default="http://localhost:8000")
+    ap.add_argument("--url", default="http://localhost:8020", help="live daemon (default :8020); train uses :8000/:8010")
     ap.add_argument("--bot-type", default="beginner")
     ap.add_argument("--ai-slot", default=None, help='slot IA: "Multi0" (default) o "" para sin enemigo')
     ap.add_argument("--scenario", default="a_short")
@@ -998,7 +998,7 @@ def main():
         help="facción del bot: Random|RandomAllies|RandomSoviet|england|france|germany|russia|ukraine",
     )
     ap.add_argument(
-        "--spawn", default="sw",
+        "--spawn", default="random",
         help="spawn del agent: random|sw|ne (pin via LockSpawn en el .oramap; agent=Multi1)",
     )
     ap.add_argument("--port", type=int, default=8786, help="puerto del visor live (default 8786)")

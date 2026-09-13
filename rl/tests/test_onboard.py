@@ -100,7 +100,7 @@ check("B bc-games 2", fb[fb.index("--bc-games") + 1] == "2")
 check("B bc-warmup 40", fb[fb.index("--bc-warmup") + 1] == "40")
 check("B wins-only (no keep incomplete)", "--bc-keep-incomplete" not in fb)
 check("B lambda piso 0.10", fb[fb.index("--bc-lambda-end") + 1] == "0.10")
-check("B lr 2e-5", fb[fb.index("--lr") + 1] == "2.0e-5")
+check("B lr 1e-5", fb[fb.index("--lr") + 1] == "1.0e-5")
 check("B adv-mode global", fb[fb.index("--adv-mode") + 1] == "global")
 check("B no-amp", "--no-amp" in fb and "--amp-init-scale" not in fb)
 check("B teacher macro 40", fb[fb.index("--bc-macro-ticks") + 1] == "40")
@@ -118,6 +118,26 @@ cfg_b_start["b_bc_start_iter"] = 24
 fb24 = phase_flags("B", cfg_b_start)
 check("B pin b_bc_start_iter",
       fb24[fb24.index("--bc-start-iter") + 1] == "24")
+
+cfg_s_flags = dict(cfg)
+cfg_s_flags["phase"] = "S"
+cfg_s_flags["phase_started_iter"] = 100
+cfg_s_flags["b_bc_start_iter"] = 20
+fs = phase_flags("S", cfg_s_flags)
+check("S pfsp+pfsp-rl", "--pfsp" in fs and "--pfsp-rl" in fs)
+check("S bot-type beginner anchor", fs[fs.index("--bot-type") + 1] == "beginner")
+check("S pfsp-pool rl", fs[fs.index("--pfsp-pool") + 1] == "rl")
+check("S anchor_prob 0.25", fs[fs.index("--pfsp-anchor-prob") + 1] == "0.25")
+check("S teacher-mode rush not expand",
+      fs[fs.index("--bc-teacher-mode") + 1] == "rush")
+check("S lambda end floor 0.10", fs[fs.index("--bc-lambda-end") + 1] == "0.10")
+check("S lambda start at floor", fs[fs.index("--bc-lambda-start") + 1] == "0.10")
+check("S bc-start pinned to B origin",
+      fs[fs.index("--bc-start-iter") + 1] == "20")
+check("S sil + auto-hyper", "--sil" in fs and "--auto-hyper" in fs)
+check("S onboard-phase S", fs[fs.index("--onboard-phase") + 1] == "S")
+check("S no wipe/expand", "--bc-only" not in fs)
+
 fc = phase_flags("C", cfg)
 check("A lr 1e-4", fa[fa.index("--lr") + 1] == "1.0e-4")
 check("A adv-mode episode", fa[fa.index("--adv-mode") + 1] == "episode")
@@ -127,7 +147,7 @@ check("C lr 2e-5 (igual B)", fc[fc.index("--lr") + 1] == "2.0e-5")
 check("C adv-mode global", fc[fc.index("--adv-mode") + 1] == "global")
 check("C no-amp", "--no-amp" in fc and "--amp-init-scale" not in fc)
 check("C mix-from beginner", fc[fc.index("--mix-from") + 1] == "beginner")
-check("C mix-warmup 40", fc[fc.index("--mix-warmup") + 1] == "40")
+check("C mix-warmup 60", fc[fc.index("--mix-warmup") + 1] == "60")
 check("C mix-start 0.25", fc[fc.index("--mix-start") + 1] == "0.25")
 check("C sil + expand BC", "--sil" in fc and "--bc" in fc
       and "--bc-only" not in fc)
@@ -142,17 +162,36 @@ fe = phase_flags("E", cfg)
 check("E bot hard", fe[fe.index("--bot-type") + 1] == "hard")
 check("E mix-from medium", fe[fe.index("--mix-from") + 1] == "medium")
 check("E expand BC", "--bc" in fe and fe[fe.index("--bc-teacher-mode") + 1] == "expand")
-check("teacher_mode A/B rush CDE expand",
+check("teacher_mode A/B/S rush CDE expand",
       teacher_mode_for_phase("B") == "rush"
+      and teacher_mode_for_phase("S") == "rush"
       and teacher_mode_for_phase("C") == "expand")
 cfg["c_reset_opt_done"] = True
 fc2 = phase_flags("C", cfg)
 check("C nunca reset-opt", "--reset-opt" not in fc2)
 cfg_c_start = dict(cfg)
 cfg_c_start["phase_started_iter"] = 132
+cfg_c_start["b_bc_start_iter"] = 36
 fc132 = phase_flags("C", cfg_c_start)
 check("C mix-start-iter = phase_started+1",
       fc132[fc132.index("--mix-start-iter") + 1] == "133")
+check("C bc-start pinned B origin (no λ restart)",
+      fc132[fc132.index("--bc-start-iter") + 1] == "36")
+check("C bc-lambda-start near floor not 1.0",
+      float(fc132[fc132.index("--bc-lambda-start") + 1]) <= 0.25)
+# Without b_bc_start_iter, floor-pin still avoids λ≈1.0 at entry
+cfg_c_nofloor = dict(cfg)
+cfg_c_nofloor["phase_started_iter"] = 132
+cfg_c_nofloor["b_bc_start_iter"] = 0
+fc_nf = phase_flags("C", cfg_c_nofloor)
+from rl.imitation import lambda_bc_at
+_it = 133
+_start = int(fc_nf[fc_nf.index("--bc-start-iter") + 1])
+_warm = int(fc_nf[fc_nf.index("--bc-warmup") + 1])
+_ls = float(fc_nf[fc_nf.index("--bc-lambda-start") + 1])
+_le = float(fc_nf[fc_nf.index("--bc-lambda-end") + 1])
+_lmb = lambda_bc_at(_it, _start, _warm, start=_ls, end=_le)
+check("C fresh entry λ_bc << 1.0", _lmb < 0.5)
 
 cmd = build_train_argv(base, "A", new_curriculum())
 check("argv A last bot-type beginner",
@@ -219,8 +258,27 @@ check("A ignora promote_wr20/streak (solo a_promote)",
 cfg_b = new_curriculum()
 cfg_b["phase"] = "B"
 cfg_b["phase_started_iter"] = 0
-check("promove B->C con wr20 alto y min iters",
-      should_promote(cfg_b, rows, last_iter=24) == "C")
+check("promove B->S con wr20 alto y min iters",
+      should_promote(cfg_b, rows, last_iter=24) == "S")
+
+# Phase S → C: shorter streak (5), wr20 vs beginner anchor
+rows_s = [
+    {"iter": 30 + i, "bot_type": "beginner", "onboard_phase": "S",
+     "outcomes": ["win", "win", "lose", "win"]}  # wr 0.75
+    for i in range(25)
+]
+cfg_s = new_curriculum()
+cfg_s["phase"] = "S"
+cfg_s["phase_started_iter"] = 29
+check("promove S->C con wr20+streak5+min_iters",
+      should_promote(cfg_s, rows_s, last_iter=54) == "C")
+cfg_s_short = dict(cfg_s)
+cfg_s_short["s_streak"] = 5
+cfg_s_short["s_min_iters"] = 20
+# Not enough iters in S
+rows_s_few = rows_s[:10]
+check("S no promove sin min_iters",
+      should_promote(cfg_s_short, rows_s_few, last_iter=39) is None)
 
 easy_rows = [
     {"iter": 30 + i, "bot_type": "easy", "onboard_phase": "C",
@@ -284,6 +342,12 @@ check("argv B last teacher beginner",
       cmd_b[[i for i, a in enumerate(cmd_b) if a == "--bc-teacher-bot"][-1] + 1]
       == "beginner")
 check("argv B sin pfsp", "--pfsp" not in cmd_b)
+cmd_s = build_train_argv(base, "S", cfg_s_flags)
+check("argv S tiene pfsp+pfsp-rl",
+      "--pfsp" in cmd_s and "--pfsp-rl" in cmd_s)
+check("argv S last bot beginner",
+      cmd_s[[i for i, a in enumerate(cmd_s) if a == "--bot-type"][-1] + 1]
+      == "beginner")
 check("argv B no-amp", "--no-amp" in cmd_b)
 check("argv C last teacher-mode expand",
       phase_flags("C", cfg)[phase_flags("C", cfg).index("--bc-teacher-mode") + 1]
@@ -489,8 +553,18 @@ cfg_b2c["promote_wr20"] = 0.50
 cfg_b2c["streak"] = 10
 cfg_b2c["min_iters"] = 20
 earned_b2c = apply_earned_promotions(cfg_b2c, rows_b, last_iter=50)
-check("apply_earned B->C con streak historico", earned_b2c == ["C"])
-check("apply_earned deja phase C", cfg_b2c["phase"] == "C")
+check("apply_earned B->S con streak historico", earned_b2c == ["S"])
+check("apply_earned deja phase S", cfg_b2c["phase"] == "S")
+check("apply_earned pin b_bc_start_iter",
+      int(cfg_b2c.get("b_bc_start_iter") or 0) == 50)
+# Old curriculum already in C: do not invent S
+cfg_already_c = new_curriculum()
+cfg_already_c["phase"] = "C"
+cfg_already_c["phase_started_iter"] = 51
+cfg_already_c["c_reset_opt_done"] = True
+earned_stay = apply_earned_promotions(cfg_already_c, rows_b, last_iter=50)
+check("apply_earned no inventa S desde C",
+      earned_stay == [] and cfg_already_c["phase"] == "C")
 
 # Rewind C→B when B streak already met on kept rows → re-promote to C
 td4 = Path(tempfile.mkdtemp())
@@ -514,8 +588,9 @@ cfg_c2c["promote_wr20"] = 0.50
 cfg_c2c["streak"] = 10
 cfg_c2c["min_iters"] = 20
 out_c2c, inf_c2c = rewind_onboard(td4, 50, cfg=cfg_c2c)
-check("rewind C con B-streak met landa en C", out_c2c["phase"] == "C")
-check("rewind C earned includes C", "C" in (inf_c2c.get("earned_promotions") or []))
+check("rewind C con B-streak met landa en S", out_c2c["phase"] == "S")
+check("rewind C earned includes S", "S" in (inf_c2c.get("earned_promotions") or []))
+check("rewind C no salta a C sin filas S", "C" not in (inf_c2c.get("earned_promotions") or []))
 
 
 print("=== collapse A vs B ===")
@@ -525,6 +600,8 @@ check("A never collapse even if flag on",
       at.collapse_active("A", True) is False)
 check("B collapse follows flag on",
       at.collapse_active("B", True) is True)
+check("S collapse follows flag on",
+      at.collapse_active("S", True) is True)
 check("B collapse follows flag off",
       at.collapse_active("B", False) is False)
 check("C collapse follows flag on",
@@ -572,6 +649,11 @@ check("would_pass_bc_replay True when replay+B without collect-only",
       at.would_pass_bc_replay(
           replay_tapes=True,
           onboard={"phase": "B"},
+          collect_only=False) is True)
+check("would_pass_bc_replay True when replay+S",
+      at.would_pass_bc_replay(
+          replay_tapes=True,
+          onboard={"phase": "S"},
           collect_only=False) is True)
 check("would_pass_bc_replay True when replay+C expand",
       at.would_pass_bc_replay(

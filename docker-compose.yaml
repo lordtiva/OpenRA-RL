@@ -6,6 +6,7 @@
 #     docker compose -f docker-compose.yaml -f docker-compose.scale.yaml up -d --build
 #   With LLM agent:    docker compose --profile llm up agent
 #   With MCP bot:      docker compose run mcp-bot
+#   Live/viewer only: docker compose -f docker-compose.live.yaml up -d
 #
 # Build:
 #   docker compose build
@@ -30,10 +31,9 @@ services:
           resources:
             limits:
               cpus: "4"
-              # 6G: el fix de fuga (DestroySession → GC.Collect) mantiene el daemon
-              # en meseta, así que no hace falta margen gigante. 12G dejaba al host
-              # sin RAM para el resto del sistema.
-              memory: 6G
+              # 4G: train daemons; leave headroom for live viewer container (3G).
+              # DestroySession GC keeps RSS in plateau; 6G starved host+live.
+              memory: 4G
     shm_size: 256m
     restart: unless-stopped
     healthcheck:

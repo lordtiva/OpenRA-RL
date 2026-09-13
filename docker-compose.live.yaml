@@ -1,15 +1,17 @@
-# Segundo daemon del mismo juego (:8010).
-# Cada proceso OpenRA tickea sus sesiones en UN hilo -> ~1 nucleo por
-# contenedor. Base (:8000) + este = 2 daemons.
+﻿# Live/viewer-only daemon (:8020 HTTP, :29999 gRPC).
+# Never add to auto_train game urls — train stays on :8000/:8010.
 #
-# Uso:  docker compose -f docker-compose.yaml -f docker-compose.scale.yaml up -d --build
+# Usage:
+#   docker compose -f docker-compose.live.yaml up -d
+# Train (unchanged):
+#   docker compose -f docker-compose.yaml -f docker-compose.scale.yaml up -d
 
 services:
-  openra-rl-2:
+  openra-rl-live:
     image: openra-rl:local
     ports:
-      - "8010:8000"
-      - "19999:9999"
+      - "8020:8000"
+      - "29999:9999"
     environment:
       - OPENRA_PATH=/opt/openra
       - DISPLAY=:99
@@ -19,8 +21,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "4"
-          memory: 4G
+          cpus: "2"
+          memory: 3G
     shm_size: 256m
     restart: unless-stopped
     healthcheck:

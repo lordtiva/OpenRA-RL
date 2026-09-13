@@ -6,10 +6,15 @@ from pathlib import Path
 
 from rl.collect_heartbeat import (
     HEARTBEAT_NAME,
+    MAX_GATHER_REFILL_ROUNDS,
+    episodes_shortfall,
     gather_stall_should_cancel,
     heartbeat_advanced,
     heartbeat_age_s,
+    note_gather_refill,
+    note_gather_wait,
     read_heartbeat,
+    should_refill,
     write_heartbeat,
 )
 from rl import auto_train as at
@@ -120,23 +125,23 @@ def test_recreate_allowed_cooldown_and_max():
 
 def test_should_recreate_requires_consecutive_streak():
     """No Docker recreate on first python-idle; yes after streak."""
-    # First idle hang → train-only (consecutive=1 < default 3)
+    # First idle hang → train-only (consecutive=1 < default 2)
     assert at.should_recreate_on_python_hang(
         markers=0, gpu=0, idle=1000, thr=900,
         consecutive_python_idles=1) is False
     assert at.should_recreate_on_python_hang(
         markers=0, gpu=0, idle=1000, thr=900,
-        consecutive_python_idles=2) is False
+        consecutive_python_idles=2) is True
+    # Configurable recreate_after=3
     assert at.should_recreate_on_python_hang(
         markers=0, gpu=0, idle=1000, thr=900,
-        consecutive_python_idles=3) is True
-    # Configurable recreate_after=2
+        consecutive_python_idles=1, recreate_after=3) is False
     assert at.should_recreate_on_python_hang(
         markers=0, gpu=0, idle=1000, thr=900,
-        consecutive_python_idles=1, recreate_after=2) is False
+        consecutive_python_idles=2, recreate_after=3) is False
     assert at.should_recreate_on_python_hang(
         markers=0, gpu=0, idle=1000, thr=900,
-        consecutive_python_idles=2, recreate_after=2) is True
+        consecutive_python_idles=3, recreate_after=3) is True
     # GPU busy / not idle enough still False
     assert at.should_recreate_on_python_hang(
         markers=0, gpu=40, idle=1000, thr=900,
@@ -431,3 +436,91 @@ def test_empty_samples_zero_stats_have_pi_loss():
     empty = {}
     _ = f"pi {empty.get('pi_loss', 0.0):+.4f}"
     assert empty.get("pi_loss", 0.0) == 0.0
+
+
+def test_episodes_shortfall_and_should_refill():
+    """Partial batch after stall: need = target - have; cap refill rounds."""
+    assert episodes_shortfall(2, 4) == 2
+    assert episodes_shortfall(4, 4) == 0
+    assert episodes_shortfall(5, 4) == 0
+    assert episodes_shortfall(0, 4) == 4
+    assert episodes_shortfall(3, 3) == 0
+
+    assert should_refill(2, 0) is True
+    assert should_refill(2, 1) is True
+    assert should_refill(2, 2) is False  # MAX default 2
+    assert should_refill(0, 0) is False  # nothing needed
+    assert should_refill(1, 0, max_rounds=0) is False
+    assert should_refill(1, 0, max_rounds=1) is True
+    assert should_refill(1, 1, max_rounds=1) is False
+    assert MAX_GATHER_REFILL_ROUNDS == 2
+
+    # Simulate stall decision path used by run_batch
+    have, target, rounds = 2, 4, 0
+    need = episodes_shortfall(have, target)
+    assert need == 2
+    assert should_refill(need, rounds) is True
+    rounds += 1  # spawned refill
+    # second stall still short
+    have = 3
+    need = episodes_shortfall(have, target)
+    assert need == 1
+    assert should_refill(need, rounds) is True
+    rounds += 1
+    # third stall: rounds exhausted
+    have = 3
+    need = episodes_shortfall(have, target)
+    assert should_refill(need, rounds) is False
+
+
+def test_hb_dead_hang_raised_for_stall_refill_room():
+    """HB_DEAD_HANG_S must leave room for stall(~150s) + 2 refill rounds."""
+    assert at.HB_DEAD_HANG_S >= 480
+    assert at.PYTHON_IDLE_RECREATE_STREAK == 2
+
+
+def test_note_gather_wait_keepalive_writes_hb(tmp_path: Path):
+    """Wait-timeout path helper must force-write phase=collect_wait.
+
+    auto_train resets idle when hb advances; without this keepalive,
+    wedged workers (no tick/step) let hb_age hit HB_DEAD_HANG and CUELGUE
+    mid-collect even while the gather supervisor is still looping.
+    """
+    assert note_gather_wait(
+        tmp_path, phase="collect_wait", iter=9, pending=3, stall_streak=1)
+    hb = read_heartbeat(tmp_path)
+    assert hb is not None
+    assert hb["phase"] == "collect_wait"
+    assert hb["iter"] == 9
+    assert hb["pending"] == 3
+    age = heartbeat_age_s(hb)
+    assert age is not None and age < 5.0
+
+    assert note_gather_wait(
+        tmp_path, phase="bc_wait", iter=2, pending=1)
+    assert read_heartbeat(tmp_path)["phase"] == "bc_wait"
+
+
+def test_note_gather_refill_advances_ts(tmp_path: Path):
+    assert note_gather_refill(
+        tmp_path, phase="collect_refill", iter=9, pending=2, refill_round=1)
+    hb = read_heartbeat(tmp_path)
+    assert hb["phase"] == "collect_refill"
+    assert hb["refill_round"] == 1
+    assert hb["iter"] == 9
+
+
+def test_hang_threshold_treats_wait_refill_phases_like_collect():
+    """collect_wait / collect_refill are collect-ish for dead-hb tighten."""
+    base = 900
+    for phase in ("collect_wait", "collect_refill", "bc_wait", "bc_refill"):
+        # Fresh age → do not tighten
+        thr = at.hang_threshold_for_dead_hb(
+            base, markers=0, gpu=0,
+            hb={"phase": phase}, hb_age=30.0)
+        assert thr == base, phase
+        # Dead age → tighten to HB_DEAD_HANG_S
+        thr2 = at.hang_threshold_for_dead_hb(
+            base, markers=0, gpu=0,
+            hb={"phase": phase}, hb_age=float(at.HB_DEAD_HANG_S))
+        assert thr2 == at.HB_DEAD_HANG_S, phase

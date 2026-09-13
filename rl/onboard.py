@@ -1,15 +1,17 @@
-"""Onboarding curriculum A → E (no .pt required).
+"""Onboarding curriculum A → E with self-play bridge S (no .pt required).
 
 A: SFT rifle teacher vs beginner.
 B: PPO+SIL+rifle BC vs beginner until wr20 holds.
+S: PFSP-RL bridge (beginner anchor) — softens B→C cliff.
 C: PPO+SIL+expand BC vs easy (mix beginner→easy).
 D: same vs medium (mix easy→medium).
 E: same vs hard/OpenRA normal (mix medium→hard) until wr20 holds.
 
 Expand teacher (weap+1tnk+e3) is the expert vs easy+. Rifle teacher is not.
-auto_train owns promotion (kill + relaunch). train.py only sees the flags
-of the current phase. State lives in rl/ckpts/curriculum.json so a crash
-does not restart SFT.
+Phase S keeps rush/mental schema and λ_bc at the B floor (no expand, no
+λ restart). auto_train owns promotion (kill + relaunch). train.py only
+sees the flags of the current phase. State lives in curriculum.json so a
+crash does not restart SFT.
 """
 from __future__ import annotations
 
@@ -20,15 +22,17 @@ from pathlib import Path
 
 from rl.imitation import BC_WIN_CAP, BC_WIN_EP_CAP, BC_WIN_PREFER_TICKS
 
-PHASES = ("A", "B", "C", "D", "E", "done")
+PHASES = ("A", "B", "S", "C", "D", "E", "done")
 PHASE_BOT = {
-    "A": "beginner", "B": "beginner",
+    "A": "beginner", "B": "beginner", "S": "beginner",
     "C": "easy", "D": "medium", "E": "hard",
 }
 PHASE_NEXT = {
-    "A": "B", "B": "C", "C": "D", "D": "E", "E": "done",
+    "A": "B", "B": "S", "S": "C", "C": "D", "D": "E", "E": "done",
 }
 EXPAND_PHASES = ("C", "D", "E")
+# Rush/mental schema phases (not expand teacher).
+RUSH_PHASES = ("A", "B", "S")
 
 DEFAULTS = {
     "sft_iters": 20,
@@ -61,10 +65,18 @@ DEFAULTS = {
     "bc_win_prefer_ticks": BC_WIN_PREFER_TICKS,
     # Mix ramp onto the phase target. C/D/E keep BC (expand teacher).
     "c_mix_from": "beginner",
-    "c_mix_warmup": 40,
+    "c_mix_warmup": 60,  # was 40; slightly longer beginner mix into easy
     "c_mix_start": 0.25,
+    # Soften C λ_bc entry. Prefer pinning b_bc_start_iter across S→C;
+    # this is the fallback start when train supports --bc-lambda-start.
+    "c_bc_lambda_start": 0.15,
     "d_mix_from": "easy",
     "e_mix_from": "medium",
+    # Phase S (self-play bridge B→C): PFSP-RL with beginner anchor.
+    "s_min_iters": 20,
+    "s_promote_wr20": 0.45,
+    "s_streak": 5,
+    "s_anchor_prob": 0.25,  # 25% beginner anchor, 75% PFSP challengers
     # P3 opt-in: named pool or comma keys ("" = a_short via TRAIN_ARGS --scenario).
     "map_pool": "",
 }
@@ -81,7 +93,7 @@ _STRIP = {
     "--bot-type", "--pfsp", "--pfsp-rl", "--pfsp-pool", "--pfsp-anchor-prob",
     "--bc", "--bc-only", "--bc-warmup", "--bc-start-iter", "--bc-teacher-bot",
     "--bc-games", "--bc-epochs", "--bc-keep-incomplete",
-    "--bc-macro-ticks", "--bc-max-steps", "--bc-lambda-end",
+    "--bc-macro-ticks", "--bc-max-steps", "--bc-lambda-end", "--bc-lambda-start",
     "--bc-rush", "--bc-replay", "--bc-collect-only", "--bc-collect-target",
     "--bc-win-cap", "--bc-win-ep-cap", "--bc-win-prefer-ticks", "--bc-teacher-mode",
     "--eval-games",
@@ -122,7 +134,7 @@ def _cfg(raw: dict | None) -> dict:
         for k, v in raw.items():
             if k in DEFAULTS or k in (
                 "phase", "a_launched", "c_reset_opt_done", "phase_started_iter",
-                "heuristic_phase_start",
+                "heuristic_phase_start", "b_bc_start_iter",
             ):
                 out[k] = v
     return out
@@ -187,8 +199,16 @@ def save_curriculum(path: str | Path, cfg: dict) -> None:
         "c_mix_from": str(cfg.get("c_mix_from") or DEFAULTS["c_mix_from"]),
         "c_mix_warmup": int(cfg.get("c_mix_warmup", DEFAULTS["c_mix_warmup"])),
         "c_mix_start": float(cfg.get("c_mix_start", DEFAULTS["c_mix_start"])),
+        "c_bc_lambda_start": float(
+            cfg.get("c_bc_lambda_start", DEFAULTS["c_bc_lambda_start"])),
         "d_mix_from": str(cfg.get("d_mix_from") or DEFAULTS["d_mix_from"]),
         "e_mix_from": str(cfg.get("e_mix_from") or DEFAULTS["e_mix_from"]),
+        "s_min_iters": int(cfg.get("s_min_iters", DEFAULTS["s_min_iters"])),
+        "s_promote_wr20": float(
+            cfg.get("s_promote_wr20", DEFAULTS["s_promote_wr20"])),
+        "s_streak": int(cfg.get("s_streak", DEFAULTS["s_streak"])),
+        "s_anchor_prob": float(
+            cfg.get("s_anchor_prob", DEFAULTS["s_anchor_prob"])),
         "map_pool": str(cfg.get("map_pool") or DEFAULTS.get("map_pool") or ""),
         "a_launched": bool(cfg.get("a_launched")),
         "c_reset_opt_done": bool(cfg.get("c_reset_opt_done")),
@@ -242,6 +262,8 @@ def promote_threshold(cfg: dict, phase: str) -> float:
     cfg = _cfg(cfg)
     if phase == "B":
         return float(cfg["promote_wr20"])
+    if phase == "S":
+        return float(cfg.get("s_promote_wr20", DEFAULTS["s_promote_wr20"]))
     if phase == "C":
         return float(cfg.get("c_promote_wr20", DEFAULTS["c_promote_wr20"]))
     if phase == "D":
@@ -342,9 +364,72 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
                 or DEFAULTS.get("heuristic_anneal_iters", 60))),
             "--auto-hyper",
         ]
+    if phase == "S":
+        return _s_phase_flags(cfg)
     if phase in EXPAND_PHASES:
         return _expand_phase_flags(phase, cfg)
     return []
+
+
+def _bc_start_at_floor(cfg: dict) -> int:
+    """BC start_iter so λ is already at b_bc_lambda_end (no restart to ~1.0).
+
+    Prefer explicit b_bc_start_iter (B origin). Else pin origin so the first
+    iter of the current phase is past warmup.
+    """
+    bc_start = int(cfg.get("b_bc_start_iter") or 0)
+    if bc_start > 0:
+        return bc_start
+    warmup = int(cfg.get("b_bc_warmup") or DEFAULTS["b_bc_warmup"])
+    started = int(cfg.get("phase_started_iter") or 0) or 1
+    return max(1, started + 1 - warmup)
+
+
+def _s_phase_flags(cfg: dict) -> list[str]:
+    """S: PFSP-RL bridge, beginner anchor, rush BC at B λ floor."""
+    cfg = _cfg(cfg)
+    bc_start = _bc_start_at_floor(cfg)
+    anchor_prob = float(cfg.get("s_anchor_prob", DEFAULTS["s_anchor_prob"]))
+    return [
+        "--bot-type", "beginner",
+        "--pfsp", "--pfsp-rl",
+        "--pfsp-pool", "rl",
+        "--pfsp-anchor-prob", "{:.2f}".format(anchor_prob),
+        "--bc",
+        "--bc-teacher-bot", "beginner",
+        "--bc-teacher-mode", "rush",
+        "--bc-games", str(int(cfg.get("b_bc_games") or DEFAULTS["b_bc_games"])),
+        "--bc-epochs", str(int(cfg.get("b_bc_epochs") or DEFAULTS["b_bc_epochs"])),
+        "--bc-rush", str(int(cfg.get("a_rush") or DEFAULTS["a_rush"])),
+        "--bc-warmup", str(int(cfg.get("b_bc_warmup") or DEFAULTS["b_bc_warmup"])),
+        "--bc-lambda-end", "{:.2f}".format(float(
+            cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))),
+        "--bc-lambda-start", "{:.2f}".format(float(
+            cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))),
+        "--bc-start-iter", str(bc_start),
+        "--bc-macro-ticks", str(int(cfg.get("a_macro_ticks") or DEFAULTS["a_macro_ticks"])),
+        "--bc-max-steps", str(int(cfg.get("a_max_steps") or DEFAULTS["a_max_steps"])),
+        "--bc-win-cap", str(int(cfg.get("bc_win_cap") or DEFAULTS["bc_win_cap"])),
+        "--bc-win-ep-cap", str(int(
+            cfg.get("bc_win_ep_cap") or DEFAULTS["bc_win_ep_cap"])),
+        "--bc-win-prefer-ticks", str(int(
+            cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
+        "--lr", "1.0e-5",
+        "--adv-mode", "global",
+        "--sil", "--lambda-sil", "0.5",
+        "--no-amp",
+        "--iters", str(int(cfg["bc_iters"])),
+        "--onboard-phase", "S",
+        "--heuristic-phase-start", str(int(
+            cfg.get("heuristic_phase_start")
+            or ((int(cfg.get("phase_started_iter") or 0) + 1)
+                if int(cfg.get("phase_started_iter") or 0) > 0
+                else bc_start))),
+        "--heuristic-anneal-iters", str(int(
+            cfg.get("heuristic_anneal_iters")
+            or DEFAULTS.get("heuristic_anneal_iters", 60))),
+        "--auto-hyper",
+    ]
 
 
 def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
@@ -356,7 +441,17 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
         "E": str(cfg.get("e_mix_from") or DEFAULTS["e_mix_from"]),
     }[phase]
     mix_start_iter = int(cfg.get("phase_started_iter") or 0) + 1
-    bc_start = int(cfg.get("phase_started_iter") or 0) or 1
+    # Root-cause fix for run_A λ_bc≈0.98 at C entry: do NOT restart warmup
+    # at phase_started_iter. Pin to B origin (or floor) and set λ start near
+    # floor via --bc-lambda-start for C.
+    bc_start = _bc_start_at_floor(cfg)
+    lam_end = float(cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))
+    if phase == "C":
+        lam_start = float(cfg.get(
+            "c_bc_lambda_start", DEFAULTS["c_bc_lambda_start"]))
+    else:
+        # D/E: stay at floor (same as late B/S).
+        lam_start = lam_end
     return [
         "--bot-type", bot,
         "--bc",
@@ -366,8 +461,8 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
         "--bc-epochs", str(int(cfg.get("b_bc_epochs") or DEFAULTS["b_bc_epochs"])),
         "--bc-rush", str(int(cfg.get("a_rush") or DEFAULTS["a_rush"])),
         "--bc-warmup", str(int(cfg.get("b_bc_warmup") or DEFAULTS["b_bc_warmup"])),
-        "--bc-lambda-end", "{:.2f}".format(float(
-            cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))),
+        "--bc-lambda-end", "{:.2f}".format(lam_end),
+        "--bc-lambda-start", "{:.2f}".format(lam_start),
         "--bc-start-iter", str(bc_start),
         "--bc-macro-ticks", str(int(cfg.get("a_macro_ticks") or DEFAULTS["a_macro_ticks"])),
         "--bc-max-steps", str(int(cfg.get("a_max_steps") or DEFAULTS["a_max_steps"])),
@@ -593,11 +688,18 @@ ows. Ambiguous history: if
         nxt = should_promote(cfg, rows, last_iter, games_per_iter=games_per_iter)
         if not nxt:
             break
+        prev = cfg.get("phase")
+        prev_started = int(cfg.get("phase_started_iter") or 0)
         cfg["phase"] = nxt
         cfg["phase_started_iter"] = last_iter
         if nxt == "B":
             cfg["heuristic_phase_start"] = last_iter + 1
             cfg["a_launched"] = True
+        if nxt == "S" and prev == "B":
+            # Pin B BC origin so S/C keep λ at floor (do not invent S on
+            # old curricula already in C — only advances from current phase).
+            if int(cfg.get("b_bc_start_iter") or 0) <= 0:
+                cfg["b_bc_start_iter"] = prev_started or 1
         if nxt in EXPAND_PHASES or nxt == "done":
             cfg["c_reset_opt_done"] = True
         earned.append(nxt)
@@ -629,13 +731,17 @@ def should_promote(cfg: dict, rows: list[dict], last_iter: int,
         if wr20(results) >= thr:
             return "B"
         return None
-    if phase not in ("B", "C", "D", "E"):
+    if phase not in ("B", "S", "C", "D", "E"):
         return None
     bot = phase_bot(phase)
     results = outcomes_from_rows(rows, bot, onboard_phase=phase)
     thr = promote_threshold(cfg, phase)
-    need = int(cfg.get("streak") or DEFAULTS["streak"])
-    min_it = int(cfg.get("min_iters") or DEFAULTS["min_iters"])
+    if phase == "S":
+        need = int(cfg.get("s_streak", DEFAULTS["s_streak"]))
+        min_it = int(cfg.get("s_min_iters", DEFAULTS["s_min_iters"]))
+    else:
+        need = int(cfg.get("streak") or DEFAULTS["streak"])
+        min_it = int(cfg.get("min_iters") or DEFAULTS["min_iters"])
     held = wr20_streak(results, thr, need, games_per_iter=games_per_iter)
     origin = phase_count_origin(cfg, rows, phase)
     n_phase = iters_in_phase(rows, bot, origin, onboard_phase=phase)
@@ -747,9 +853,9 @@ def rewind_onboard(ckpt_dir: str | Path, keep_iter: int,
         cfg["b_bc_start_iter"] = 0
         cfg["phase_started_iter"] = 0
     else:
-        if cfg.get("phase") not in ("B", "C", "D", "E"):
+        if cfg.get("phase") not in ("B", "S", "C", "D", "E"):
             raise ValueError(
-                f"rewind > sft_iters solo en fase B-E "
+                f"rewind > sft_iters solo en fase B/S/C/D/E "
                 f"(curriculum phase={cfg.get('phase')!r})")
         warmup = int(cfg.get("b_bc_warmup") or DEFAULTS["b_bc_warmup"])
         from_later = cfg.get("phase") in EXPAND_PHASES
@@ -758,6 +864,10 @@ def rewind_onboard(ckpt_dir: str | Path, keep_iter: int,
             origin = int(cfg.get("phase_started_iter") or 0)
         if dest in EXPAND_PHASES:
             cfg["phase"] = dest
+            cfg["phase_started_iter"] = keep_iter
+        elif dest == "S":
+            cfg["phase"] = "S"
+            cfg["c_reset_opt_done"] = False
             cfg["phase_started_iter"] = keep_iter
         else:
             cfg["phase"] = "B"

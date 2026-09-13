@@ -19,7 +19,7 @@ Comando: `.\.venv\Scripts\python.exe rl\auto_train.py --scratch --onboard` (desp
 4. `reject_feet_push_cell`: always-on. AM de grupo sobre el centroide/yard con pack idle ≥12 se reescribe a `war_objective` (raid/visible/mental/fog).
 5. `guard_army_push_cell`: annealable (`heuristic_p`). No tira una vanguardia **lejos del objetivo** hacia el yard. Spawn-agnóstico.
 
-**2026-09-13 — dest agnóstico / spawn aleatorio:** `war_objective` compartido (teacher + adapter + tape). Nunca `BEACON_BY_MAP` / `(95,11)`. Opening = fog scout desde el conyard. `--spawn random` (SW|NE por episodio), `--player-faction RandomAllies`, `--enemy-faction Random`. Sin map pool. Schema A/B `eco_and_combat_scout_v1`, C/D/E `eco_and_combat_expand_v3`. Requiere `--scratch --onboard` (cintas v4 no hidratan).
+**2026-09-13 — dest agnóstico / spawn aleatorio:** `war_objective` compartido (teacher + adapter + tape). Nunca `BEACON_BY_MAP` / `(95,11)`. Opening = fog scout desde el conyard. `--spawn random` (SW|NE por episodio), `--player-faction RandomAllies`, `--enemy-faction Random`. Sin map pool. Schema A/B/S `eco_and_combat_scout_v1`, C/D/E `eco_and_combat_expand_v3`. Requiere `--scratch --onboard` (cintas v4 no hidratan).
 
 **2026-09-06 — Phase A inactivity:** Phase A / `--onboard` forces `--qsa-topk 0` and `--xf-topk 0` (dense). `balance_bc_samples` defaults **512/512**. Teacher `_push_cell` = `war_objective`. `bc_only` eval usa **temperature=0.0**.
 
@@ -37,9 +37,10 @@ El camino más corto que **viaja con el git** (sin pesos) es:
 
 1. **A** — clonar al `ScriptedTeacher` **rush** vs `beginner` (SFT, sin PPO)
 2. **B** — PPO + SIL + BC rifle vs `beginner` hasta wr20 ~50%
-3. **C** — teacher **expand** (weap + `1tnk` + mix `e3`) + PPO vs `easy` (mix beginner→easy)
-4. **D** — lo mismo vs `medium` (mix easy→medium)
-5. **E** — lo mismo vs `hard` (OpenRA `normal`; mix medium→hard) hasta wr20 ~50%
+3. **S** — bridge PFSP-RL (ancla `beginner`, pool `rl`) — suaviza el cliff B→C
+4. **C** — teacher **expand** (weap + `1tnk` + mix `e3`) + PPO vs `easy` (mix beginner→easy)
+5. **D** — lo mismo vs `medium` (mix easy→medium)
+6. **E** — lo mismo vs `hard` (OpenRA `normal`; mix medium→hard) hasta wr20 ~50%
 
 Eso es lo que hace `auto_train.py --scratch --onboard`. Un solo comando. El experto es código (`rl/scripted_teacher.py`). `hard` en este repo es el bot **normal** de OpenRA, no un ModularBot llamado hard.
 
@@ -71,7 +72,7 @@ curl.exe -f http://localhost:8000/health
 
 
 
-Esperá `200`. El segundo daemon (`docker-compose.scale.yaml`, puerto 8010) es opcional; `auto_train` usa los que respondan.
+Esperá `200`. El segundo daemon (`docker-compose.scale.yaml`, puerto 8010) es opcional; `auto_train` usa los que respondan. Live/viewer: `docker compose -f docker-compose.live.yaml up -d` (`:8020`; no va a auto_train).
 
 
 
@@ -135,7 +136,7 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 
 | `--onboard-a-promote-wr20` | 0.25 | wr20 vs beginner para pasar A→B (**sin** streak) |
 
-| `--onboard-promote-wr20` | 0.50 | wr20 vs beginner para pasar B→C (× streak) |
+| `--onboard-promote-wr20` | 0.50 | wr20 vs beginner para pasar B→**S** (× streak) |
 
 | `--onboard-done-wr20` | 0.50 | wr20 vs hard para marcar DONE |
 
@@ -151,7 +152,7 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 | `--onboard-collect` | — | Suma teacher games aunque ya haya tapes. |
 | `--onboard-collect-only` | — | Solo acumula `teacher_wins` hasta `--onboard-collect-target` (default 40); sin SFT/eval; no borra `latest.pt`; no requiere `--scratch`. |
 
-`--scratch --onboard`, el **resume** `--onboard` y el promote **A→B** reusan `teacher_wins/` si el schema coincide: A/B `eco_and_combat_scout_v1`, C/D/E `eco_and_combat_expand_v3`. Tope 40 eps (las más cortas pisan las más largas). Al promover B→C (y C→D, D→E) se **borran** las cintas: el rifle teacher no se clona vs easy. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas con schema distinto se ignoran (v4/expand_v2 no hidratan).
+`--scratch --onboard`, el **resume** `--onboard` y el promote **A→B** reusan `teacher_wins/` si el schema coincide: A/B/S `eco_and_combat_scout_v1`, C/D/E `eco_and_combat_expand_v3`. Tope 40 eps (las más cortas pisan las más largas). Al promover B→C (y C→D, D→E) se **borran** las cintas: el rifle teacher no se clona vs easy. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas con schema distinto se ignoran (v4/expand_v2 no hidratan).
 
 
 
@@ -227,7 +228,7 @@ Criterio de salida: ≥ `--onboard-sft-iters` **y** wr20 del alumno ≥
 
 `--onboard-a-promote-wr20` (default **0.25**) sobre las últimas 20 partidas.
 
-**Sin** streak de 10 (eso queda solo para B→C). Log: `onboard PROMOTE A -> B`.
+**Sin** streak de 10 (eso queda para B→S / S→C / C…). Log: `onboard PROMOTE A -> B`.
 
 
 
@@ -285,7 +286,27 @@ Criterio: wr20 ≥ 0.50 durante 10 iters seguidos **y** al menos 20 iters en B.
 
 
 
-Log: `onboard PROMOTE B -> C`. En metrics aparece una línea `era_reset` para que el wr vs beginner **no** se hidrate como wr vs easy.
+Log: `onboard PROMOTE B -> S` (bridge; ya no salta directo a C). Snapshot `best_B.pt`. En metrics `era_reset`.
+
+
+
+### Fase S — PFSP-RL bridge (beginner anchor)
+
+
+
+Suaviza el cliff B→C (run_A: late B wr20~0.71 → C wr~0).
+
+
+
+- `--pfsp --pfsp-rl --pfsp-pool rl --pfsp-anchor-prob 0.25` (25% beginner ancla, 75% challengers RL).
+- North-star wr / best / promote: **vs beginner** (igual que PFSP).
+- Teacher **rush** (mismo schema mental que B). **No** expand. `--bc-replay` si hay tapes.
+- `λ_bc` se queda en el piso de B (`b_bc_lambda_end`, tip. 0.10) — **no** reinicia warmup a ~1.0.
+- HyperHealth ON. Criterio default: `s_min_iters=20`, `s_promote_wr20=0.45`, `s_streak=5` → C.
+
+
+
+Log: `onboard PROMOTE S -> C`.
 
 
 
@@ -349,11 +370,11 @@ Si el seed que querés es `iter0140.pt` y no el `best@24`: `--onboard-rewind 140
 
 ### Fase C — PPO + expand BC vs easy
 
-Al promover B→C se copia `best.pt` → `best_B.pt`, se **wipea** `teacher_wins/` (schema expand) y λ_bc vuelve a warmup desde el start de C.
+Al promover S→C (o legacy) se copia `best.pt` → `best_S.pt` / `best_B.pt`, se **wipea** `teacher_wins/` (schema expand). **`λ_bc` no vuelve a ~1.0**: se pinnea `b_bc_start_iter` / `--bc-lambda-start` ≈ 0.15 (piso B). Primer launch C: `--reset-opt` + `--hyper-pause` si aún no se hizo.
 
 - Teacher **expand**: mismo opening que A/B, después del blob (`n_combat≥8`) FORCE `weap` → `1tnk` (luego `2tnk`), mix `e3`, un pbox. No mill 3ª proc. No APC.
 - `--bc --bc-teacher-bot easy --bc-teacher-mode expand`. Wins-only. El rifle teacher **no** entra acá.
-- Mix `--mix-from beginner` 0.25→1.0 en 40 iters. wr20 / best / promote **solo vs easy**.
+- Mix `--mix-from beginner` 0.25→1.0 en **60** iters (`c_mix_warmup`). wr20 / best / promote **solo vs easy**.
 - `--no-amp`. Sequía bloqueada hasta `min_iters`.
 
 Criterio: wr20 vs **easy** ≥ 0.45 × 10 iters, mínimo 20 iters → D.
@@ -388,6 +409,7 @@ No es un número de paper. Es wall-clock de sótano:
 
 | A | 20 iters × teacher + eval | unas horas |
 | B | wr20 vs beginner a 50% | de un día a varios |
+| S | PFSP-RL bridge (wr20 vs beginner ~45%, streak 5) | puente corto |
 | C | expand + wr20 vs easy 45% | otro tanto; easy tiene weap/cajas |
 | D | vs medium | más; medium rushea a los 5 s |
 | E | vs hard (normal) a 50% | el tramo largo; no es un 50% de beginner |
@@ -410,9 +432,9 @@ Si B no llega a 50% en ~200 iters, el teacher de A no dejó un build order usabl
 
 - `--scratch --onboard` a mitad de B–E. Reinicia en A y tira el curriculum.
 
-- Meter `--pfsp` / rl en este camino. El overlay de fase **saca** PFSP de `TRAIN_ARGS`. Hard es la fase E, no un flag a mano.
+- Meter `--pfsp` / rl a mano fuera de **S**. El overlay saca PFSP en A/B/C/D/E; **S** lo vuelve a poner (bridge). Hard es la fase E, no un flag a mano.
 
-- Clonar el teacher **rush** vs easy/hard. A/B son rifle; C/D/E son expand. El launcher wipea tapes al promover.
+- Clonar el teacher **rush** vs easy/hard. A/B/S son rifle; C/D/E son expand. El launcher wipea tapes al promover a expand.
 
 - Relanzar `--onboard` sobre un `latest` de wipe sin `--onboard-rewind`. `λ_bc` ya sería 0 y los pesos son el atractor mill.
 
