@@ -116,13 +116,13 @@ def test_gps_beacon_not_used_for_belief_or_scalars():
 
 
 def test_push_beacon_when_belief_empty():
-    """Opening-SFT prior: beacon only when visible/ghost/mental absent."""
+    """Opening: fog scout, never GPS beacon even when the map has one."""
     th = ScriptedTeacher()
     obs = _obs(enemy_bldgs=(), enemies=())
     assert th.belief.enemy_base_xy is None
     assert resolve_beacon(obs) == (95, 11)
     cell = th._push_cell(obs)
-    assert cell == (95, 11)
+    assert cell != (95, 11)
 
 
 def test_push_fog_when_no_beacon_map():

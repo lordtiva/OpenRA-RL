@@ -139,3 +139,15 @@ def heartbeat_age_s(hb: dict | None, now: float | None = None) -> float | None:
         return float(now if now is not None else time.time()) - float(hb.get("ts") or 0)
     except (TypeError, ValueError):
         return None
+
+def gather_stall_should_cancel(age: float | None, slice_s: float) -> bool:
+    """True iff gather wait-timeout should cancel pending workers.
+
+    Fresh heartbeat (age is not None and age < slice_s) means workers are
+    alive during long episodes — never cancel on completion-stall streak
+    alone. Cancel only when hb is missing (age is None) or stale
+    (age >= slice_s).
+    """
+    if age is not None and age < float(slice_s):
+        return False
+    return True

@@ -349,6 +349,10 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 atype = "no_op"
             else:
                 decision_adv_ticks = 0  # SMDP: accumulate advance() ticks this block
+                try:
+                    obs.belief = belief
+                except Exception:
+                    pass
                 batch, aidx = _batch_of(obs, vocab, device, belief=belief)
                 h_in = hidden.detach().clone()
                 had_item = aidx.item_mask.any().view(1).to(device)

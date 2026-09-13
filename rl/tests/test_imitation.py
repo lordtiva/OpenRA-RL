@@ -23,6 +23,7 @@ from rl.imitation import (
     pick_bc_command,
     pick_bc_commands,
     sample_type_name,
+    should_replay_teacher_buffer,
     student_combat_ready,
 )
 from rl.network import COMBAT_PUSH_TYPES, TYPE_TO_IDX as NET_TYPE_TO_IDX, build_combat_type_mask
@@ -76,6 +77,23 @@ check("lambda mid", abs(lambda_bc_at(140, 100, warmup=80) - 0.5) < 1e-9)
 check("lambda end", abs(lambda_bc_at(180, 100, warmup=80) - 0.0) < 1e-9)
 check("lambda after", abs(lambda_bc_at(200, 100, warmup=80) - 0.0) < 1e-9)
 check("lambda piso", abs(lambda_bc_at(200, 100, warmup=80, end=0.25) - 0.25) < 1e-9)
+
+def _buf(n):
+    return NS(n_episodes=n)
+
+check("replay none", should_replay_teacher_buffer(NS(), None) is False)
+check("replay empty", should_replay_teacher_buffer(NS(bc_replay=True), _buf(0)) is False)
+check("replay flag 1 ep",
+      should_replay_teacher_buffer(NS(bc_replay=True, bc_replay_at=20), _buf(1)) is True)
+check("replay auto 19",
+      should_replay_teacher_buffer(NS(bc_replay=False, bc_replay_at=20), _buf(19)) is False)
+check("replay auto 20",
+      should_replay_teacher_buffer(NS(bc_replay=False, bc_replay_at=20), _buf(20)) is True)
+check("replay at 0 never",
+      should_replay_teacher_buffer(NS(bc_replay=False, bc_replay_at=0), _buf(40)) is False)
+check("replay collect-only no",
+      should_replay_teacher_buffer(
+          NS(bc_replay=False, bc_collect_only=True, bc_replay_at=20), _buf(20)) is False)
 
 cmds = [
     CommandModel(action=ActionType.GUARD, actor_id=1, target_actor_id=2),
@@ -474,7 +492,7 @@ check("balance defaults 512/512",
       _sig.parameters["per_type_cap"].default == 512
       and _sig.parameters["combat_cap"].default == 512)
 
-# Opening prior: fresh teacher, empty belief → beacon when map has GPS.
+# Opening prior: fresh teacher, empty belief → fog, never GPS beacon.
 th_open = ScriptedTeacher()
 obs_open = _obs(
     cash=5000, harv=1,
@@ -482,8 +500,9 @@ obs_open = _obs(
     units=[_u(i, "e1", 12, 16) for i in range(1, 14)],
 )
 cell_open = th_open._push_cell(obs_open)
-check("empty belief push uses beacon opening prior",
-      cell_open == resolve_beacon(obs_open) == (95, 11))
+check("empty belief push is not GPS beacon",
+      cell_open != (95, 11)
+      and resolve_beacon(obs_open) == (95, 11))
 
 win_s = [_step("train")] * 3
 lose_s = [_step("no_op")] * 5
@@ -580,7 +599,7 @@ try:
         shutil.rmtree(tw_disk, ignore_errors=True)
     man = json.loads((tw_dir / "manifest.json").read_text(encoding="utf-8"))
     check("TW schema hunt_v2", man.get("schema") == TAPE_SCHEMA)
-    check("TW schema string", TAPE_SCHEMA == "eco_and_combat_mental_v4")
+    check("TW schema string", TAPE_SCHEMA == "eco_and_combat_scout_v1")
     stale = Path(tempfile.mkdtemp(prefix="twstale_"))
     try:
         (stale / "manifest.json").write_text(
@@ -607,7 +626,7 @@ try:
             cap_steps=50, path=rush_on_expand, schema=TAPE_SCHEMA_EXPAND)
         check("TW rush schema no hidrata en expand", tw_exp.n_episodes == 0)
         check("TW expand schema string",
-              TAPE_SCHEMA_EXPAND == "eco_and_combat_expand_v2")
+              TAPE_SCHEMA_EXPAND == "eco_and_combat_expand_v3")
     finally:
         shutil.rmtree(rush_on_expand, ignore_errors=True)
 finally:

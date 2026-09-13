@@ -18,8 +18,8 @@ Este teacher:
   - a PACK_ARMY (12): army_attack_move (lo que el alumno puede emitir)
   - hunt map-agnostic: home raid > visible leftover > mental enemy-base
     belief > last_seen ghosts > hunt/sweep cerca del último contacto >
-    fog scout. When belief empty: resolve_beacon opening-SFT prior, else fog
-    (tapes eco_and_combat_mental_v4).
+    fog scout. Never resolve_beacon / BEACON_BY_MAP (tapes
+    eco_and_combat_scout_v1).
   - early fog scout away from home once a few combat exist (relative fog).
   - peel de raid; TRAIN e1 durante el push; 2 harvs; 0 guards / 0 APC
   - P3 land-first tech/defense AFTER eco/barracks (optional, not BUILD_PRIORITY):
@@ -50,9 +50,9 @@ from rl.auto_support import (
     fog_scout_destinations,
     home_raid_targets,
     hunt_near_cell,
-    war_nudge_cell,
 )
-from rl.obs_encoding import EnemyBeliefStore, resolve_beacon
+from rl.obs_encoding import EnemyBeliefStore
+from rl.war_objective import own_anchor, war_objective
 
 
 def _xy(obj) -> Tuple[int, int]:
@@ -536,7 +536,7 @@ class ScriptedTeacher(ScriptedBot):
         bldgs = list(obs.visible_enemy_buildings or [])
         ene = list(obs.visible_enemies or [])
         if bldgs or ene:
-            origin = self._own_fact(obs) or (12, 16)
+            origin = self._own_fact(obs) or own_anchor(obs)
             prod = [b for b in bldgs if str(b.type or "").lower() in self._PROD]
             pool = prod or bldgs or ene
             try:
@@ -561,55 +561,14 @@ class ScriptedTeacher(ScriptedBot):
             return None
 
     def _push_cell(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
-        """Raid > visible leftover > mental base > ghost > last contact >
-        beacon (opening prior) > fog.
+        """Raid > visible leftover > mental base > ghost > last contact > fog.
 
-        Visible / leftover / ghost / mental-base stay first. Only when those
-        are absent, prefer resolve_beacon(obs) as opening-SFT prior; else
-        fog_scout_destinations. Mental base: densest seen enemy-building
-        cluster from belief store.
+        Never resolve_beacon / BEACON_BY_MAP. Shared dest with adapter/live
+        via war_objective. Mental base: densest seen enemy-building cluster.
         """
         self._refresh_contact(obs)
-        raids = home_raid_targets(obs)
-        if raids:
-            origin = self._own_fact(obs) or (12, 16)
-            t = min(raids, key=lambda o: _cheb(origin, _xy(o)))
-            return _xy(t)
-        nudge, is_raid = war_nudge_cell(obs)
-        if nudge is not None and not is_raid:
-            return int(nudge[0]), int(nudge[1])
-        bldgs = list(obs.visible_enemy_buildings or [])
-        prod = [b for b in bldgs if str(b.type or "").lower() in self._PROD]
-        if prod:
-            origin = self._own_fact(obs) or (12, 16)
-            t = max(prod, key=lambda b: _cheb(origin, _xy(b)))
-            return _xy(t)
-        if bldgs:
-            return _xy(bldgs[0])
-        if obs.visible_enemies:
-            return _xy(obs.visible_enemies[0])
-        # Strategic: remembered enemy base after leftovers cleared (not GPS).
-        base = getattr(self.belief, "enemy_base_xy", None)
-        if base is not None:
-            return int(base[0]), int(base[1])
-        ghost = self._ghost_cell(obs)
-        if ghost is not None:
-            return int(ghost[0]), int(ghost[1])
-        combat = self._all_combat(obs)
-        anchor = self._last_contact
-        if anchor is not None:
-            n_at = self._piled_on(combat, anchor, ARRIVED_CELLS)
-            if n_at >= MIN_PILE_FOR_HUNT:
-                return hunt_near_cell(obs, anchor)
-            return int(anchor[0]), int(anchor[1])
-        # Belief empty: beacon is opening-SFT prior when present; else fog.
-        beacon = resolve_beacon(obs)
-        if beacon is not None:
-            return int(beacon[0]), int(beacon[1])
-        fog = fog_scout_destinations(obs, 1)
-        if fog:
-            return int(fog[0][0]), int(fog[0][1])
-        return None
+        return war_objective(
+            obs, last_contact=self._last_contact, belief=self.belief)
 
     def _own_fact(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
         for b in obs.buildings or []:
@@ -653,7 +612,7 @@ class ScriptedTeacher(ScriptedBot):
 
     def _away_pile(self, obs: OpenRAObservation, combat) -> Optional[Tuple[int, int]]:
         """Centroid of combat units far from home if they form a pile."""
-        origin = self._own_fact(obs) or (12, 16)
+        origin = self._own_fact(obs) or own_anchor(obs)
         away = []
         for u in combat or []:
             try:
@@ -834,4 +793,4 @@ class ScriptedTeacher(ScriptedBot):
         fact = self._own_fact(obs)
         if fact is not None:
             return fact
-        return 12, 16
+        return own_anchor(obs)

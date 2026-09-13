@@ -168,29 +168,31 @@ def test_remap_illegal_midmap_water_near_click_not_south_flank():
 
 
 def test_guard_west_target_with_advanced_front():
-    """West/mid ore target + advanced front must not return deep-west ore cell."""
+    """Ore click behind a vanguard must not stay on deep-home ore."""
     h, w = 40, 128
     grid = np.ones((h, w), dtype=bool)
     aidx = _Aidx(h, w, grid)
     units = [_U(actor_id=i, cell_x=78 + (i % 3), cell_y=10 + (i % 4)) for i in range(10)]
-    obs = _Obs(units, enemies=[], enemy_bldgs=[], map_name="Singles")
-    # Policy wants mid-west ore
+    obs = _Obs(units, enemies=[], enemy_bldgs=[_U(type="proc", cell_x=90, cell_y=12)],
+               map_name="Singles")
+    obs.buildings = [NS(type="fact", cell_x=12, cell_y=16)]
     gx, gy = guard_army_push_cell(obs, aidx, 42, 38)
-    assert gx >= 50, (gx, gy)
-    assert not (gx < 50 and gy >= 35), (gx, gy)  # not deep-west ore
+    assert (gx, gy) != (95, 11), (gx, gy)
+    assert (gx, gy) == (90, 12), (gx, gy)
 
 
 def test_guard_fog_east_retargets_beacon():
-    """No enemy buildings + front east -> retarget toward beacon when available."""
+    """No GPS: fog click behind a vanguard goes to war_objective, not (95,11)."""
     h, w = 40, 128
     grid = np.ones((h, w), dtype=bool)
     aidx = _Aidx(h, w, grid)
     units = [_U(actor_id=i, cell_x=80 + (i % 4), cell_y=12 + (i % 3)) for i in range(10)]
-    obs = _Obs(units, enemies=[], enemy_bldgs=[], map_name="Singles")
-    # West ore click while blind in fog
+    obs = _Obs(units, enemies=[], enemy_bldgs=[_U(type="proc", cell_x=88, cell_y=14)],
+               map_name="Singles")
+    obs.buildings = [NS(type="fact", cell_x=12, cell_y=16)]
     gx, gy = guard_army_push_cell(obs, aidx, 40, 35)
-    # Singles beacon is (95, 11)
-    assert (gx, gy) == (95, 11), (gx, gy)
+    assert (gx, gy) != (95, 11), (gx, gy)
+    assert (gx, gy) == (88, 14), (gx, gy)
 
 
 if __name__ == "__main__":

@@ -549,6 +549,8 @@ check("extras has --bc-collect-only", "--bc-collect-only" in extras)
 check("extras has target 40",
       extras[extras.index("--bc-collect-target") + 1] == "40")
 check("extras NO --bc-replay", "--bc-replay" not in extras)
+check("extras replay-at 0 (keep collecting)",
+      extras[extras.index("--bc-replay-at") + 1] == "0")
 
 check("would_pass_bc_replay False when collect-only",
       at.would_pass_bc_replay(
@@ -585,7 +587,7 @@ from unittest import mock
 td = Path(tempfile.mkdtemp())
 (td / "teacher_wins").mkdir()
 man = {
-    "schema": "eco_and_combat_mental_v4",
+    "schema": "eco_and_combat_scout_v1",
     "episodes": [{"file": "ep_0000.pt"} for _ in range(40)],
 }
 (td / "teacher_wins" / "manifest.json").write_text(
@@ -699,7 +701,7 @@ try:
     # Phase C resume with EXPAND tapes: replay.
     (td / "teacher_wins" / "manifest.json").write_text(
         json.dumps({
-            "schema": "eco_and_combat_expand_v2",
+            "schema": "eco_and_combat_expand_v3",
             "episodes": [{"file": "ep_0000.pt"} for _ in range(10)],
         }), encoding="utf-8")
     at._replay_tapes = False

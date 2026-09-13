@@ -1,13 +1,15 @@
 # -*- coding: utf-8 -*-
-"""Live/viewer lobby helpers: enemy faction + spawn (SW/NE) without touching train defaults.
+"""Lobby helpers: enemy faction + spawn (SW/NE) for live AND train.
 
 Spawn pin works by patching the scenario .oramap PlayerReference LockSpawn/Spawn
 before CreateSession. C# SyncClientToPlayerReference already honors those locks.
 Agent stays on Multi1 (FastAdvance primary); bot on Multi0. SW/NE are geometry
 labels over mpspawn cells (a_short: spawn1~(12,16) SW, spawn2~(95,11) NE).
+Per-episode rotation uses apply_episode_lobby (no map-title GPS dest).
 """
 from __future__ import annotations
 
+import base64
 import io
 import random
 import re
@@ -224,3 +226,34 @@ def patch_oramap_bytes(
                 data = text.encode("utf-8")
             zout.writestr(name, data)
     return out_buf.getvalue(), meta
+
+
+def apply_episode_lobby(
+    reset_kwargs: dict | None,
+    *,
+    spawn: str = "random",
+    player_faction: str | None = None,
+    enemy_faction: str | None = None,
+    rng: random.Random | None = None,
+) -> dict:
+    """Per-episode spawn pin + faction lock. Returns a copy of reset_kwargs.
+
+    --spawn random picks sw|ne each episode. Player stays RandomAllies.
+    Enemy defaults to Random (Allies or Soviet). Does not change map pool.
+    Unknown reset keys are not added. Patch failure leaves stock map_data.
+    """
+    ep = dict(reset_kwargs or {})
+    ep["player_faction"] = normalize_player_faction(player_faction)
+    ep["enemy_faction"] = normalize_enemy_faction(enemy_faction)
+    side = resolve_episode_spawn(spawn, rng=rng)
+    raw_b64 = ep.get("map_data")
+    if not raw_b64:
+        return ep
+    try:
+        raw = base64.b64decode(raw_b64)
+        patched, _meta = patch_oramap_bytes(raw, side)
+        ep["map_data"] = base64.b64encode(patched).decode()
+    except Exception:
+        pass
+    return ep
+

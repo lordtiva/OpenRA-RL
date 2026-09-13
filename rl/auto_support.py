@@ -44,7 +44,7 @@ No genera reward — evita defense_loss/hold_zero ya existentes.
 
 from openra_env.models import ActionType, CommandModel
 from rl.action_adapter import PACK_ARMY, nearest_passable, remap_move_cell
-from rl.obs_encoding import decode_spatial, resolve_beacon
+from rl.obs_encoding import decode_spatial
 
 # Tipos que el hard apaga cuando hay brownout (ai.yaml PowerDownBotModule)
 _POWER_DOWN_TYPES = {"dome", "tsla", "mslo", "atag", "stag"}
@@ -199,16 +199,17 @@ def _n_combat_near_own_base(obs, combat, radius: int = DEFEND_CELLS) -> int:
 
 
 def _is_beacon_or_hunt(obs, dest) -> bool:
-    """True si dest es el waypoint de asalto (beacon/hunt), no un actor visible."""
+    """True if dest is the war_objective / hunt around it, not a visible actor."""
     if dest is None:
         return False
-    beacon = resolve_beacon(obs)
-    if beacon is None:
+    from rl.war_objective import war_objective
+    obj = war_objective(obs)
+    if obj is None:
         return False
     d = (int(dest[0]), int(dest[1]))
-    if d == (int(beacon[0]), int(beacon[1])):
+    if d == (int(obj[0]), int(obj[1])):
         return True
-    hx, hy = _hunt_cell(obs, beacon)
+    hx, hy = hunt_near_cell(obs, obj)
     return d == (int(hx), int(hy))
 
 
@@ -234,7 +235,7 @@ def war_nudge_cell(obs):
     Push: edificio de producción más lejano; si no, contacto más lejano.
     Un tent/powr de la puerta no gana contra un fact visible al fondo.
     """
-    origin = _own_anchor(obs) or (12, 16)
+    origin = _own_anchor(obs) or _map_center(obs)
     home = home_raid_targets(obs)
     if home:
         return _nearest_xy(home, origin), True
@@ -277,6 +278,13 @@ MAX_SUPPORT_PROCS = 2
 _ORE_IDLE_ORDERS = 2
 
 
+def _map_center(obs) -> tuple[int, int]:
+    info = getattr(obs, "map_info", None)
+    w = max(int(getattr(info, "width", 128) or 128), 1)
+    h = max(int(getattr(info, "height", 64) or 64), 1)
+    return w // 2, h // 2
+
+
 def _own_anchor(obs):
     """Construction yard / first civic building (rally origin)."""
     for b in getattr(obs, "buildings", None) or []:
@@ -291,7 +299,7 @@ def _own_anchor(obs):
 
 def _staging_cell(obs, dest, aidx=None):
     """A cell ~STAGING_STEPS toward dest from the yard. Pack gathers here."""
-    origin = _own_anchor(obs) or (12, 16)
+    origin = _own_anchor(obs) or _map_center(obs)
     if dest is None:
         raw = (int(origin[0]) + STAGING_STEPS, int(origin[1]))
     else:
@@ -448,47 +456,15 @@ def hunt_near_cell(obs, anchor) -> tuple[int, int]:
 
 
 def _push_cell(obs, last_push):
-    """Celda de asalto: edificio visible, unidad visible, hunt, beacon.
+    """Celda de asalto: war_objective (raid/visible/mental/fog). Never GPS.
 
-    last_push de la política es veneno en a_short: la cabeza de celda no está
-    condicionada a la unidad y cae en Ch6 (densidad propia). Visor 2026-08-30:
-    280 e1 attack-move al mineral de casa, beginner intacto en niebla.
-
-    Iter ~854: clavar el dest en el beacon después de llegar deja el ejército
-    idle sobre (95,11). Edificios resagados en niebla (enB 5–10) → timeout.
-    Hunt solo si ya hay masa en el beacon; el acercamiento sigue siendo beacon.
-
-    Easy (Capa 3): un enemigo junto a nuestros edificios es raid, no scout.
-    Defender eso gana a hunt / beacon. El stray-ignore del beginner no aplica.
+    last_push de la política es veneno: la cabeza de celda cae en Ch6
+    (densidad propia). No se usa como dest.
     """
-    beacon = resolve_beacon(obs)
-    origin = beacon if beacon is not None else (0, 0)
-    bldgs = list(getattr(obs, "visible_enemy_buildings", None) or [])
-    ene_u = list(getattr(obs, "visible_enemies", None) or [])
-    home = home_raid_targets(obs)
-    if home:
-        fact = None
-        for b in getattr(obs, "buildings", None) or []:
-            if str(getattr(b, "type", "")).lower() in ("fact", "afac"):
-                fact = _xy(b)
-                break
-        return _nearest_xy(home, fact or origin)
-    if bldgs:
-        return _nearest_xy(bldgs, origin)
-    combat = _combat_units(getattr(obs, "units", None) or [])
-    n_at = _n_combat_at(combat, beacon, ARRIVED_CELLS) if beacon is not None else 0
-    piled = n_at >= MIN_PILE_FOR_HUNT
-    if ene_u:
-        e = _nearest_xy(ene_u, origin)
-        if piled and beacon is not None and _dist2(e, beacon) > STRAY_FROM_BEACON ** 2:
-            return _hunt_cell(obs, beacon)
-        return e
-    if beacon is not None:
-        if piled:
-            return _hunt_cell(obs, beacon)
-        return int(beacon[0]), int(beacon[1])
-    if last_push is not None:
-        return int(last_push[0]), int(last_push[1])
+    from rl.war_objective import war_objective
+    obj = war_objective(obs, last_contact=last_push)
+    if obj is not None:
+        return int(obj[0]), int(obj[1])
     return None
 
 
@@ -566,7 +542,7 @@ def fog_scout_count(n_home_combat: int) -> int:
 def _fog_scout_angle_dests(obs, n: int, aidx=None):
     """N rumbos equiespaciados desde el ancla (sin beacon). Fallback sin spatial."""
     import math
-    origin = _own_anchor(obs) or (12, 16)
+    origin = _own_anchor(obs) or _map_center(obs)
     info = getattr(obs, "map_info", None)
     w = int(getattr(info, "width", 128) or 128)
     h = int(getattr(info, "height", 64) or 64)
@@ -597,7 +573,7 @@ def fog_scout_destinations(obs, n: int, aidx=None):
     n = max(0, int(n))
     if n <= 0:
         return []
-    origin = _own_anchor(obs) or (12, 16)
+    origin = _own_anchor(obs) or _map_center(obs)
     ox, oy = int(origin[0]), int(origin[1])
     arr = _spatial_chw(obs)
     if arr is None or arr.shape[0] < 5:
@@ -1021,9 +997,9 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None, war_n
         n_at_dest = 0
         if dest is not None:
             n_at_dest = _n_combat_at(combat, dest, ARRIVED_CELLS)
-        beacon = resolve_beacon(obs)
-        n_at_beacon = (_n_combat_at(combat, beacon, ARRIVED_CELLS)
-                       if beacon is not None else 0)
+        obj = dest
+        n_at_beacon = (_n_combat_at(combat, obj, ARRIVED_CELLS)
+                       if obj is not None else 0)
         assault = (has_proc and has_harv and dest is not None
                    and n_home >= MIN_ARMY_FOR_ASSAULT)
         if dest is not None and (has_proc or defending):

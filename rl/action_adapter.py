@@ -25,8 +25,7 @@ import torch
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.network import TYPE_TO_IDX, build_type_masks
 from rl.obs_encoding import (
-    BEACON_BY_MAP, MAX_UNITS, pending_place_item, resolve_beacon,
-    select_unit_slots,
+    MAX_UNITS, pending_place_item, select_unit_slots,
 )
 
 _log = logging.getLogger(__name__)
@@ -685,9 +684,9 @@ def stage_army_attack_cell(obs, aidx, cx: int, cy: int):
     """If army→target crosses a lake, stage via the wider N/S flank first."""
     grid = getattr(aidx, "pass_grid", None)
     h, w = aidx.h, aidx.w
-    # Combat list (same filters as _army_centroid). n_advanced exists because a
-    # split army / base spawn pulls the mean centroid west — enough units past
-    # the choke must not remap the attack cell backward to the south flank.
+    # Combat list (same filters as _army_centroid). n_advanced = units already
+    # closer to dest than the mean centroid — a split army must not yank the
+    # vanguard back onto a flank. No map-axis GPS (x>35 was Singles-east).
     combat = []
     for u in getattr(obs, "units", None) or []:
         ut = str(getattr(u, "type", "") or "").lower()
@@ -699,18 +698,19 @@ def stage_army_attack_cell(obs, aidx, cx: int, cy: int):
             combat.append((int(u.cell_x), int(u.cell_y)))
         except (TypeError, ValueError):
             continue
-    n_advanced = sum(1 for c in combat if c[0] > 35)
-    if n_advanced >= 8:
-        return cx, cy
     cen = None
     if combat:
         sx = sum(c[0] for c in combat) / len(combat)
         sy = sum(c[1] for c in combat) / len(combat)
         cen = (sx, sy)
+        d_cen = (cen[0] - cx) ** 2 + (cen[1] - cy) ** 2
+        n_advanced = sum(
+            1 for c in combat
+            if (c[0] - cx) ** 2 + (c[1] - cy) ** 2 + 16 < d_cen
+        )
+        if n_advanced >= 8:
+            return cx, cy
     if cen is None or grid is None:
-        return cx, cy
-    # Already past home choke on east-facing maps — keep the attack cell.
-    if cen[0] > 35:
         return cx, cy
     if not _midline_blocked(cen[0], cen[1], cx, cy, grid, h, w):
         return cx, cy
@@ -771,7 +771,7 @@ def remap_move_cell(obs, aidx, cx: int, cy: int, actor_id: int = 0):
     """If (cx,cy) is water/OOB/unpathable, retarget near the click — not south flank.
 
     Order: legal keep; else nearest_passable(cx,cy); else nearest enemy;
-    else resolve_beacon + nearest_passable; else near unit.
+    else war_objective (visible/mental/fog, never GPS); else near unit.
     Does NOT use _wider_flank_passable (that snap sent illegal mid-map water
     clicks to the south ore corridor y~38-40). Flank staging stays only in
     stage_army_attack_cell (opening choke).
@@ -803,9 +803,10 @@ def remap_move_cell(obs, aidx, cx: int, cy: int, actor_id: int = 0):
         e = min(enemies, key=lambda e: (int(e.cell_x) - cx) ** 2 + (int(e.cell_y) - cy) ** 2)
         return nearest_passable(int(e.cell_x), int(e.cell_y), grid, h, w)
 
-    beacon = resolve_beacon(obs)
-    if beacon:
-        return nearest_passable(int(beacon[0]), int(beacon[1]), grid, h, w)
+    from rl.war_objective import war_objective
+    obj = war_objective(obs, aidx)
+    if obj is not None:
+        return nearest_passable(int(obj[0]), int(obj[1]), grid, h, w)
 
     ux, uy = cx, cy
     units = list(getattr(obs, "units", None) or [])
@@ -843,88 +844,21 @@ def _combat_xy_list(obs):
 
 
 def _east_push_objective(obs, aidx, cx: int, cy: int, front_xs):
-    """Beacon / visible contact / mental base / clamp to front — never hardcode GPS."""
-    grid = getattr(aidx, "pass_grid", None)
-    h, w = aidx.h, aidx.w
-    contacts = list(getattr(obs, "visible_enemy_buildings", None) or []) + list(
-        getattr(obs, "visible_enemies", None) or [])
-    if contacts:
-        e = max(contacts, key=lambda o: int(getattr(o, "cell_x", 0) or 0))
-        return nearest_passable(int(e.cell_x), int(e.cell_y), grid, h, w)
-    mental = getattr(obs, "enemy_base_xy", None)
-    if mental is None:
-        bel = getattr(obs, "belief", None)
-        if bel is not None:
-            mental = getattr(bel, "enemy_base_xy", None)
-    if mental is not None:
-        try:
-            return nearest_passable(int(mental[0]), int(mental[1]), grid, h, w)
-        except (TypeError, ValueError, IndexError):
-            pass
-    beacon = resolve_beacon(obs)
-    if beacon is not None:
-        return nearest_passable(int(beacon[0]), int(beacon[1]), grid, h, w)
-    # Map-agnostic: keep at least the forward blob x (75th percentile).
-    if front_xs:
-        xs = sorted(int(x) for x in front_xs)
-        px = xs[int(0.75 * (len(xs) - 1))]
-        return nearest_passable(max(int(cx), int(px)), int(cy), grid, h, w)
+    """war_objective (visible/mental/fog). Kept name for tests; never GPS."""
+    from rl.war_objective import war_objective
+    obj = war_objective(obs, aidx)
+    if obj is not None:
+        return int(obj[0]), int(obj[1])
     return int(cx), int(cy)
 
 
 def guard_army_push_cell(obs, aidx, cx: int, cy: int):
-    """Don't yank an eastern vanguard west to ore; fog-push east when blind.
+    """Don't yank a vanguard away from war_objective back toward the yard.
 
-    Cause 2 — advanced contingent: if >=~8 combat with cell_x>70 and no base
-    threat (no visible enemies/buildings with x<40), refuse targets far behind
-    the front (cx < 50, or cx < min_front_x - 15). Retarget via
-    _east_push_objective (visible / mental / resolve_beacon / front clamp).
-
-    Cause 3 — fog penetration: when the front is deep east (>=8 with x>75 or
-    army front/centroid x>75) and no visible_enemy_buildings, ensure the push
-    goes toward the enemy quadrant (beacon/fog-east), not mid-map ore.
-    Light: only retarget when the issued cell is behind/west of the front.
+    Spawn-agnostic (no x>70 / beacon). Home raid leaves the issued cell.
     """
-    combat = _combat_xy_list(obs)
-    if not combat:
-        return int(cx), int(cy)
-    xs = [c[0] for c in combat]
-    n70 = sum(1 for x in xs if x > 70)
-    n75 = sum(1 for x in xs if x > 75)
-    front70 = [x for x in xs if x > 70]
-    front75 = [x for x in xs if x > 75]
-    cen_x = sum(xs) / len(xs)
-    max_x = max(xs)
-
-    def _base_threat() -> bool:
-        for e in list(getattr(obs, "visible_enemies", None) or []) + list(
-                getattr(obs, "visible_enemy_buildings", None) or []):
-            try:
-                if int(e.cell_x) < 40:
-                    return True
-            except (TypeError, ValueError):
-                continue
-        return False
-
-    behind = False
-    if n70 >= 8 and not _base_threat():
-        if int(cx) < 50:
-            behind = True
-        elif front70 and int(cx) < (min(front70) - 15):
-            behind = True
-
-    n_enemy_bldgs = len(getattr(obs, "visible_enemy_buildings", None) or [])
-    fog_east = False
-    if n_enemy_bldgs == 0 and (n75 >= 8 or max_x > 75 or cen_x > 75):
-        ref = min(front75) if front75 else (max_x if max_x > 75 else None)
-        if ref is not None and int(cx) < int(ref) - 10:
-            fog_east = True
-        elif int(cx) < 70 and (n75 >= 8 or cen_x > 75):
-            fog_east = True
-
-    if behind or fog_east:
-        return _east_push_objective(obs, aidx, cx, cy, front70 or front75 or xs)
-    return int(cx), int(cy)
+    from rl.war_objective import guard_push_cell
+    return guard_push_cell(obs, aidx, cx, cy)
 
 
 def _split_production(obs):
@@ -1347,9 +1281,10 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     """Igual que index_to_command pero TAMBIÉN devuelve los índices EFECTIVOS.
 
     heuristic_p (P1.4): probabilidad de aplicar guard_army_push_cell en
-    army/infantry/vehicle_attack_move. remap_move_cell y
-    stage_army_attack_cell siempre corren (safety: orilla de lago / choke).
-    Phase A / default = 1.0; anneal post Phase B solo apaga guard.
+    army/infantry/vehicle_attack_move. remap_move_cell,
+    stage_army_attack_cell y reject_feet_push_cell siempre corren
+    (safety: orilla de lago / choke / AM al pie). Guard is spawn-agnostic
+    (war_objective, not beacon). Phase A / default = 1.0.
 
     Las correcciones de seguridad mutan la acción muestreada (ej. 'train'
     con ítem de edificio -> primer entrenable). Guardar el log_prob de la
@@ -1486,7 +1421,9 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
             # Lake/choke staging is always-on safety (like remap). Binary
             # heuristic_p=0 left armies stuck on the west shore.
             cx, cy = stage_army_attack_cell(obs, aidx, cx, cy)
-            # P1.4: only fog-east / no-west-yank guard anneals to 0.
+            from rl.war_objective import reject_feet_push_cell
+            cx, cy = reject_feet_push_cell(obs, aidx, cx, cy)
+            # P1.4: vanguard-yank guard anneals; feet-reject does not.
             hp = 1.0 if heuristic_p is None else float(heuristic_p)
             if hp >= 1.0 or (hp > 0.0 and random.random() < hp):
                 cx, cy = guard_army_push_cell(obs, aidx, cx, cy)

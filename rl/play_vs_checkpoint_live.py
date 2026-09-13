@@ -61,7 +61,8 @@ from rl.live_lobby import (
     patch_oramap_bytes,
     resolve_episode_spawn,
 )
-from rl.obs_encoding import BEACON_BY_MAP, EnemyBeliefStore, decode_spatial
+from rl.obs_encoding import EnemyBeliefStore, decode_spatial
+from rl.war_objective import war_objective
 from rl.rollout import (
     _batch_of, episode_progress, is_progress_activity, should_idle_truncate,
 )
@@ -184,7 +185,12 @@ def _cmd_xy(cmd):
 
 
 def _tape_row(obs, *, ep, ckpt, dec, pol, cell, item, sup, supk, iss=None):
-    dest = sup or cell
+    obj = None
+    try:
+        obj = war_objective(obs)
+    except Exception:
+        obj = None
+    dest = obj or sup or cell
     return {
         "ep": ep,
         "episode_id": ep,
@@ -471,9 +477,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
     reset_kwargs["player_faction"] = player_faction
     reset_kwargs["enemy_faction"] = enemy_faction
 
-    beacon = BEACON_BY_MAP.get(reset_kwargs.get("map_name")) if reset_kwargs.get("map_name") else None
-    if spawn_meta.get("enemy_cell"):
-        beacon = tuple(spawn_meta["enemy_cell"])
+    beacon = tuple(spawn_meta["enemy_cell"]) if spawn_meta.get("enemy_cell") else None
     print(
         f"  lobby player={player_faction} enemy={enemy_faction} "
         f"spawn_asked={spawn_asked} agent_side={agent_side} "
@@ -564,6 +568,10 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
         atype_str = "no_op"
         step_meta = None
         if can_decide:
+            try:
+                obs.belief = belief
+            except Exception:
+                pass
             batch, aidx = _batch_of(obs, vocab, device, belief=belief)
             h_in = hidden.detach().clone()
             with torch.no_grad():
@@ -740,7 +748,12 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
                 trace["tape"].append(row)
             if decs == 1 or decs % 50 == 0:
                 n_cbt = _n_combat(obs.units)
-                dest = (step_meta or {}).get("sup") or last_push_cell
+                obj = None
+                try:
+                    obj = war_objective(obs)
+                except Exception:
+                    obj = None
+                dest = obj or (step_meta or {}).get("sup") or last_push_cell
                 dest_xy = list(dest) if dest is not None else None
                 trace["centroid"].append({
                     "dec": decs, "tick": obs.tick,

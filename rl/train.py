@@ -34,7 +34,7 @@ from rl.reward_shaping import PRESETS as SHAPER_PRESETS
 from rl.network import AlphaLiteNet
 from rl.rollout import (add_advantages, center_advantage_by_episode,
                         smdp_k_ref, collect_one_episode, flatten_samples)
-from rl.collect_heartbeat import write_heartbeat
+from rl.collect_heartbeat import write_heartbeat, gather_stall_should_cancel
 from rl.collect_timeout import close_env_now, is_collect_timeout, note_collect_timeout
 from rl.metrics_lock import metrics_lock
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
@@ -43,13 +43,14 @@ from rl.best_ckpt import batch_is_dead, batch_is_wipe, maybe_update_best
 from rl.pfsp import BotPFSP, parse_pool
 from rl.imitation import (
     EliteBuffer, TeacherWinBuffer, SIL_PREFER_TICKS,
-    BC_WIN_CAP, BC_WIN_EP_CAP, BC_WIN_PREFER_TICKS,
+    BC_WIN_CAP, BC_WIN_EP_CAP, BC_WIN_PREFER_TICKS, BC_REPLAY_AT,
     balance_bc_samples, lambda_bc_at, merge_teacher_wins,
-    tape_schema_for_mode,
+    tape_schema_for_mode, should_replay_teacher_buffer,
 )
 from rl.onboard import mix_target_prob
 from rl.scripted_teacher import ScriptedTeacher
 from rl import map_catalog as mapcat
+from rl.live_lobby import apply_episode_lobby
 
 
 def _teacher_mode(args) -> str:
@@ -157,6 +158,12 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
         map_pool = mapcat.parse_pool_arg(getattr(args, "map_pool", None))
         if map_pool:
             ep_kwargs.update(mapcat.reset_payload_for(mapcat.sample_pool(map_pool)))
+        ep_kwargs = apply_episode_lobby(
+            ep_kwargs,
+            spawn=getattr(args, "spawn", "random") or "random",
+            player_faction=getattr(args, "player_faction", None),
+            enemy_faction=getattr(args, "enemy_faction", None),
+        )
         try:
             traj, outcome = await collect_one_episode(
                 env, net, vocab, device,
@@ -238,8 +245,9 @@ async def collect_teacher_games(pool, net, vocab, device, args, reset_kwargs):
             from rl.collect_heartbeat import read_heartbeat, heartbeat_age_s
             hb = read_heartbeat(hb_path) if hb_path else None
             age = heartbeat_age_s(hb)
-            if (age is not None and age < slice_s
-                    and stall_streak < 2):
+            # Never cancel while hb is fresh (long episodes).
+            # Cancel only when hb missing/stale; streak is log-only.
+            if not gather_stall_should_cancel(age, slice_s):
                 continue
             note_collect_timeout(
                 hb_path, error="bc_gather_stall", iter=it_now)
@@ -469,6 +477,12 @@ async def amain(args):
     if args.bot_type:
         reset_kwargs["bot_type"] = args.bot_type
         print(f"Rival: {args.bot_type}", flush=True)
+    print(
+        f"Lobby: spawn={getattr(args, 'spawn', 'random') or 'random'} "
+        f"player={getattr(args, 'player_faction', None) or 'RandomAllies'} "
+        f"enemy={getattr(args, 'enemy_faction', None) or 'Random'}",
+        flush=True,
+    )
 
     pfsp = None
     if getattr(args, "pfsp", False):
@@ -546,6 +560,12 @@ async def amain(args):
                     if map_pool:
                         mk = mapcat.sample_pool(map_pool)
                         ep_kwargs.update(mapcat.reset_payload_for(mk))
+                    ep_kwargs = apply_episode_lobby(
+                        ep_kwargs,
+                        spawn=getattr(args, "spawn", "random") or "random",
+                        player_faction=getattr(args, "player_faction", None),
+                        enemy_faction=getattr(args, "enemy_faction", None),
+                    )
                     ep_bot = ep_kwargs.get("bot_type") or args.bot_type or "easy"
                     if pfsp is not None:
                         ep_bot = pfsp.sample()
@@ -680,11 +700,10 @@ async def amain(args):
                 from rl.collect_heartbeat import read_heartbeat, heartbeat_age_s
                 hb = read_heartbeat(hb_path)
                 age = heartbeat_age_s(hb)
-                # Cancel if hb dead/missing, OR after 2 consecutive wait
-                # timeouts with no completion (hb may look "fresh" from a
-                # sibling path that is not finishing the gather).
-                if (age is not None and age < slice_s
-                        and stall_streak < 2):
+                # Never cancel while hb is fresh (long episodes keep hb
+                # alive with no task completion). Cancel only when hb is
+                # missing/stale; stall_streak is log-only.
+                if not gather_stall_should_cancel(age, slice_s):
                     continue
                 note_collect_timeout(
                     hb_path, error="gather_stall", iter=it_now)
@@ -763,7 +782,8 @@ async def amain(args):
         print(f"  [bc] TeacherWinBuffer cap={win_cap} ep_cap={win_ep_cap} "
               f"prefer_ticks={win_prefer} dir={win_dir} "
               f"loaded eps={teacher_wins.n_episodes} "
-              f"steps={len(teacher_wins)}",
+              f"steps={len(teacher_wins)} "
+              f"replay_at={int(getattr(args, 'bc_replay_at', BC_REPLAY_AT) or 0)}",
               flush=True)
 
     # --bc-collect-only: accumulate teacher_wins then exit (no SFT/eval/ckpt).
@@ -920,6 +940,11 @@ async def amain(args):
                     getattr(args, "macro_ticks", 0),
                     getattr(args, "k_skip", 8),
                     getattr(args, "smdp_k_ref", 0) or None))
+            if not outcomes:
+                print(
+                    "  [collect] warning: empty outcomes after gather "
+                    "(workers cancelled or no episodes finished)",
+                    flush=True)
         lmb_bc = (1.0 if bc_only else
                   (lambda_bc_at(it, bc_start_iter, args.bc_warmup,
                                 end=float(getattr(args, "bc_lambda_end", 0.0) or 0.0))
@@ -929,11 +954,7 @@ async def amain(args):
         bc_meta = {}
         if args.bc and lmb_bc > 0.0:
             try:
-                replay = (
-                    bool(getattr(args, "bc_replay", False))
-                    and teacher_wins is not None
-                    and teacher_wins.n_episodes > 0
-                )
+                replay = should_replay_teacher_buffer(args, teacher_wins)
                 if replay:
                     raw = teacher_wins.sample(max_steps=teacher_wins.cap)
                     bc_samples = balance_bc_samples(raw)
@@ -948,9 +969,11 @@ async def amain(args):
                         "bc_n_eps": 0,
                         "bc_results": [],
                     }
+                    why = ("--bc-replay" if bool(getattr(args, "bc_replay", False))
+                           else f"buffer>={int(getattr(args, 'bc_replay_at', BC_REPLAY_AT) or BC_REPLAY_AT)}")
                     print(f"  [bc] replay tapes eps={teacher_wins.n_episodes} "
                           f"steps={len(teacher_wins)} sample={len(bc_samples)} "
-                          f"(no collect)",
+                          f"(no collect, {why})",
                           flush=True)
                 else:
                     new_eps, bc_meta = await collect_teacher_games(
@@ -1053,7 +1076,10 @@ async def amain(args):
                 hb_path, phase="update", force=True,
                 iter=int(it), tick=None, step=None)
             def _ppo_and_imitation():
-                if skipped_update:
+                # Empty samples (e.g. gather cancel wiped the batch) must
+                # use zero stats — trainer.update([]) returns {} and the
+                # iter print KeyErrors on stats['pi_loss'].
+                if skipped_update or not samples:
                     st = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
                           "clip_frac": 0.0, "kl": 0.0, "grad_norm": 0.0,
                           "adv_mean": 0.0, "n": len(samples)}
@@ -1063,6 +1089,10 @@ async def amain(args):
                 else:
                     _ep = hyper.consume_epochs_override(args.epochs)
                     st = trainer.update(samples, _ep, args.batch_size)
+                    if not st:
+                        st = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
+                              "clip_frac": 0.0, "kl": 0.0, "grad_norm": 0.0,
+                              "adv_mean": 0.0, "n": 0}
                     hyper.step(trainer, st, epochs=int(args.epochs),
                                skipped=False)
                     st["_hyper"] = hyper.last
@@ -1299,9 +1329,12 @@ async def amain(args):
 
         print(f"[iter {it:3d}] col {collect_s:5.1f}s upd {dt_update:5.1f}s "
               f"(ETA {eta_s/60:5.1f}m) | samples {stats.get('n', 0):4d} | "
-              f"pi {stats['pi_loss']:+.4f} v {stats['v_loss']:.4f} "
-              f"H {stats['entropy']:.3f} clip {stats['clip_frac']:.3f} "
-              f"gn {stats['grad_norm']:.2f} | winrate {wins}/{total} | "
+              f"pi {stats.get('pi_loss', 0.0):+.4f} "
+              f"v {stats.get('v_loss', 0.0):.4f} "
+              f"H {stats.get('entropy', 0.0):.3f} "
+              f"clip {stats.get('clip_frac', 0.0):.3f} "
+              f"gn {stats.get('grad_norm', 0.0):.2f} | "
+              f"winrate {wins}/{total} | "
               f"c[cbt {comp_means.get('combat', 0):+.2f} "
               f"ast {comp_means.get('assets', 0):+.2f} "
               f"bld {comp_means.get('buildings', 0):+.2f} "
@@ -1415,6 +1448,14 @@ def main():
                              "dummy"),
                     help="Personalidad del bot rival. Con --pfsp es el ANCLA "
                          "(north star + fraction of games).")
+    ap.add_argument("--spawn", default="random",
+                    choices=("random", "sw", "ne"),
+                    help="Agent spawn side each episode (random = sw|ne). "
+                         "No map pool. Pins Multi1/Multi0 via oramap LockSpawn.")
+    ap.add_argument("--player-faction", default="RandomAllies",
+                    help="Agent faction (RandomAllies or england/france/germany).")
+    ap.add_argument("--enemy-faction", default="Random",
+                    help="Scripted rival faction (Random = Allies or Soviet).")
     ap.add_argument("--pfsp", action="store_true",
                     help="PFSP pobre de bots: fraction vs --bot-type (ancla), "
                          "resto vs pool priorizado al que mas te gana. "
@@ -1547,6 +1588,10 @@ def main():
                     help="No jugar teacher games; BC del ring teacher_wins/. "
                          "auto_train lo pasa cuando el schema coincide "
                          "con la fase (rush A/B, expand C/D/E).")
+    ap.add_argument("--bc-replay-at", type=int, default=BC_REPLAY_AT,
+                    help="Cuando teacher_wins/ tiene >=N wins, las iters "
+                         "siguientes reusan el ring (no abren partidas teacher). "
+                         "Default 20. 0 = nunca auto (solo --bc-replay).")
     ap.add_argument("--bc-collect-only", action="store_true",
                     help="Solo recolecta teacher wins al buffer y sale "
                          "(sin SFT/eval/ckpt). auto_train --onboard-collect-only.")

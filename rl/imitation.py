@@ -36,13 +36,44 @@ _BC_COMBAT_CAP_TYPES = frozenset(_BC_LAST)
 # no clona combate: sin eco sana no hay army que empujar.
 _BC_COMBAT_READY_N = 8
 # Manifest de TeacherWinBuffer. Cintas viejas (solo TRAIN) no se hidratan.
-TAPE_SCHEMA = "eco_and_combat_mental_v4"
+TAPE_SCHEMA = "eco_and_combat_scout_v1"
 # C/D/E expand teacher (weap/1tnk/e3). Rush tapes must not hydrate here.
-TAPE_SCHEMA_EXPAND = "eco_and_combat_expand_v2"
+TAPE_SCHEMA_EXPAND = "eco_and_combat_expand_v3"
 
 
 def tape_schema_for_mode(mode: str) -> str:
     return TAPE_SCHEMA_EXPAND if str(mode or "") == "expand" else TAPE_SCHEMA
+
+
+# Stop opening new teacher games once the ring has this many win episodes.
+# 0 = never auto-replay (keep collecting). --bc-replay still forces replay.
+BC_REPLAY_AT = 20
+
+
+def should_replay_teacher_buffer(args, teacher_wins) -> bool:
+    """True → BC samples the ring, skip collect_teacher_games this iter.
+
+    --bc-replay: always (if the ring has ≥1 ep).
+    Else: auto when n_episodes >= --bc-replay-at (default 20).
+    --bc-collect-only / --bc-replay-at 0 keep collecting.
+    """
+    if teacher_wins is None:
+        return False
+    n = int(getattr(teacher_wins, "n_episodes", 0) or 0)
+    if n <= 0:
+        return False
+    if bool(getattr(args, "bc_collect_only", False)):
+        return False
+    if bool(getattr(args, "bc_replay", False)):
+        return True
+    at = getattr(args, "bc_replay_at", BC_REPLAY_AT)
+    try:
+        at = int(at or 0)
+    except (TypeError, ValueError):
+        at = BC_REPLAY_AT
+    if at <= 0:
+        return False
+    return n >= at
 
 
 def lambda_bc_at(it: int, start_iter: int, warmup: int = 80,

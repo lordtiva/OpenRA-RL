@@ -87,6 +87,7 @@ _onboard = None
 _replay_tapes = False
 _collect_only = False
 _collect_target = 40
+_force_collect = False  # --onboard-collect: keep filling, disable auto-replay-at
 _no_amp = False  # --no-amp CLI: forward to rl.train (B/C/D/E also default it)
 # Seed de emergencia si ckpts_v2 no tiene latest/iter (sigue en el árbol v1.1).
 RESUME_SEED = ROOT / "rl" / "ckpts" / "Run 3 (Full Stack - Asalto)" / "latest.pt"
@@ -211,6 +212,9 @@ TRAIN_ARGS = [
     "--qsa-block", "8",
     "--batch-size", "128",
     "--scenario", "a_short",
+    "--spawn", "random",
+    "--player-faction", "RandomAllies",
+    "--enemy-faction", "Random",
     "--bot-type", "easy",
     "--pfsp",
     "--pfsp-rl",
@@ -850,7 +854,10 @@ def _sync_earned_promotions_from_metrics(earned_from_rewind=None) -> None:
 def collect_only_train_extras(target: int | None = None) -> list[str]:
     """Argv fragment for rl.train --bc-collect-only (never --bc-replay)."""
     n = int(_collect_target if target is None else target)
-    return ["--bc-collect-only", "--bc-collect-target", str(max(1, n))]
+    return [
+        "--bc-collect-only", "--bc-collect-target", str(max(1, n)),
+        "--bc-replay-at", "0",
+    ]
 
 
 def arm_replay_for_phase(phase: str) -> bool:
@@ -898,6 +905,8 @@ def launch_train(extra_args=None) -> subprocess.Popen:
         extra_args.extend(collect_only_train_extras())
     elif would_pass_bc_replay():
         extra_args.append("--bc-replay")
+    elif _force_collect:
+        extra_args.extend(["--bc-replay-at", "0"])
     if _onboard is not None:
         args = ob.build_train_argv(list(TRAIN_ARGS), _onboard["phase"], _onboard)
     else:
@@ -1055,7 +1064,8 @@ def _maybe_set_replay_tapes(args, *, resume: bool = False) -> None:
 
 def _init_onboard(args) -> None:
     """Carga o crea curriculum.json. --scratch --onboard reinicia en A."""
-    global _onboard, _replay_tapes, _collect_only, _collect_target
+    global _onboard, _replay_tapes, _collect_only, _collect_target, _force_collect
+    _force_collect = bool(getattr(args, "onboard_collect", False))
     if getattr(args, "onboard_collect_only", False):
         args.onboard = True
         _collect_only = True

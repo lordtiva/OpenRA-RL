@@ -9,16 +9,19 @@ Comando: `.\.venv\Scripts\python.exe rl\auto_train.py --scratch --onboard` (desp
 <details>
 <summary>Notas de corte (mental-base / army push / Phase A) — no el hello-world</summary>
 
-**2026-09-06 — mental base v3:** beacon GPS sigue apagado (`beacon=None` en encode/push). El teacher recuerda un **mental enemy-base** (centroide del cluster denser de edificios enemigos vistos) y empuja ahí cuando no hay leftover visible. Escalares: `has_enemy_base_belief`, rel dx/dy, conf (`SCALAR_DIM=33`, Net2Net pad). Phase A `a_max_steps` **1800**; early fog scout con ≥3 combate. Regenerar `teacher_wins/` (schema `eco_and_combat_mental_v4` / `--onboard-fresh-tapes`). **K=2 eco+push** same macro-tick.
+**2026-09-06 — mental base v3:** beacon GPS sigue apagado (`beacon=None` en encode/push). El teacher recuerda un **mental enemy-base** (centroide del cluster denser de edificios enemigos vistos) y empuja ahí cuando no hay leftover visible. Escalares: `has_enemy_base_belief`, rel dx/dy, conf (`SCALAR_DIM=33`, Net2Net pad). Phase A `a_max_steps` **1800**; early fog scout con ≥3 combate. Regenerar `teacher_wins/` (schema `eco_and_combat_scout_v1` / `--scratch --onboard`). **K=2 eco+push** same macro-tick.
 
 **Army push (runtime adapter, 2026-09-07):** pipeline en `index_to_command_effective` + hysteresis en live/rollout. Live/eval lo toma al **reiniciar el proceso** (sin `--scratch`).
 
-1. `stage_army_attack_cell`: always-on safety (like remap). `n_advanced>=8` / `cen.x>35` / attractor guard — flank N/S **solo** en opening choke. `heuristic_p` no lo apaga.
-2. `remap_move_cell`: `nearest_passable` cerca del click — **sin** funnel south-flank/ore.
+1. `stage_army_attack_cell`: always-on safety (like remap). Vanguard = units closer to dest than centroid (no `x>35` GPS). Flank N/S **solo** si el midline es agua.
+2. `remap_move_cell`: `nearest_passable` cerca del click — **sin** funnel south-flank/ore. Fallback ilegal: contacto / `war_objective`, nunca beacon.
 3. hysteresis (`should_emit_army_push` / `filter_army_push_hysteresis`, eps=8): no spamea el mismo `army_attack_move`.
-4. `guard_army_push_cell`: annealable (`heuristic_p`). No tira al oeste una vanguardia `x>70`; fog-east retarget (beacon/mental/front) si no hay edificios enemigos visibles.
+4. `reject_feet_push_cell`: always-on. AM de grupo sobre el centroide/yard con pack idle ≥12 se reescribe a `war_objective` (raid/visible/mental/fog).
+5. `guard_army_push_cell`: annealable (`heuristic_p`). No tira una vanguardia **lejos del objetivo** hacia el yard. Spawn-agnóstico.
 
-**2026-09-06 — Phase A inactivity:** Phase A / `--onboard` forces `--qsa-topk 0` and `--xf-topk 0` (dense). `balance_bc_samples` defaults **512/512**. Teacher `_push_cell`: visible/leftover/ghost/mental-base first; only when belief empty, `resolve_beacon` is the opening-SFT prior. `bc_only` eval usa **temperature=0.0**. Schema `eco_and_combat_mental_v4`.
+**2026-09-13 — dest agnóstico / spawn aleatorio:** `war_objective` compartido (teacher + adapter + tape). Nunca `BEACON_BY_MAP` / `(95,11)`. Opening = fog scout desde el conyard. `--spawn random` (SW|NE por episodio), `--player-faction RandomAllies`, `--enemy-faction Random`. Sin map pool. Schema A/B `eco_and_combat_scout_v1`, C/D/E `eco_and_combat_expand_v3`. Requiere `--scratch --onboard` (cintas v4 no hidratan).
+
+**2026-09-06 — Phase A inactivity:** Phase A / `--onboard` forces `--qsa-topk 0` and `--xf-topk 0` (dense). `balance_bc_samples` defaults **512/512**. Teacher `_push_cell` = `war_objective`. `bc_only` eval usa **temperature=0.0**.
 
 </details>
 
@@ -148,7 +151,7 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 | `--onboard-collect` | — | Suma teacher games aunque ya haya tapes. |
 | `--onboard-collect-only` | — | Solo acumula `teacher_wins` hasta `--onboard-collect-target` (default 40); sin SFT/eval; no borra `latest.pt`; no requiere `--scratch`. |
 
-`--scratch --onboard`, el **resume** `--onboard` y el promote **A→B** reusan `teacher_wins/` si el schema coincide: A/B `eco_and_combat_mental_v4`, C/D/E `eco_and_combat_expand_v2`. Tope 40 eps (las más cortas pisan las más largas). Al promover B→C (y C→D, D→E) se **borran** las cintas: el rifle teacher no se clona vs easy. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas con schema distinto se ignoran (expand_v1 no hidrata en C).
+`--scratch --onboard`, el **resume** `--onboard` y el promote **A→B** reusan `teacher_wins/` si el schema coincide: A/B `eco_and_combat_scout_v1`, C/D/E `eco_and_combat_expand_v3`. Tope 40 eps (las más cortas pisan las más largas). Al promover B→C (y C→D, D→E) se **borran** las cintas: el rifle teacher no se clona vs easy. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas con schema distinto se ignoran (v4/expand_v2 no hidratan).
 
 
 
@@ -182,17 +185,18 @@ Estado en `rl/ckpts/curriculum.json`. Cada salto mata el `rl.train` y lo relanza
 
   `attack_move` de todo el idle (legal sin pack). A 12, `army_attack_move`.
 
-  Hunt map-agnostic: home raid → leftover visible (micro) → **mental
+  Hunt map-agnostic (`war_objective`): home raid → leftover visible → **mental
   enemy-base** (cluster denser de edificios vistos) → `last_seen` / belief
-  ghosts → hunt/sweep cerca del ultimo contacto → **`resolve_beacon` as
-  opening-SFT prior when belief empty** → fog scout. Encode Ch7-8 GPS still
-  off (`beacon=None`); beacon only labels teacher push when there is no
-  belief. Early fog scout away from home con >=3 combate antes del rush.
+  ghosts → hunt/sweep cerca del ultimo contacto → fog scout. **Nunca**
+  `resolve_beacon` / `BEACON_BY_MAP`. Encode Ch7-8 GPS off (`beacon=None`).
+  Early fog scout away from home con >=3 combate antes del rush.
   Blob piled lejos de casa sin contacto → remate hunt.
+  Train: `--spawn random` (SW|NE), `--player-faction RandomAllies`,
+  `--enemy-faction Random`. Sin map pool.
 
   Phase A also: dense QSA/XF (`--qsa-topk 0 --xf-topk 0`), BC caps 512/512,
   greedy student eval (`temperature=0.0`). Regenera `teacher_wins/` (schema
-  `eco_and_combat_mental_v4` / `--onboard-fresh-tapes`; cintas v3/hunt_v2 no
+  `eco_and_combat_scout_v1` / `--scratch --onboard`; cintas v4 no
   se auto-cargan).
 
 - Clona cintas **`win` only** (`--bc-only`). **No** clona `lose` ni `incomplete` (timeout turtle).
@@ -203,7 +207,7 @@ Estado en `rl/ckpts/curriculum.json`. Cada salto mata el `rl.train` y lo relanza
 
 - **TeacherWinBuffer** persistente: acumula wins entre iters bajo `{ckpt_dir}/teacher_wins/`
 
-  (`manifest.json` + `ep_XXXX.pt`). Tope **40 episodios** (`--bc-win-ep-cap`); una win más corta pisa la más larga. `--bc-win-cap 64000` es backstop de steps. Promote A→B reusa el ring (`--bc-replay`); no sigue grabando. Wins ≥`--bc-win-prefer-ticks` 20000 se recortan primero. Override con `--bc-win-dir`.
+  (`manifest.json` + `ep_XXXX.pt`). Tope **40 episodios** (`--bc-win-ep-cap`); una win más corta pisa la más larga. `--bc-win-cap 64000` es backstop de steps. **A las 20 wins** (`--bc-replay-at 20`) las iters siguientes **reusan el ring** (no abren partidas teacher). Promote A→B también pasa `--bc-replay`. `--onboard-collect` / `--onboard-collect-only` siguen llenando (`--bc-replay-at 0`). Wins ≥`--bc-win-prefer-ticks` 20000 se recortan primero. Override con `--bc-win-dir`.
 
 - Además, 4 partidas del **alumno** por iter (`--eval-games 4`, sin PPO) para
 

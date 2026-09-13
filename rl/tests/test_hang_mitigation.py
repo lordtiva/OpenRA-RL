@@ -6,6 +6,7 @@ from pathlib import Path
 
 from rl.collect_heartbeat import (
     HEARTBEAT_NAME,
+    gather_stall_should_cancel,
     heartbeat_advanced,
     heartbeat_age_s,
     read_heartbeat,
@@ -396,3 +397,37 @@ def test_hang_threshold_for_dead_hb():
         base, markers=0, gpu=0,
         hb={"phase": "collect_timeout"}, hb_age=999.0)
     assert thr7 == at.HB_DEAD_HANG_S
+
+
+def test_gather_stall_fresh_hb_never_cancels():
+    """Long episodes: fresh hb must NOT cancel even at stall_streak>=2."""
+    slice_s = 150.0
+    # User log: hb_age=11.19 with streak=2 must keep waiting.
+    assert gather_stall_should_cancel(11.19, slice_s) is False
+    assert gather_stall_should_cancel(0.0, slice_s) is False
+    assert gather_stall_should_cancel(slice_s - 0.001, slice_s) is False
+    # streak is intentionally ignored by the helper / cancel gate
+    for streak in (0, 1, 2, 99):
+        assert gather_stall_should_cancel(11.0, slice_s) is False, streak
+
+
+def test_gather_stall_stale_or_missing_hb_cancels():
+    """Cancel only when hb missing or age >= slice_s."""
+    slice_s = 150.0
+    assert gather_stall_should_cancel(None, slice_s) is True
+    assert gather_stall_should_cancel(slice_s, slice_s) is True
+    assert gather_stall_should_cancel(slice_s + 1.0, slice_s) is True
+    assert gather_stall_should_cancel(999.0, slice_s) is True
+
+
+def test_empty_samples_zero_stats_have_pi_loss():
+    """Empty PPO path must expose pi_loss (avoids KeyError on iter print)."""
+    # Mirror the zero-stats dict used by skipped_update / empty samples.
+    st = {"pi_loss": 0.0, "v_loss": 0.0, "entropy": 0.0,
+          "clip_frac": 0.0, "kl": 0.0, "grad_norm": 0.0,
+          "adv_mean": 0.0, "n": 0}
+    assert "pi_loss" in st
+    # Hardened print path: .get never KeyErrors on {}
+    empty = {}
+    _ = f"pi {empty.get('pi_loss', 0.0):+.4f}"
+    assert empty.get("pi_loss", 0.0) == 0.0

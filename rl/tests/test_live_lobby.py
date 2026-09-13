@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from rl.live_lobby import (
+    apply_episode_lobby,
     classify_spawn_indices,
     list_mpspawn_cells,
     normalize_enemy_faction,
@@ -74,3 +75,28 @@ def test_live_module_exports_helpers():
     from rl import play_vs_checkpoint_live as m
     assert m.normalize_enemy_faction("france") == "france"
     assert m.normalize_spawn("sw") == "sw"
+
+
+def test_apply_episode_lobby_sets_factions_and_patches_spawn():
+    if not A_SHORT.exists():
+        pytest.skip("fase2_a_short.oramap missing")
+    import base64
+    raw = A_SHORT.read_bytes()
+    kwargs = {
+        "map_data": base64.b64encode(raw).decode(),
+        "map_name": "fase2_a_short.oramap",
+        "bot_type": "easy",
+    }
+    import random
+    ep = apply_episode_lobby(
+        kwargs, spawn="sw", player_faction="RandomAllies",
+        enemy_faction="Random", rng=random.Random(0))
+    assert ep["player_faction"] == "RandomAllies"
+    assert ep["enemy_faction"] == "Random"
+    assert ep["bot_type"] == "easy"
+    patched = base64.b64decode(ep["map_data"])
+    assert patched != raw
+    rnd = apply_episode_lobby(kwargs, spawn="random", rng=random.Random(1))
+    rnd2 = apply_episode_lobby(kwargs, spawn="random", rng=random.Random(2))
+    # Different RNG seeds can pin different sides; both are valid patches.
+    assert "map_data" in rnd and "map_data" in rnd2
