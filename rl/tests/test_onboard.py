@@ -682,7 +682,8 @@ cfg_s_land["c_sft_done"] = True
 cfg_s_land["c_reset_opt_done"] = True
 out_s_land, inf_s_land = rewind_onboard(td_s, 60, cfg=cfg_s_land)
 check("rewind C→S-ckpt reentra C", out_s_land["phase"] == "C")
-check("rewind C→S-ckpt c_sft_done False", out_s_land.get("c_sft_done") is False)
+check("rewind C→S-ckpt sin SFT (opcion 1)",
+      out_s_land.get("c_sft_done") is True)
 check("rewind C→S-ckpt latest = iter0060",
       (td_s / "latest.pt").read_bytes() == b"S60")
 

@@ -802,7 +802,10 @@ def try_promote(last_iter: int) -> str | None:
         # First C launch passes --reset-opt via promote relaunch; mark after
         # launch in _after_onboard_launch. Do not pre-set True here for C.
         if nxt == "C":
-            _onboard["c_sft_done"] = False
+            # Opcion 1 (sin C-SFT): el SFT bc-only vs easy puro es unwinnable
+            # (expand 0/4) y flipea por conteo, no por wins -> 15 iters muertos.
+            # C entra directo a PPO+mix, el regimen que dio wins (mix 67%).
+            _onboard["c_sft_done"] = True
             _onboard["c_reset_opt_done"] = False
             if ob.wipe_elite(CKPT_DIR):
                 log("  wiped elite.pt (rifle SIL must not clone into C)")

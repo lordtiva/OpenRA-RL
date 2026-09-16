@@ -989,9 +989,10 @@ def rewind_onboard(ckpt_dir: str | Path, keep_iter: int,
             cfg["phase_started_iter"] = keep_iter
             if from_later:
                 # Rewind from C/D/E onto an S checkpoint: re-enter C expand
-                # SFT from those rifle weights (do not replay PFSP-S).
+                # PPO from those rifle weights (do not replay PFSP-S).
+                # Sin C-SFT (opcion 1: SFT vs easy puro unwinnable).
                 cfg["phase"] = "C"
-                cfg["c_sft_done"] = False
+                cfg["c_sft_done"] = True
             else:
                 cfg["phase"] = "S"
                 cfg["c_sft_done"] = False
