@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -10,19 +11,24 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from rl.onboard import (
     apply_earned_promotions,
     build_train_argv,
+    c_launch_extras,
+    c_sft_active,
     drought_blocked_until_min_iters,
     drought_since_iter,
     era_reset_row,
+    finish_c_sft,
     mix_target_prob,
     new_curriculum,
     outcomes_from_rows,
     phase_flags,
     rewind_onboard,
+    should_finish_c_sft,
     should_promote,
     should_resume,
     snapshot_phase_best,
     strip_flags,
     teacher_mode_for_phase,
+    wipe_elite,
     wr20,
     wr20_streak,
 )
@@ -138,22 +144,41 @@ check("S sil + auto-hyper", "--sil" in fs and "--auto-hyper" in fs)
 check("S onboard-phase S", fs[fs.index("--onboard-phase") + 1] == "S")
 check("S no wipe/expand", "--bc-only" not in fs)
 
-fc = phase_flags("C", cfg)
+fc_sft = phase_flags("C", cfg)
 check("A lr 1e-4", fa[fa.index("--lr") + 1] == "1.0e-4")
 check("A adv-mode episode", fa[fa.index("--adv-mode") + 1] == "episode")
+check("C SFT bc-only expand", "--bc-only" in fc_sft and "--bc" in fc_sft
+      and fc_sft[fc_sft.index("--bc-teacher-mode") + 1] == "expand")
+check("C SFT teacher-bot easy",
+      fc_sft[fc_sft.index("--bc-teacher-bot") + 1] == "easy")
+check("C SFT no sil / no mix",
+      "--sil" not in fc_sft and "--mix-from" not in fc_sft)
+check("C SFT lr 1e-4", fc_sft[fc_sft.index("--lr") + 1] == "1.0e-4")
+check("C SFT no-auto-hyper", "--no-auto-hyper" in fc_sft)
+check("C SFT no reset-opt in flags", "--reset-opt" not in fc_sft)
+cfg_ppo = dict(cfg)
+cfg_ppo["c_sft_done"] = True
+cfg_ppo["phase_started_iter"] = 60
+fc = phase_flags("C", cfg_ppo)
 check("C easy sin reset-opt", fc[fc.index("--bot-type") + 1] == "easy"
       and "--reset-opt" not in fc)
-check("C lr 2e-5 (igual B)", fc[fc.index("--lr") + 1] == "2.0e-5")
+check("C PPO lr 1e-4", fc[fc.index("--lr") + 1] == "1.0e-4")
 check("C adv-mode global", fc[fc.index("--adv-mode") + 1] == "global")
 check("C no-amp", "--no-amp" in fc and "--amp-init-scale" not in fc)
 check("C mix-from beginner", fc[fc.index("--mix-from") + 1] == "beginner")
-check("C mix-warmup 60", fc[fc.index("--mix-warmup") + 1] == "60")
-check("C mix-start 0.25", fc[fc.index("--mix-start") + 1] == "0.25")
+check("C mix-warmup 100", fc[fc.index("--mix-warmup") + 1] == "100")
+check("C mix-start 0.50", fc[fc.index("--mix-start") + 1] == "0.50")
 check("C sil + expand BC", "--sil" in fc and "--bc" in fc
       and "--bc-only" not in fc)
 check("C teacher-mode expand", fc[fc.index("--bc-teacher-mode") + 1] == "expand")
 check("C teacher-bot easy", fc[fc.index("--bc-teacher-bot") + 1] == "easy")
 check("C ep-cap 40", fc[fc.index("--bc-win-ep-cap") + 1] == "40")
+check("C PPO bc-start = phase_started",
+      fc[fc.index("--bc-start-iter") + 1] == "60")
+check("C PPO lambda-start 0.50",
+      fc[fc.index("--bc-lambda-start") + 1] == "0.50")
+check("C PPO lambda-end 0.20",
+      fc[fc.index("--bc-lambda-end") + 1] == "0.20")
 fd = phase_flags("D", cfg)
 check("D bot medium", fd[fd.index("--bot-type") + 1] == "medium")
 check("D mix-from easy", fd[fd.index("--mix-from") + 1] == "easy")
@@ -167,20 +192,22 @@ check("teacher_mode A/B/S rush CDE expand",
       and teacher_mode_for_phase("S") == "rush"
       and teacher_mode_for_phase("C") == "expand")
 cfg["c_reset_opt_done"] = True
+cfg["c_sft_done"] = True
 fc2 = phase_flags("C", cfg)
 check("C nunca reset-opt", "--reset-opt" not in fc2)
 cfg_c_start = dict(cfg)
+cfg_c_start["c_sft_done"] = True
 cfg_c_start["phase_started_iter"] = 132
 cfg_c_start["b_bc_start_iter"] = 36
 fc132 = phase_flags("C", cfg_c_start)
 check("C mix-start-iter = phase_started+1",
       fc132[fc132.index("--mix-start-iter") + 1] == "133")
-check("C bc-start pinned B origin (no λ restart)",
-      fc132[fc132.index("--bc-start-iter") + 1] == "36")
-check("C bc-lambda-start near floor not 1.0",
-      float(fc132[fc132.index("--bc-lambda-start") + 1]) <= 0.25)
-# Without b_bc_start_iter, floor-pin still avoids λ≈1.0 at entry
+check("C PPO bc-start = C origin not B",
+      fc132[fc132.index("--bc-start-iter") + 1] == "132")
+check("C bc-lambda-start 0.50",
+      abs(float(fc132[fc132.index("--bc-lambda-start") + 1]) - 0.50) < 1e-9)
 cfg_c_nofloor = dict(cfg)
+cfg_c_nofloor["c_sft_done"] = True
 cfg_c_nofloor["phase_started_iter"] = 132
 cfg_c_nofloor["b_bc_start_iter"] = 0
 fc_nf = phase_flags("C", cfg_c_nofloor)
@@ -191,7 +218,7 @@ _warm = int(fc_nf[fc_nf.index("--bc-warmup") + 1])
 _ls = float(fc_nf[fc_nf.index("--bc-lambda-start") + 1])
 _le = float(fc_nf[fc_nf.index("--bc-lambda-end") + 1])
 _lmb = lambda_bc_at(_it, _start, _warm, start=_ls, end=_le)
-check("C fresh entry λ_bc << 1.0", _lmb < 0.5)
+check("C PPO entry λ_bc ~0.50 not floor/1.0", 0.40 <= _lmb <= 0.55)
 
 cmd = build_train_argv(base, "A", new_curriculum())
 check("argv A last bot-type beginner",
@@ -391,8 +418,47 @@ check("mix wr20 cuenta solo easy",
 check("mix beginner wins no inflan C",
       abs(wr20(outcomes_from_rows([mix_row], "beginner", "C")) - 1.0) < 1e-9)
 
+print("=== C expand SFT / extras ===")
+cfg_sft = new_curriculum()
+cfg_sft["phase"] = "C"
+cfg_sft["c_sft_done"] = False
+cfg_sft["phase_started_iter"] = 60
+check("c_sft_active True", c_sft_active(cfg_sft) is True)
+sft_rows = [
+    {"iter": 60 + i, "bot_type": "easy", "onboard_phase": "C",
+     "outcomes": ["lose", "lose", "lose", "incomplete"]}
+    for i in range(1, 16)
+]
+check("C SFT no flip < c_sft_iters",
+      should_finish_c_sft(cfg_sft, sft_rows[:10], last_iter=70) is False)
+check("C SFT flip at c_sft_iters",
+      should_finish_c_sft(cfg_sft, sft_rows, last_iter=75) is True)
+finish_c_sft(cfg_sft, 75)
+check("finish_c_sft marks done + pins origin",
+      cfg_sft["c_sft_done"] is True
+      and int(cfg_sft["phase_started_iter"]) == 75
+      and cfg_sft["c_reset_opt_done"] is False)
+check("c_sft_active False after finish", c_sft_active(cfg_sft) is False)
+check("C SFT extras reset-opt",
+      "--reset-opt" in c_launch_extras({"phase": "C", "c_sft_done": False}))
+ex_ppo = c_launch_extras({
+    "phase": "C", "c_sft_done": True, "c_reset_opt_done": False,
+    "c_hyper_pause_iters": 25,
+})
+check("C PPO extras reset + pause 25",
+      "--reset-opt" in ex_ppo
+      and "--hyper-pause-iters" in ex_ppo
+      and ex_ppo[ex_ppo.index("--hyper-pause-iters") + 1] == "25")
+check("C extras empty after reset consumed",
+      c_launch_extras({"phase": "C", "c_sft_done": True,
+                       "c_reset_opt_done": True}) == [])
+td_el = Path(tempfile.mkdtemp())
+(td_el / "elite.pt").write_bytes(b"ELITE")
+check("wipe_elite removes", wipe_elite(td_el) is True
+      and not (td_el / "elite.pt").exists())
+check("wipe_elite missing False", wipe_elite(td_el) is False)
+
 # rewind: latest <- best@24, drop metrics > 24
-import tempfile
 td = Path(tempfile.mkdtemp())
 (td / "best.pt").write_bytes(b"BEST24")
 (td / "latest.pt").write_bytes(b"WIPE187")
@@ -591,6 +657,34 @@ out_c2c, inf_c2c = rewind_onboard(td4, 50, cfg=cfg_c2c)
 check("rewind C con B-streak met landa en S", out_c2c["phase"] == "S")
 check("rewind C earned includes S", "S" in (inf_c2c.get("earned_promotions") or []))
 check("rewind C no salta a C sin filas S", "C" not in (inf_c2c.get("earned_promotions") or []))
+
+# Rewind from C onto an S checkpoint: re-enter C expand SFT (skip PFSP-S).
+td_s = Path(tempfile.mkdtemp())
+(td_s / "iter0060.pt").write_bytes(b"S60")
+(td_s / "latest.pt").write_bytes(b"CLATE")
+(td_s / "best.pt").write_bytes(b"CBEST")
+(td_s / "best.json").write_text(json.dumps({"iter": 235}), encoding="utf-8")
+(td_s / "metrics.jsonl").write_text(
+    json.dumps({"iter": 59, "onboard_phase": "B", "bot_type": "beginner",
+                "outcomes": ["win", "win", "win", "win"]}) + "\n"
+    + json.dumps({"iter": 60, "onboard_phase": "S", "bot_type": "beginner",
+                  "outcomes": ["win", "incomplete", "win", "incomplete"]}) + "\n"
+    + json.dumps({"iter": 235, "onboard_phase": "C", "bot_type": "easy",
+                  "outcomes": ["lose", "lose", "lose", "lose"]}) + "\n",
+    encoding="utf-8")
+(td_s / "economy_race.jsonl").write_text(
+    '{"iter": 60}\n{"iter": 235}\n', encoding="utf-8")
+cfg_s_land = new_curriculum()
+cfg_s_land["phase"] = "C"
+cfg_s_land["a_launched"] = True
+cfg_s_land["phase_started_iter"] = 95
+cfg_s_land["c_sft_done"] = True
+cfg_s_land["c_reset_opt_done"] = True
+out_s_land, inf_s_land = rewind_onboard(td_s, 60, cfg=cfg_s_land)
+check("rewind C→S-ckpt reentra C", out_s_land["phase"] == "C")
+check("rewind C→S-ckpt c_sft_done False", out_s_land.get("c_sft_done") is False)
+check("rewind C→S-ckpt latest = iter0060",
+      (td_s / "latest.pt").read_bytes() == b"S60")
 
 
 print("=== collapse A vs B ===")

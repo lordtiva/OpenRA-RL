@@ -40,6 +40,96 @@ from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.scripted_teacher import ScriptedTeacher
 
 
+def _as_dict(obj):
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return obj
+    return getattr(obj, "__dict__", None) or {}
+
+
+def _gs_side(gs, side: str) -> dict:
+    raw = _as_dict(gs)
+    s = raw.get(side) if isinstance(raw, dict) else None
+    if s is None and gs is not None:
+        s = getattr(gs, side, None)
+    s = _as_dict(s)
+    return {
+        "cash": int(s.get("cash", 0) or 0),
+        "earned": int(s.get("earned", 0) or 0),
+        "building_value": int(s.get("building_value", 0) or 0),
+        "unit_value": int(s.get("unit_value", 0) or 0),
+        "n_buildings": int(s.get("n_buildings", 0) or 0),
+    }
+
+
+def _proc_cells(obs, attr: str = "buildings") -> List[List[int]]:
+    out: List[List[int]] = []
+    for b in getattr(obs, attr, None) or []:
+        if str(getattr(b, "type", "") or "").lower() != "proc":
+            continue
+        try:
+            out.append([int(b.cell_x), int(b.cell_y)])
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _gs_snap(tick: int, gs, obs=None) -> dict:
+    own = _gs_side(gs, "own")
+    ene = _gs_side(gs, "enemy")
+    t = max(int(tick or 0), 1)
+    own_e = int(own["earned"])
+    ene_e = int(ene["earned"])
+    return {
+        "tick": int(tick or 0),
+        "own_earned": own_e,
+        "ene_earned": ene_e,
+        "own_h1k": round(own_e / t * 1000.0, 1),
+        "ene_h1k": round(ene_e / t * 1000.0, 1),
+        "edge": round((own_e - ene_e) / t * 1000.0, 1),
+        "own_bv": int(own["building_value"]),
+        "ene_bv": int(ene["building_value"]),
+        "own_uv": int(own["unit_value"]),
+        "ene_uv": int(ene["unit_value"]),
+        "own_nb": int(own["n_buildings"]),
+        "ene_nb": int(ene["n_buildings"]),
+        "own_proc": _proc_cells(obs) if obs is not None else [],
+        "ene_proc": (
+            _proc_cells(obs, "visible_enemy_buildings")
+            if obs is not None else []),
+    }
+
+
+def _fmt_proc(cells) -> str:
+    if not cells:
+        return "-"
+    return "+".join(f"{c[0]},{c[1]}" for c in cells)
+
+
+def _print_trace(tag: str, snap: dict) -> None:
+    print(
+        f"  [trace {tag} t={snap['tick']:5d}] "
+        f"earned={snap['own_earned']}/{snap['ene_earned']} "
+        f"eco={snap['own_h1k']}/{snap['ene_h1k']} edge={snap['edge']} "
+        f"bv={snap['own_bv']}/{snap['ene_bv']} "
+        f"uv={snap['own_uv']}/{snap['ene_uv']} "
+        f"nb={snap['own_nb']}/{snap['ene_nb']} "
+        f"proc={_fmt_proc(snap.get('own_proc'))} "
+        f"eneproc={_fmt_proc(snap.get('ene_proc'))}",
+        flush=True,
+    )
+
+
+def _obs_gs(obs):
+    gs = getattr(obs, "global_summary", None)
+    if gs is None:
+        md = getattr(obs, "metadata", None)
+        if isinstance(md, dict):
+            gs = md.get("global_summary")
+    return gs
+
+
 def _wilson(wins: int, n: int, z: float = 1.96) -> Tuple[float, float]:
     if n <= 0:
         return (0.0, 0.0)
@@ -74,10 +164,12 @@ async def play_one(
     bot_type: str,
     macro_ticks: int,
     max_steps: int,
+    mode: str = "rush",
     message_timeout_s: float = 300.0,
+    trace_every: int = 0,
 ) -> dict:
     """One ScriptedTeacher game with train/BC-style macro advance."""
-    teacher = ScriptedTeacher(rush_attack_move=int(rush))
+    teacher = ScriptedTeacher(rush_attack_move=int(rush), mode=mode)
     reset_kwargs = _scenario_reset_kwargs(scenario, bot_type, seed)
     t0 = time.time()
     async with OpenRAEnv(base_url=url, message_timeout_s=message_timeout_s) as env:
@@ -86,12 +178,72 @@ async def play_one(
         done = bool(result.done)
         decisions = 0
         advanced_total = 0
+        last_gs = None
+        traces: List[dict] = []
+        last_trace_bucket = -1
+        tag = f"seed={seed}"
+        peak = {
+            "buildings": 0, "weap": 0, "pbox": 0, "tnk": 0,
+            "harv": 0, "proc": 0,
+        }
+        proc_seen: List[List[int]] = []
+
+        def _maybe_trace(tick: int, gs, o) -> None:
+            nonlocal last_trace_bucket
+            if int(trace_every) <= 0 or gs is None:
+                return
+            bucket = int(tick or 0) // int(trace_every)
+            if bucket <= last_trace_bucket:
+                return
+            last_trace_bucket = bucket
+            snap = _gs_snap(tick, gs, o)
+            traces.append(snap)
+            _print_trace(tag, snap)
+
+        def _note(o):
+            blds = list(getattr(o, "buildings", None) or [])
+            units = list(getattr(o, "units", None) or [])
+            types_b = {
+                str(getattr(b, "type", "") or "").lower() for b in blds
+            }
+            peak["buildings"] = max(peak["buildings"], len(blds))
+            peak["proc"] = max(
+                peak["proc"],
+                sum(1 for b in blds
+                    if str(getattr(b, "type", "") or "").lower() == "proc"),
+            )
+            if "weap" in types_b:
+                peak["weap"] = 1
+            n_pbox = sum(
+                1 for b in blds
+                if str(getattr(b, "type", "") or "").lower()
+                in ("pbox", "hbox", "ftur")
+            )
+            peak["pbox"] = max(peak["pbox"], n_pbox)
+            n_tnk = sum(
+                1 for u in units
+                if str(getattr(u, "type", "") or "").lower()
+                in ("1tnk", "2tnk", "3tnk")
+            )
+            peak["tnk"] = max(peak["tnk"], n_tnk)
+            n_harv = sum(
+                1 for u in units
+                if "harv" in str(getattr(u, "type", "") or "").lower()
+            )
+            eco_h = int(getattr(getattr(o, "economy", None), "harvester_count", 0) or 0)
+            peak["harv"] = max(peak["harv"], n_harv, eco_h)
+            for cell in _proc_cells(o):
+                if cell not in proc_seen:
+                    proc_seen.append(cell)
+
+        _note(obs)
         while not done and decisions < max_steps:
             action = teacher.decide(obs)
             result = await env.step(action)
             obs = result.observation
             done = bool(result.done)
             decisions += 1
+            _note(obs)
             if done or macro_ticks <= 0:
                 continue
             # Mirror rl/rollout.py macro: step(+2 ticks) then advance rest.
@@ -99,6 +251,10 @@ async def play_one(
             while restante > 0 and not done:
                 adv = await env.advance(min(50, restante))
                 advanced_total += int(adv.get("actual_ticks_advanced", 0) or 0)
+                gs_adv = adv.get("global_summary")
+                if gs_adv:
+                    last_gs = gs_adv
+                    _maybe_trace(int(adv.get("tick", 0) or 0), gs_adv, obs)
                 done = bool(adv.get("done", False))
                 if done:
                     # Prefer advance result if game ended mid-block.
@@ -118,6 +274,7 @@ async def play_one(
                     commands=[CommandModel(action=ActionType.NO_OP)]))
                 obs = result.observation
                 done = bool(result.done)
+                _note(obs)
         outcome = (getattr(obs, "result", None) or "incomplete") if done else "incomplete"
         if not isinstance(outcome, str):
             outcome = str(outcome or "incomplete")
@@ -128,6 +285,23 @@ async def play_one(
             bucket = "lose"
         else:
             bucket = "incomplete"
+        gs = _obs_gs(obs) or last_gs
+        if int(trace_every) > 0 and gs is not None:
+            snap = _gs_snap(int(getattr(obs, "tick", 0) or 0), gs, obs)
+            if (not traces
+                    or int(snap["tick"]) != int(traces[-1].get("tick") or 0)):
+                traces.append(snap)
+                _print_trace(tag, snap)
+        own = _gs_side(gs, "own")
+        ene = _gs_side(gs, "enemy")
+        tick = max(int(getattr(obs, "tick", 0) or 0), 1)
+        own_e = int(own["earned"])
+        ene_e = int(ene["earned"])
+        own_h1k = round(own_e / tick * 1000.0, 1)
+        ene_h1k = round(ene_e / tick * 1000.0, 1)
+        eco = getattr(obs, "economy", None)
+        own_cash = int(getattr(eco, "cash", 0) or 0) if eco is not None else 0
+        own_ore = int(getattr(eco, "ore", 0) or 0) if eco is not None else 0
         return {
             "rush": int(rush),
             "seed": int(seed),
@@ -143,6 +317,21 @@ async def play_one(
             "n_own_units": len(getattr(obs, "units", None) or []),
             "n_ene_units": len(getattr(obs, "visible_enemies", None) or []),
             "n_ene_buildings": len(getattr(obs, "visible_enemy_buildings", None) or []),
+            "peak_buildings": int(peak["buildings"]),
+            "ever_weap": int(peak["weap"]),
+            "ever_pbox": int(peak["pbox"]),
+            "peak_tnk": int(peak["tnk"]),
+            "peak_harv": int(peak["harv"]),
+            "peak_proc": int(peak["proc"]),
+            "own_earned": own_e,
+            "ene_earned": ene_e,
+            "own_harvest_per_1k": own_h1k,
+            "ene_harvest_per_1k": ene_h1k,
+            "harvest_edge": round(own_h1k - ene_h1k, 1),
+            "own_cash": own_cash,
+            "own_ore": own_ore,
+            "own_proc_cells": proc_seen,
+            "trace": traces,
         }
 
 
@@ -229,8 +418,11 @@ async def run_bench(args) -> dict:
     games = int(args.games)
     print(
         f"ScriptedTeacher bench vs {args.bot_type} on {args.scenario} "
+        f"mode={getattr(args, 'mode', 'rush')} "
         f"macro={args.macro_ticks} max_steps={args.max_steps} "
-        f"rushes={rushes} games/rush={games} urls={urls}",
+        f"rushes={rushes} games/rush={games} urls={urls}"
+        + (f" trace={int(getattr(args, 'trace', 0) or 0)}"
+           if int(getattr(args, "trace", 0) or 0) > 0 else ""),
         flush=True,
     )
     # Build job list: (rush, game_idx, seed)
@@ -266,6 +458,8 @@ async def run_bench(args) -> dict:
                     bot_type=args.bot_type,
                     macro_ticks=args.macro_ticks,
                     max_steps=args.max_steps,
+                    mode=str(getattr(args, "mode", "rush") or "rush"),
+                    trace_every=int(getattr(args, "trace", 0) or 0),
                 )
             except Exception as e:
                 r = {
@@ -289,7 +483,14 @@ async def run_bench(args) -> dict:
             print(
                 f"  [{tag}] {r['bucket']:11s} result={r['result']!s:12s} "
                 f"tick={r['ticks']:6d} dec={r.get('decisions', 0):4d} "
-                f"({r.get('elapsed_s', 0):.0f}s)",
+                f"({r.get('elapsed_s', 0):.0f}s) "
+                f"weap={r.get('ever_weap', '-')} pbox={r.get('ever_pbox', '-')} "
+                f"tnk={r.get('peak_tnk', '-')} harv={r.get('peak_harv', '-')} "
+                f"proc={r.get('peak_proc', '-')}@{_fmt_proc(r.get('own_proc_cells'))} "
+                f"eco={r.get('own_harvest_per_1k', '-')}/{r.get('ene_harvest_per_1k', '-')} "
+                f"edge={r.get('harvest_edge', '-')} "
+                f"earned={r.get('own_earned', '-')}/{r.get('ene_earned', '-')} "
+                f"res={r.get('own_cash', '-')}+{r.get('own_ore', '-')}",
                 flush=True,
             )
             async with raw_lock:
@@ -358,10 +559,17 @@ def main():
                     help="Games per rush value")
     ap.add_argument("--scenario", default="a_short")
     ap.add_argument("--bot-type", default="beginner")
+    ap.add_argument("--mode", default="rush", choices=("rush", "expand"),
+                    help="ScriptedTeacher mode (expand = C weap/tanks).")
     ap.add_argument("--macro-ticks", type=int, default=20)
     ap.add_argument("--max-steps", type=int, default=2800)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out", default="rl/ckpts_v2/bench_teacher.json")
+    ap.add_argument(
+        "--trace", nargs="?", const=5000, default=0, type=int,
+        help="Spectator fogless dump every N ticks (default off; "
+             "--trace alone = 5000). Prints earned/bv/uv/nb + own proc cells.",
+    )
     args = ap.parse_args()
     out = asyncio.run(run_bench(args))
     print_table(out["per_rush"])

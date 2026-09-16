@@ -115,7 +115,7 @@ def test_one_harvester_move_emits_single_move():
     assert cmd.target_x == cx and cmd.target_y == cy
 
 
-def test_attack_on_harvester_becomes_move_not_any_harvest():
+def test_attack_on_harvester_without_combat_is_noop():
     h1 = _U(actor_id=11, type="harv", can_attack=False)
     h2 = _U(actor_id=12, type="harv", can_attack=False)
     obs = _Obs(units=[h1, h2])
@@ -126,10 +126,26 @@ def test_attack_on_harvester_becomes_move_not_any_harvest():
     action, eff = index_to_command_effective(
         obs, TYPE_TO_IDX["attack"], slot, cell, 0, aidx)
     assert len(action.commands) == 1
+    assert action.commands[0].action == ActionType.NO_OP
+    assert ACTION_TYPES[eff[0]] == "no_op"
+
+
+def test_attack_move_on_harvester_retargets_combat():
+    h1 = _U(actor_id=11, type="harv", can_attack=False, cell_x=3, cell_y=3)
+    tank = _U(actor_id=20, type="1tnk", can_attack=True, cell_x=8, cell_y=8)
+    obs = _Obs(units=[h1, tank])
+    aidx = _aidx(obs)
+    slot = aidx.unit_ids.index(11)
+    cx, cy = 8, 9
+    cell = cy * aidx.w + cx
+    action, eff = index_to_command_effective(
+        obs, TYPE_TO_IDX["attack_move"], slot, cell, 0, aidx)
+    assert len(action.commands) == 1
     cmd = action.commands[0]
-    assert cmd.action == ActionType.MOVE
-    assert cmd.actor_id == 12
-    assert ACTION_TYPES[eff[0]] == "move"
+    assert cmd.action == ActionType.ATTACK_MOVE
+    assert cmd.actor_id == 20
+    assert ACTION_TYPES[eff[0]] == "attack_move"
+    assert aidx.unit_ids[eff[1]] == 20
 
 
 def test_harvesters_move_still_n_cmds():
@@ -147,9 +163,10 @@ def test_harvesters_move_still_n_cmds():
     assert len(action.commands) == 3
     aids = sorted(c.actor_id for c in action.commands)
     assert aids == [11, 12, 13]
+    # Far leftover-style cell snaps to the proc (default _B at 5,5).
     for c in action.commands:
         assert c.action == ActionType.MOVE
-        assert c.target_x == cx and c.target_y == cy
+        assert (c.target_x, c.target_y) == (5, 5)
 
 
 def test_harvest_uses_selected_id_and_cell():
@@ -220,7 +237,8 @@ if __name__ == "__main__":
     test_action_types_append_only()
     test_vehicle_bucket_excludes_naval_air()
     test_one_harvester_move_emits_single_move()
-    test_attack_on_harvester_becomes_move_not_any_harvest()
+    test_attack_on_harvester_without_combat_is_noop()
+    test_attack_move_on_harvester_retargets_combat()
     test_harvesters_move_still_n_cmds()
     test_harvest_uses_selected_id_and_cell()
     test_naval_air_macros_and_mask()

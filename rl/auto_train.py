@@ -730,7 +730,9 @@ def _after_onboard_launch():
     if _onboard.get("phase") == "A" and not _onboard.get("a_launched"):
         _onboard["a_launched"] = True
         dirty = True
-    if _onboard.get("phase") == "C" and not _onboard.get("c_reset_opt_done"):
+    if (_onboard.get("phase") == "C"
+            and _onboard.get("c_sft_done")
+            and not _onboard.get("c_reset_opt_done")):
         _onboard["c_reset_opt_done"] = True
         dirty = True
     if dirty:
@@ -799,17 +801,42 @@ def try_promote(last_iter: int) -> str | None:
             log(f"onboard snapshot {snap.name} (best {old})")
         # First C launch passes --reset-opt via promote relaunch; mark after
         # launch in _after_onboard_launch. Do not pre-set True here for C.
-        if nxt != "C":
+        if nxt == "C":
+            _onboard["c_sft_done"] = False
+            _onboard["c_reset_opt_done"] = False
+            if ob.wipe_elite(CKPT_DIR):
+                log("  wiped elite.pt (rifle SIL must not clone into C)")
+        else:
             _onboard["c_reset_opt_done"] = True
-        # Rifle/S tapes must not clone into expand BC.
+            _onboard["c_sft_done"] = True
+        # Rifle/S tapes must not clone into expand BC. Keep expand wins
+        # already collected (collect-only before re-entry).
         tw = CKPT_DIR / "teacher_wins"
-        if tw.is_dir():
+        if ob.expand_tapes_ready(CKPT_DIR):
+            if arm_replay_for_phase(nxt):
+                log("  keeping teacher_wins/ (expand schema already ready)")
+        elif tw.is_dir():
             shutil.rmtree(tw, ignore_errors=True)
             log(f"  wiped teacher_wins/ (schema {old} → expand {nxt})")
     if nxt in notes:
         ob.append_era_reset(METRICS, notes[nxt][0], notes[nxt][1])
     ob.save_curriculum(CURRICULUM, _onboard)
     return nxt
+
+
+def try_finish_c_sft(last_iter: int) -> bool:
+    """Flip C expand SFT → C PPO. True if we should relaunch."""
+    global _onboard
+    if not _onboard or not ob.c_sft_active(_onboard):
+        return False
+    rows = last_metrics_rows(800)
+    if not ob.should_finish_c_sft(
+            _onboard, rows, last_iter, games_per_iter=4):
+        return False
+    log(f"onboard C SFT done @ iter {last_iter} — PPO+expand BC")
+    ob.finish_c_sft(_onboard, last_iter)
+    ob.save_curriculum(CURRICULUM, _onboard)
+    return True
 
 
 def _history_promote_side_effects(earned: list[str], last_iter: int) -> None:
@@ -849,8 +876,13 @@ def _history_promote_side_effects(earned: list[str], last_iter: int) -> None:
             snap = ob.snapshot_phase_best(CKPT_DIR, old)
             if snap:
                 log(f"onboard snapshot {snap.name} (best {old})")
+            if nxt == "C" and ob.wipe_elite(CKPT_DIR):
+                log("  wiped elite.pt (history promote -> C)")
             tw = CKPT_DIR / "teacher_wins"
-            if tw.is_dir():
+            if ob.expand_tapes_ready(CKPT_DIR):
+                if arm_replay_for_phase(nxt):
+                    log("  keeping teacher_wins/ (history expand tapes)")
+            elif tw.is_dir():
                 shutil.rmtree(tw, ignore_errors=True)
                 log(f"  wiped teacher_wins/ (history promote -> {nxt})")
         if nxt in notes:
@@ -925,6 +957,8 @@ def launch_train(extra_args=None) -> subprocess.Popen:
     urls = live_game_urls()
     n_srv = urls.count("http")
     extra_args = list(extra_args or [])
+    if _onboard is not None:
+        extra_args.extend(ob.c_launch_extras(_onboard))
     if _collect_only:
         extra_args.extend(collect_only_train_extras())
     elif would_pass_bc_replay():
@@ -1130,7 +1164,8 @@ def _init_onboard(args) -> None:
                   "b_bc_lambda_end",
                   "bc_win_cap", "bc_win_ep_cap", "bc_win_prefer_ticks",
                   "c_mix_from", "c_mix_warmup", "c_mix_start",
-                  "c_bc_lambda_start",
+                  "c_bc_lambda_start", "c_bc_lambda_end",
+                  "c_sft_iters", "c_hyper_pause_iters",
                   "c_promote_wr20", "d_promote_wr20",
                   "d_mix_from", "e_mix_from",
                   "s_min_iters", "s_promote_wr20", "s_streak",
@@ -1300,6 +1335,13 @@ def main():
                     last_progress = time.time()
                     continue
                 if _onboard:
+                    if try_finish_c_sft(last_iter):
+                        log("onboard C SFT done — relanza C PPO")
+                        time.sleep(2)
+                        proc = launch_train()
+                        last_mtime = metrics_mtime()
+                        last_progress = time.time()
+                        continue
                     nxt = try_promote(last_iter)
                     if nxt == "done":
                         log("ONBOARD DONE — wr20 vs easy en umbral. "
@@ -1309,10 +1351,7 @@ def main():
                         cw = "ON" if collapse_active(nxt, collapse_watch) else "OFF"
                         log(f"onboard relanza fase {nxt} collapse={cw}")
                         time.sleep(2)
-                        extra = ["--hyper-pause"]
-                        if (nxt == "C"
-                                and not _onboard.get("c_reset_opt_done")):
-                            extra = ["--reset-opt", "--hyper-pause"]
+                        extra = [] if nxt == "C" else ["--hyper-pause"]
                         proc = launch_train(extra_args=extra)
                         last_mtime = metrics_mtime()
                         last_progress = time.time()
@@ -1377,6 +1416,15 @@ def main():
                 gpu_low_streak = 0
                 python_idle_streak = 0
                 if _onboard:
+                    if try_finish_c_sft(int(n)):
+                        log("onboard C SFT done — relanza C PPO")
+                        kill_train(proc)
+                        time.sleep(2)
+                        proc = launch_train()
+                        last_mtime = metrics_mtime()
+                        last_progress = time.time()
+                        gpu_low_streak = 0
+                        continue
                     nxt = try_promote(int(n))
                     if nxt == "done":
                         log("ONBOARD DONE — wr20 vs easy en umbral. "
@@ -1391,12 +1439,7 @@ def main():
                         if nxt == "C":
                             # Drought must not see B/S wr20 peak as C's.
                             last_restore_iter = int(n)
-                        # Pause HyperHealth a few iters after promote.
-                        # First C: also --reset-opt (Adam fresco) if not done.
-                        extra = ["--hyper-pause"]
-                        if (nxt == "C"
-                                and not _onboard.get("c_reset_opt_done")):
-                            extra = ["--reset-opt", "--hyper-pause"]
+                        extra = [] if nxt == "C" else ["--hyper-pause"]
                         proc = launch_train(extra_args=extra)
                         last_mtime = metrics_mtime()
                         last_progress = time.time()

@@ -546,12 +546,14 @@ hslot = aidx_h.unit_ids.index(9)
 e1slot = aidx_h.unit_ids.index(1)
 act_h_am, _ = index_to_command_effective(
     obs_h, TYPE_TO_IDX["attack_move"], hslot, home_flat, 0, aidx_h)
-check("adapter attack_move sobre harv -> harvest",
-      act_h_am.commands[0].action.value == "harvest")
+check("adapter attack_move sobre harv -> combat attack_move",
+      act_h_am.commands[0].action.value == "attack_move"
+      and int(act_h_am.commands[0].actor_id) != 9)
 act_h_mv, _ = index_to_command_effective(
     obs_h, TYPE_TO_IDX["move"], hslot, home_flat, 0, aidx_h)
-check("adapter move sobre harv -> harvest",
-      act_h_mv.commands[0].action.value == "harvest")
+check("adapter move sobre harv sigue move",
+      act_h_mv.commands[0].action.value == "move"
+      and int(act_h_mv.commands[0].actor_id) == 9)
 act_e1_am2, _ = index_to_command_effective(
     obs_h, TYPE_TO_IDX["attack_move"], e1slot, home_flat, 0, aidx_h)
 check("adapter attack_move sobre e1 sigue attack_move",

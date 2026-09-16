@@ -368,14 +368,16 @@ Si el seed que querés es `iter0140.pt` y no el `best@24`: `--onboard-rewind 140
 
 
 
-### Fase C — PPO + expand BC vs easy
+### Fase C — expand SFT, luego PPO + expand BC vs easy
 
-Al promover S→C (o legacy) se copia `best.pt` → `best_S.pt` / `best_B.pt`, se **wipea** `teacher_wins/` (schema expand). **`λ_bc` no vuelve a ~1.0**: se pinnea `b_bc_start_iter` / `--bc-lambda-start` ≈ 0.15 (piso B). Primer launch C: `--reset-opt` + `--hyper-pause` si aún no se hizo.
+Al promover S→C (o rewind desde C a un ckpt de S) se copia `best.pt` → `best_S.pt`, se wipea `elite.pt` (SIL de rifles no entra), y se wipea `teacher_wins/` **salvo** que ya haya cintas expand. Primer launch C: `--reset-opt`.
 
-- Teacher **expand**: mismo opening que A/B, después del blob (`n_combat≥8`) FORCE `weap` → `1tnk` (luego `2tnk`), mix `e3`, un pbox. No mill 3ª proc. No APC.
+1. **Expand SFT** (`c_sft_iters=15`): `--bc-only` vs easy, teacher expand, sin mix/SIL/HyperHealth. Criterio: N iters, no wr20.
+2. **PPO**: `--reset-opt --hyper-pause-iters 25 --lr 1e-4`. `λ_bc` **reinicia** en `phase_started_iter` 0.50→0.20 (`c_bc_lambda_start` / `c_bc_lambda_end`). Mix beginner→easy 0.50→1.0 en **100** iters. wr20 / best / promote **solo vs easy**.
+
+- Teacher **expand**: opening powr/proc/tent; 6 e1 de garrison, 2º harv, **weap** en cuanto hay $2000. Pbox + tanques en cuanto hay weap. Hold: **1 fog-scout** (no drip a dest). Push a **2** tanques. Peel de raid sí. Mix `e3`. No mill 3ª proc. No APC.
 - `--bc --bc-teacher-bot easy --bc-teacher-mode expand`. Wins-only. El rifle teacher **no** entra acá.
-- Mix `--mix-from beginner` 0.25→1.0 en **60** iters (`c_mix_warmup`). wr20 / best / promote **solo vs easy**.
-- `--no-amp`. Sequía bloqueada hasta `min_iters`.
+- `--no-amp`. Sequía bloqueada hasta `min_iters`. `c_promote_wr20` sigue 0.45.
 
 Criterio: wr20 vs **easy** ≥ 0.45 × 10 iters, mínimo 20 iters → D.
 

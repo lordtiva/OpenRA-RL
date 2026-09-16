@@ -3,15 +3,15 @@
 A: SFT rifle teacher vs beginner.
 B: PPO+SIL+rifle BC vs beginner until wr20 holds.
 S: PFSP-RL bridge (beginner anchor) — softens B→C cliff.
-C: PPO+SIL+expand BC vs easy (mix beginner→easy).
+C: expand SFT (bc-only) then PPO+SIL+expand BC vs easy (mix beginner→easy).
 D: same vs medium (mix easy→medium).
 E: same vs hard/OpenRA normal (mix medium→hard) until wr20 holds.
 
 Expand teacher (weap+1tnk+e3) is the expert vs easy+. Rifle teacher is not.
-Phase S keeps rush/mental schema and λ_bc at the B floor (no expand, no
-λ restart). auto_train owns promotion (kill + relaunch). train.py only
-sees the flags of the current phase. State lives in curriculum.json so a
-crash does not restart SFT.
+Phase S keeps rush/mental schema and λ_bc at the B floor. C restarts λ_bc
+from phase_started_iter (0.50→0.20) after a short expand SFT. auto_train
+owns promotion (kill + relaunch). train.py only sees the flags of the
+current phase. State lives in curriculum.json so a crash does not restart SFT.
 """
 from __future__ import annotations
 
@@ -65,11 +65,15 @@ DEFAULTS = {
     "bc_win_prefer_ticks": BC_WIN_PREFER_TICKS,
     # Mix ramp onto the phase target. C/D/E keep BC (expand teacher).
     "c_mix_from": "beginner",
-    "c_mix_warmup": 60,  # was 40; slightly longer beginner mix into easy
-    "c_mix_start": 0.25,
-    # Soften C λ_bc entry. Prefer pinning b_bc_start_iter across S→C;
-    # this is the fallback start when train supports --bc-lambda-start.
-    "c_bc_lambda_start": 0.15,
+    "c_mix_warmup": 100,
+    "c_mix_start": 0.50,
+    # C PPO: restart λ_bc from phase_started_iter (not B origin). SFT is
+    # --bc-only (λ ignored); this is the PPO kickstart after c_sft_iters.
+    "c_bc_lambda_start": 0.50,
+    "c_bc_lambda_end": 0.20,
+    "c_sft_iters": 15,
+    "c_sft_done": False,
+    "c_hyper_pause_iters": 25,
     "d_mix_from": "easy",
     "e_mix_from": "medium",
     # Phase S (self-play bridge B→C): PFSP-RL with beginner anchor.
@@ -133,7 +137,8 @@ def _cfg(raw: dict | None) -> dict:
     if raw:
         for k, v in raw.items():
             if k in DEFAULTS or k in (
-                "phase", "a_launched", "c_reset_opt_done", "phase_started_iter",
+                "phase", "a_launched", "c_reset_opt_done", "c_sft_done",
+                "phase_started_iter",
                 "heuristic_phase_start", "b_bc_start_iter",
             ):
                 out[k] = v
@@ -159,6 +164,13 @@ def load_curriculum(path: str | Path) -> dict | None:
     cfg["c_reset_opt_done"] = bool(raw.get("c_reset_opt_done"))
     cfg["phase_started_iter"] = int(raw.get("phase_started_iter") or 0)
     cfg["heuristic_phase_start"] = int(raw.get("heuristic_phase_start") or 0)
+    # Missing key on a live C/D/E curriculum = already in PPO (don't re-SFT).
+    if "c_sft_done" in raw:
+        cfg["c_sft_done"] = bool(raw.get("c_sft_done"))
+    elif phase in EXPAND_PHASES:
+        cfg["c_sft_done"] = True
+    else:
+        cfg["c_sft_done"] = False
     return cfg
 
 
@@ -201,6 +213,12 @@ def save_curriculum(path: str | Path, cfg: dict) -> None:
         "c_mix_start": float(cfg.get("c_mix_start", DEFAULTS["c_mix_start"])),
         "c_bc_lambda_start": float(
             cfg.get("c_bc_lambda_start", DEFAULTS["c_bc_lambda_start"])),
+        "c_bc_lambda_end": float(
+            cfg.get("c_bc_lambda_end", DEFAULTS["c_bc_lambda_end"])),
+        "c_sft_iters": int(cfg.get("c_sft_iters", DEFAULTS["c_sft_iters"])),
+        "c_hyper_pause_iters": int(
+            cfg.get("c_hyper_pause_iters", DEFAULTS["c_hyper_pause_iters"])),
+        "c_sft_done": bool(cfg.get("c_sft_done")),
         "d_mix_from": str(cfg.get("d_mix_from") or DEFAULTS["d_mix_from"]),
         "e_mix_from": str(cfg.get("e_mix_from") or DEFAULTS["e_mix_from"]),
         "s_min_iters": int(cfg.get("s_min_iters", DEFAULTS["s_min_iters"])),
@@ -228,6 +246,7 @@ def new_curriculum(overrides: dict | None = None) -> dict:
     cfg["phase"] = "A"
     cfg["a_launched"] = False
     cfg["c_reset_opt_done"] = False
+    cfg["c_sft_done"] = False
     cfg["phase_started_iter"] = 0
     cfg["heuristic_phase_start"] = 0
     return cfg
@@ -284,6 +303,69 @@ def snapshot_phase_best(ckpt_dir: str | Path, phase: str) -> Path | None:
     if js.exists():
         shutil.copy2(js, d / f"best_{tag}.json")
     return dst
+
+
+def wipe_elite(ckpt_dir: str | Path) -> bool:
+    """Drop SIL elite (rifle wins) so C does not clone B/S. True if removed."""
+    p = Path(ckpt_dir) / "elite.pt"
+    if not p.exists():
+        return False
+    try:
+        p.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def expand_tapes_ready(ckpt_dir: str | Path) -> bool:
+    """True if teacher_wins/ already holds expand-schema episodes."""
+    man_p = Path(ckpt_dir) / "teacher_wins" / "manifest.json"
+    if not man_p.is_file():
+        return False
+    try:
+        man = json.loads(man_p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    from rl.imitation import TAPE_SCHEMA_EXPAND
+    n = len(man.get("episodes") or [])
+    return str(man.get("schema") or "") == TAPE_SCHEMA_EXPAND and n > 0
+
+
+def c_sft_active(cfg: dict | None) -> bool:
+    cfg = cfg or {}
+    return str(cfg.get("phase") or "") == "C" and not bool(cfg.get("c_sft_done"))
+
+
+def should_finish_c_sft(cfg: dict, rows: list[dict], last_iter: int,
+                        games_per_iter: int = 4) -> bool:
+    """True when C expand SFT has run c_sft_iters (then flip to PPO)."""
+    if not c_sft_active(cfg):
+        return False
+    need = int(cfg.get("c_sft_iters") or DEFAULTS["c_sft_iters"])
+    origin = int(cfg.get("phase_started_iter") or 0)
+    n = iters_in_phase(rows, "easy", origin, onboard_phase="C")
+    return n >= need
+
+
+def finish_c_sft(cfg: dict, last_iter: int) -> None:
+    """Mark expand SFT done and pin PPO origin at last_iter (mix + min_iters)."""
+    cfg["c_sft_done"] = True
+    cfg["phase_started_iter"] = int(last_iter)
+    cfg["c_reset_opt_done"] = False
+
+
+def c_launch_extras(cfg: dict | None) -> list[str]:
+    """One-shot --reset-opt / hyper-pause for C SFT or first C PPO."""
+    cfg = cfg or {}
+    if str(cfg.get("phase") or "") != "C":
+        return []
+    pause = str(int(cfg.get("c_hyper_pause_iters")
+                    or DEFAULTS["c_hyper_pause_iters"]))
+    if not cfg.get("c_sft_done"):
+        return ["--reset-opt", "--hyper-pause"]
+    if not cfg.get("c_reset_opt_done"):
+        return ["--reset-opt", "--hyper-pause", "--hyper-pause-iters", pause]
+    return []
 
 
 def phase_flags(phase: str, cfg: dict) -> list[str]:
@@ -432,8 +514,43 @@ def _s_phase_flags(cfg: dict) -> list[str]:
     ]
 
 
+def _c_sft_flags(cfg: dict) -> list[str]:
+    """C expand SFT: --bc-only vs easy (no mix, no SIL, no HyperHealth)."""
+    return [
+        "--bot-type", "easy",
+        "--bc", "--bc-only",
+        "--bc-teacher-bot", "easy",
+        "--bc-teacher-mode", "expand",
+        "--bc-games", str(int(cfg.get("bc_games") or DEFAULTS["bc_games"])),
+        "--bc-epochs", str(int(cfg.get("bc_epochs") or DEFAULTS["bc_epochs"])),
+        "--bc-rush", str(int(cfg.get("a_rush") or DEFAULTS["a_rush"])),
+        "--bc-start-iter", "1",
+        "--bc-warmup", "1",
+        "--eval-games", str(int(cfg.get("a_eval_games") or DEFAULTS["a_eval_games"])),
+        "--bc-macro-ticks", str(int(cfg.get("a_macro_ticks") or DEFAULTS["a_macro_ticks"])),
+        "--bc-max-steps", str(int(cfg.get("a_max_steps") or DEFAULTS["a_max_steps"])),
+        "--bc-win-cap", str(int(cfg.get("bc_win_cap") or DEFAULTS["bc_win_cap"])),
+        "--bc-win-ep-cap", str(int(
+            cfg.get("bc_win_ep_cap") or DEFAULTS["bc_win_ep_cap"])),
+        "--bc-win-prefer-ticks", str(int(
+            cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
+        "--lr", "1.0e-4",
+        "--adv-mode", "episode",
+        "--no-amp",
+        "--iters", str(int(cfg["bc_iters"])),
+        "--onboard-phase", "C",
+        "--no-auto-hyper",
+    ]
+
+
 def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
-    """C/D/E: PPO+SIL+expand BC vs easy/medium/hard with mix ramp."""
+    """C/D/E: PPO+SIL+expand BC vs easy/medium/hard with mix ramp.
+
+    C starts with expand SFT (`c_sft_done` False) then PPO with λ_bc
+    restarted at phase_started_iter (0.50→0.20). D/E stay at the B floor.
+    """
+    if phase == "C" and not bool(cfg.get("c_sft_done")):
+        return _c_sft_flags(cfg)
     bot = PHASE_BOT[phase]
     mix_from = {
         "C": str(cfg.get("c_mix_from") or DEFAULTS["c_mix_from"]),
@@ -441,17 +558,20 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
         "E": str(cfg.get("e_mix_from") or DEFAULTS["e_mix_from"]),
     }[phase]
     mix_start_iter = int(cfg.get("phase_started_iter") or 0) + 1
-    # Root-cause fix for run_A λ_bc≈0.98 at C entry: do NOT restart warmup
-    # at phase_started_iter. Pin to B origin (or floor) and set λ start near
-    # floor via --bc-lambda-start for C.
-    bc_start = _bc_start_at_floor(cfg)
-    lam_end = float(cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))
     if phase == "C":
+        # Restart λ from this C PPO origin, not B's start_iter (that made
+        # c_bc_lambda_start a no-op once warmup from B had already ended).
+        bc_start = max(1, int(cfg.get("phase_started_iter") or 0) or 1)
         lam_start = float(cfg.get(
             "c_bc_lambda_start", DEFAULTS["c_bc_lambda_start"]))
+        lam_end = float(cfg.get(
+            "c_bc_lambda_end", DEFAULTS["c_bc_lambda_end"]))
+        lr = "1.0e-4"
     else:
-        # D/E: stay at floor (same as late B/S).
+        bc_start = _bc_start_at_floor(cfg)
+        lam_end = float(cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))
         lam_start = lam_end
+        lr = "2.0e-5"
     return [
         "--bot-type", bot,
         "--bc",
@@ -471,7 +591,7 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
             cfg.get("bc_win_ep_cap") or DEFAULTS["bc_win_ep_cap"])),
         "--bc-win-prefer-ticks", str(int(
             cfg.get("bc_win_prefer_ticks") or DEFAULTS["bc_win_prefer_ticks"])),
-        "--lr", "2.0e-5",
+        "--lr", lr,
         "--adv-mode", "global",
         "--sil", "--lambda-sil", "0.5",
         "--no-amp",
@@ -700,8 +820,12 @@ ows. Ambiguous history: if
             # old curricula already in C — only advances from current phase).
             if int(cfg.get("b_bc_start_iter") or 0) <= 0:
                 cfg["b_bc_start_iter"] = prev_started or 1
-        if nxt in EXPAND_PHASES or nxt == "done":
+        if nxt == "C":
+            cfg["c_sft_done"] = False
+            cfg["c_reset_opt_done"] = False
+        elif nxt in EXPAND_PHASES or nxt == "done":
             cfg["c_reset_opt_done"] = True
+            cfg["c_sft_done"] = True
         earned.append(nxt)
     return earned
 
@@ -836,12 +960,7 @@ def rewind_onboard(ckpt_dir: str | Path, keep_iter: int,
     n_m = truncate_jsonl(d / "metrics.jsonl", keep_iter)
     n_r = truncate_jsonl(d / "economy_race.jsonl", keep_iter)
     _write_rewind_best_json(d, keep_iter)
-    elite_p = d / "elite.pt"
-    if elite_p.exists():
-        try:
-            elite_p.unlink()
-        except OSError:
-            pass
+    wipe_elite(d)
     if cfg is None:
         cfg = load_curriculum(d / "curriculum.json") or new_curriculum()
     sft = int(cfg.get("sft_iters") or DEFAULTS["sft_iters"])
@@ -866,9 +985,16 @@ def rewind_onboard(ckpt_dir: str | Path, keep_iter: int,
             cfg["phase"] = dest
             cfg["phase_started_iter"] = keep_iter
         elif dest == "S":
-            cfg["phase"] = "S"
             cfg["c_reset_opt_done"] = False
             cfg["phase_started_iter"] = keep_iter
+            if from_later:
+                # Rewind from C/D/E onto an S checkpoint: re-enter C expand
+                # SFT from those rifle weights (do not replay PFSP-S).
+                cfg["phase"] = "C"
+                cfg["c_sft_done"] = False
+            else:
+                cfg["phase"] = "S"
+                cfg["c_sft_done"] = False
         else:
             cfg["phase"] = "B"
             cfg["c_reset_opt_done"] = False

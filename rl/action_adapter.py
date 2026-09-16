@@ -25,7 +25,8 @@ import torch
 from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.network import TYPE_TO_IDX, build_type_masks
 from rl.obs_encoding import (
-    MAX_UNITS, pending_place_item, select_unit_slots,
+    MAX_UNITS, THREAT_RADIUS, decode_spatial, pending_place_item,
+    select_unit_slots,
 )
 
 _log = logging.getLogger(__name__)
@@ -515,6 +516,241 @@ def n_air_total(obs) -> int:
 def n_harvester_total(obs) -> int:
     return sum(1 for u in (getattr(obs, "units", None) or [])
                if _is_harvester_unit(u))
+
+
+# harvesters_move is eco/safety, not a war push. Gate + remap live here so
+# auto_support (which imports this module) does not become a cycle.
+HARV_ORE_STALE_FRAC = 0.35
+HARV_ORE_HOME_RADIUS = 12
+
+
+def _harv_units(obs):
+    return [u for u in (getattr(obs, "units", None) or [])
+            if _is_harvester_unit(u)]
+
+
+def _spatial_chw(obs):
+    """(C,H,W) spatial tensor or None. Ch2=ore, Ch3=passable, Ch4=explored."""
+    cached = getattr(obs, "_spatial_chw", None)
+    if cached is not None:
+        return cached
+    info = getattr(obs, "map_info", None)
+    h = int(getattr(info, "height", 0) or 0)
+    w = int(getattr(info, "width", 0) or 0)
+    raw = getattr(obs, "spatial_map", "") or ""
+    ch = int(getattr(obs, "spatial_channels", 0) or 9)
+    if not raw or h < 1 or w < 1:
+        return None
+    try:
+        return decode_spatial(raw, h, w, ch, beacon=None)
+    except (ValueError, TypeError):
+        return None
+
+
+def _proc_xy(obs):
+    for b in getattr(obs, "buildings", None) or []:
+        if str(getattr(b, "type", "") or "").lower() == "proc":
+            try:
+                return int(b.cell_x), int(b.cell_y)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _home_xy(obs):
+    """Proc, else a civic building, else a harvester, else None."""
+    hit = _proc_xy(obs)
+    if hit is not None:
+        return hit
+    for want in ("fact", "tent", "powr", "apwr"):
+        for b in getattr(obs, "buildings", None) or []:
+            if str(getattr(b, "type", "") or "").lower() == want:
+                try:
+                    return int(b.cell_x), int(b.cell_y)
+                except (TypeError, ValueError):
+                    continue
+    for b in getattr(obs, "buildings", None) or []:
+        try:
+            return int(b.cell_x), int(b.cell_y)
+        except (TypeError, ValueError):
+            continue
+    for u in _harv_units(obs):
+        try:
+            return int(u.cell_x), int(u.cell_y)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _best_ore_near(arr, origin, radius: int = HARV_ORE_HOME_RADIUS):
+    """Richest explored+passable ore cell in a Chebyshev radius of origin."""
+    if arr is None or getattr(arr, "shape", (0,))[0] < 5 or origin is None:
+        return None
+    ox, oy = int(origin[0]), int(origin[1])
+    ch2, ch3, ch4 = arr[2], arr[3], arr[4]
+    h, w = ch2.shape
+    yy, xx = np.ogrid[:h, :w]
+    near = (np.abs(xx - ox) + np.abs(yy - oy)) <= int(radius)
+    mask = near & (ch4 >= 0.45) & (ch3 > 0.5)
+    if not bool(mask.any()):
+        return None
+    vals = np.where(mask, ch2, -1.0)
+    if float(vals.max()) <= 0.0:
+        return None
+    y, x = [int(i) for i in np.unravel_index(int(vals.argmax()), vals.shape)]
+    return int(x), int(y), float(vals[y, x])
+
+
+def _harv_local_ore(u, arr) -> float:
+    if arr is None:
+        return 0.0
+    try:
+        x, y = int(u.cell_x), int(u.cell_y)
+    except (TypeError, ValueError):
+        return 0.0
+    _, h, w = arr.shape
+    if not (0 <= y < h and 0 <= x < w):
+        return 0.0
+    return float(arr[2, y, x])
+
+
+def _harvesters_threatened(obs, harvs=None, radius: int = THREAT_RADIUS) -> bool:
+    harvs = list(harvs) if harvs is not None else _harv_units(obs)
+    if not harvs:
+        return False
+    threats = list(getattr(obs, "visible_enemies", None) or []) + list(
+        getattr(obs, "visible_enemy_buildings", None) or [])
+    if not threats:
+        return False
+    r = int(radius)
+    for u in harvs:
+        try:
+            ux, uy = int(u.cell_x), int(u.cell_y)
+        except (TypeError, ValueError):
+            continue
+        for t in threats:
+            try:
+                dx = ux - int(t.cell_x)
+                dy = uy - int(t.cell_y)
+            except (TypeError, ValueError):
+                continue
+            if max(abs(dx), abs(dy)) <= r:
+                return True
+    return False
+
+
+def _harvesters_stale(obs, harvs=None) -> bool:
+    harvs = list(harvs) if harvs is not None else _harv_units(obs)
+    if not harvs:
+        return False
+    arr = _spatial_chw(obs)
+    home = _best_ore_near(arr, _home_xy(obs))
+    if home is None:
+        return False
+    _hx, _hy, hden = home
+    if float(hden) <= 0.0:
+        return False
+    thresh = HARV_ORE_STALE_FRAC * float(hden)
+    return any(_harv_local_ore(u, arr) < thresh for u in harvs)
+
+
+def harvesters_need_move(obs) -> bool:
+    """True if the group-macro is doing its job: flee a raid or leave crumbs."""
+    harvs = _harv_units(obs)
+    if not harvs:
+        return False
+    if _harvesters_threatened(obs, harvs):
+        return True
+    return _harvesters_stale(obs, harvs)
+
+
+def _war_xy(obs, aidx):
+    try:
+        from rl.war_objective import war_objective
+        obj = war_objective(obs, aidx)
+        if obj is not None:
+            return int(obj[0]), int(obj[1])
+    except Exception:
+        return None
+    return None
+
+
+def _is_home_eco_cell(obs, aidx, cx: int, cy: int, home, war_xy, arr) -> bool:
+    """Keep a sampled cell only if it is home-side ore/yard, never leftover."""
+    h, w = int(aidx.h), int(aidx.w)
+    if not (0 <= cx < w and 0 <= cy < h):
+        return False
+    grid = getattr(aidx, "pass_grid", None)
+    if grid is not None and not bool(grid[cy, cx]):
+        return False
+    if home is not None:
+        d_home = abs(cx - int(home[0])) + abs(cy - int(home[1]))
+        if war_xy is not None:
+            d_war = abs(cx - int(war_xy[0])) + abs(cy - int(war_xy[1]))
+            if d_war + 8 < d_home:
+                return False
+        if arr is None and d_home > HARV_ORE_HOME_RADIUS:
+            return False
+    if arr is not None and arr.shape[0] >= 5:
+        if float(arr[3, cy, cx]) <= 0.5:
+            return False
+        if float(arr[4, cy, cx]) < 0.45:
+            return False
+        if float(arr[2, cy, cx]) <= 0.0:
+            return False
+    return True
+
+
+def _preferred_harvester_dest(obs, aidx):
+    home = _home_xy(obs)
+    arr = _spatial_chw(obs)
+    ore = _best_ore_near(arr, home)
+    threatened = _harvesters_threatened(obs)
+    if threatened:
+        dest = home if home is not None else (ore[:2] if ore else None)
+    elif ore is not None:
+        dest = (int(ore[0]), int(ore[1]))
+    else:
+        dest = home
+    if dest is None:
+        return None
+    grid = getattr(aidx, "pass_grid", None)
+    return nearest_passable(int(dest[0]), int(dest[1]), grid, aidx.h, aidx.w)
+
+
+def remap_harvester_cell(obs, aidx, cx: int, cy: int):
+    """Snap harvest / harvesters_move off leftover/beacon onto ore or proc.
+
+    Danger → proc/home. Stale crumbs → richest ore near home. A sampled cell
+    is kept only if it is already a home-side eco cell.
+    """
+    grid = getattr(aidx, "pass_grid", None)
+    cx, cy = nearest_passable(int(cx), int(cy), grid, aidx.h, aidx.w)
+    home = _home_xy(obs)
+    arr = _spatial_chw(obs)
+    war_xy = _war_xy(obs, aidx)
+    preferred = _preferred_harvester_dest(obs, aidx)
+    if _harvesters_threatened(obs):
+        return preferred if preferred is not None else (cx, cy)
+    if _is_home_eco_cell(obs, aidx, cx, cy, home, war_xy, arr):
+        return cx, cy
+    return preferred if preferred is not None else (cx, cy)
+
+
+def _is_economy_actor(obs, actor_id) -> bool:
+    u = _unit_by_id(obs, actor_id)
+    if u is None:
+        return False
+    ut = _utype(u)
+    return "harv" in ut or "mcv" in ut
+
+
+def _first_combat_unit_id(obs, aidx):
+    for uid in getattr(aidx, "unit_ids", None) or []:
+        u = _unit_by_id(obs, uid)
+        if u is not None and _is_combat_unit(u):
+            return int(uid)
+    return 0
 
 
 def group_actor_ids(obs, group: str, limit: int = 64) -> list:
@@ -1205,6 +1441,10 @@ class ActionIndex:
             m[TYPE_TO_IDX["vehicle_attack_move"]] = False
         if n_harvester_total(obs) < 1:
             m[TYPE_TO_IDX["harvesters_move"]] = False
+        elif not harvesters_need_move(obs):
+            # Idle mining of a live patch is automatic; keep the verb for
+            # flee-to-proc / leave-crumbs only (else it clones army_AM cells).
+            m[TYPE_TO_IDX["harvesters_move"]] = False
         # P0: naval/air macros masked until at least one matching unit exists.
         if n_naval_total(obs) < 1:
             m[TYPE_TO_IDX["naval_attack_move"]] = False
@@ -1393,11 +1633,17 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     if t_name == "support_power" and not _pick_support_power(obs):
         t_name = "no_op"
 
-    # Per-harvester cell path (P0): move/attack_move/attack on a selected
-    # harvester stays MOVE to (cx,cy) for THAT actor_id — do not rewrite to
-    # harvest (which used to drop the cell and swap to _any_harvester).
-    if t_name in ("move", "attack_move", "attack") and _is_harvester(obs, actor_id):
-        t_name = "move"
+    # Combat clicks must not pick harv/MCV (C# army_attack_move already skips
+    # Harvester). Retarget to a combat unit; else no_op. Bare `move` on a
+    # selected harvester stays MOVE to (cx,cy) for THAT actor_id.
+    if t_name in ("attack_move", "attack", "patrol") and _is_economy_actor(obs, actor_id):
+        combat_id = _first_combat_unit_id(obs, aidx)
+        if combat_id > 0:
+            actor_id = int(combat_id)
+            if actor_id in aidx.unit_ids:
+                unit_slot = aidx.unit_ids.index(actor_id)
+        else:
+            t_name = "no_op"
 
     if t_name == "train" and not owns_proc(obs):
         t_name = "no_op"
@@ -1415,7 +1661,12 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     # Remap illegal move cells BEFORE computing the issued cell_flat.
     # TRAIN/BUILD/PLACE ignore this (place keeps the sampled cell).
     if t_name in MOVE_CELL_TYPES:
-        cx, cy = remap_move_cell(obs, aidx, cx, cy, actor_id)
+        if t_name in ("harvesters_move", "harvest"):
+            # Do not use remap_move_cell: its war_objective fallback is the
+            # leftover/beacon snap that marched ore trucks with the army.
+            cx, cy = remap_harvester_cell(obs, aidx, cx, cy)
+        else:
+            cx, cy = remap_move_cell(obs, aidx, cx, cy, actor_id)
         if t_name in ("army_attack_move", "infantry_attack_move",
                       "vehicle_attack_move"):
             # Lake/choke staging is always-on safety (like remap). Binary

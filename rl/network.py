@@ -29,7 +29,7 @@ from rl.obs_encoding import (
     MAX_TOKENS, MAX_UNITS, MAX_BUILDINGS, SCALAR_DIM, UNIT_FEAT_DIM,
     BUILDING_FEAT_DIM, ready_place_items,
 )
-from rl.roles import N_ROLES
+from rl.roles import N_ROLES, ROLE_VOCAB
 
 ACTION_TYPES = [
     "no_op", "move", "attack_move", "attack", "stop", "harvest",
@@ -93,11 +93,14 @@ TYPES_GROUP_MACRO = {"army_attack_move", "infantry_attack_move",
                      "naval_attack_move", "air_attack_move",
                      "army_stop", "army_set_stance", "army_guard"}
 # Student dual-emit (K=2 eco+push): second AR sample restricted to these.
+# harvesters_move is eco/safety (ore or flee-to-proc), not a war push.
 COMBAT_PUSH_TYPES = frozenset({
     "army_attack_move", "attack_move", "attack",
-    "infantry_attack_move", "vehicle_attack_move", "harvesters_move",
+    "infantry_attack_move", "vehicle_attack_move",
     "naval_attack_move", "air_attack_move",
 })
+# Unit-head types that must not pick harv/MCV (C# army_attack_move already skips harv).
+TYPES_COMBAT_UNIT = frozenset({"attack_move", "attack", "patrol"})
 TYPES_USE_ITEM = {"train", "build", "place_building", "cancel_production"}
 # P1: dedicated building_head; adapter remaps unit_slot -> building_ids.
 TYPES_USE_BUILDING = {"sell", "repair", "power_down", "set_primary",
@@ -293,6 +296,65 @@ def _building_slot_legal(t_idx, building_valid, building_feats=None):
     B = int(t_idx.reshape(-1).shape[0])
     bv = _align_building_valid(building_valid, B, device)
     return _building_kind_legal(t_idx, bv, building_feats)
+
+
+_ROLE_HARV = int(ROLE_VOCAB.get("harvester", -1))
+_ROLE_MCV = int(ROLE_VOCAB.get("mcv", -1))
+
+
+def _combat_click_unit_legal(t_idx, own, unit_feats, role_ids=None):
+    """Own-unit mask, minus harv/MCV when the type is attack_move/attack/patrol.
+
+    If the combat filter would empty a row, keep ``own`` so the Categorical
+    does not collapse (adapter then no-ops or retargets).
+    """
+    legal = own.bool() if torch.is_tensor(own) else torch.as_tensor(own, dtype=torch.bool)
+    if legal.dim() == 1:
+        legal = legal.unsqueeze(0)
+    t = t_idx.long().reshape(-1)
+    if t.device != legal.device:
+        t = t.to(legal.device, non_blocking=True)
+    if t.size(0) == 1 and legal.size(0) > 1:
+        t = t.expand(legal.size(0))
+    click = torch.zeros(legal.size(0), dtype=torch.bool, device=legal.device)
+    for name in TYPES_COMBAT_UNIT:
+        idx = TYPE_TO_IDX.get(name)
+        if idx is None:
+            continue
+        click = click | (t == int(idx))
+    if not bool(click.any().item()):
+        return legal
+    combat = legal.clone()
+    n_slots = legal.size(-1)
+    if role_ids is not None and torch.is_tensor(role_ids):
+        rid = role_ids
+        if rid.dim() == 1:
+            rid = rid.unsqueeze(0)
+        if rid.size(0) == 1 and legal.size(0) > 1:
+            rid = rid.expand(legal.size(0), -1)
+        if rid.size(-1) < n_slots:
+            pad = rid.new_zeros(rid.size(0), n_slots - rid.size(-1))
+            rid = torch.cat([rid, pad], dim=-1)
+        elif rid.size(-1) > n_slots:
+            rid = rid[..., :n_slots]
+        is_eco = (rid == _ROLE_HARV) | (rid == _ROLE_MCV)
+        combat = combat & ~is_eco
+    if (unit_feats is not None and torch.is_tensor(unit_feats)
+            and unit_feats.size(-1) > 1):
+        feats = unit_feats
+        if feats.dim() == 2:
+            feats = feats.unsqueeze(0)
+        if feats.size(0) == 1 and legal.size(0) > 1:
+            feats = feats.expand(legal.size(0), -1, -1)
+        can = feats[..., 1] > 0.5
+        if can.size(-1) < n_slots:
+            pad = can.new_zeros(can.size(0), n_slots - can.size(-1))
+            can = torch.cat([can, pad], dim=-1)
+        elif can.size(-1) > n_slots:
+            can = can[..., :n_slots]
+        combat = combat & can
+    have = combat.any(dim=-1, keepdim=True)
+    return torch.where(click.unsqueeze(-1) & have, combat, legal)
 
 
 
@@ -700,7 +762,9 @@ class AlphaLiteNet(nn.Module):
         t = self.type_embedding(chosen_type).unsqueeze(1).expand(-1, U, -1)
         scores = self.unit_scorer(
             torch.cat([u_in, h, t], dim=-1)).squeeze(-1)
-        return _mask_illegal(scores, ~unit_legal)
+        legal = _combat_click_unit_legal(
+            chosen_type, unit_legal, unit_feats, role_ids)
+        return _mask_illegal(scores, ~legal)
 
     def dist_unit(self, hidden, chosen_type, unit_feats, unit_legal,
                   role_ids=None):
