@@ -103,6 +103,10 @@ class ScriptedTeacher(ScriptedBot):
     EXPAND_MIN_WEAP = 2  # easy BuildingLimits weap: 1; leftover cash sat idle
     EXPAND_WEAP2_TANKS = 4  # first weap must already be producing
     EXPAND_HARV_FLEE = 10  # easy ProtectionScanRadius; THREAT_RADIUS=18 yanks all 4
+    # Anti-stuck: mismo dest ciego + centroide quieto + sin contacto durante
+    # STUCK_WINDOW decisiones -> dest envenenado, se prueba otro sector.
+    STUCK_WINDOW = 12
+    STUCK_DISPLACE = 4
     EXPAND_PBOX_SEP = 3
     # Scout on a forward proc (DEFEND_CELLS=18) used to yank the hold
     # across the map (bench 8042: tnk=3 dead at 15k). Yard only.
@@ -186,6 +190,12 @@ class ScriptedTeacher(ScriptedBot):
         self._harv_cmd_at: dict[int, int] = {}
         self._expand_committed = False
         self._mcv_cmd_at: dict[int, int] = {}
+        # Anti-stuck (B): dest envenenado + ventana de desplazamiento.
+        # Si el mismo dest ciego recibe ordenes y el centroide no se mueve,
+        # se prueba otro sector en vez de repetirse 2000 decisiones.
+        self._poisoned: set[tuple[int, int]] = set()
+        self._push_hist: list[tuple[tuple[int, int] | None, tuple[int, int] | None, bool]] = []
+        # (dest, centroid, leftover) de las ultimas decisiones.
 
     def decide(self, obs: OpenRAObservation):
         """Reset belief between episodes if the same instance is reused."""
@@ -199,7 +209,10 @@ class ScriptedTeacher(ScriptedBot):
             self._harv_cmd_at = {}
             self._expand_committed = False
             self._mcv_cmd_at = {}
+            self._poisoned = set()
+            self._push_hist = []
         self._last_tick = tick
+        self._track_push(obs)
         action = super().decide(obs)
         extra = self._handle_harvesters(obs)
         # MCV expand disabled: fix+mcv path 0/8 vs easy (rarely deployed).
@@ -1519,15 +1532,93 @@ class ScriptedTeacher(ScriptedBot):
         except (TypeError, ValueError):
             return None
 
+    def _army_centroid(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
+        """Centroide de combate propio (origen alcanzable del push)."""
+        xs, ys, n = 0, 0, 0
+        for u in self._all_combat(obs):
+            try:
+                xs += int(u.cell_x)
+                ys += int(u.cell_y)
+                n += 1
+            except (TypeError, ValueError):
+                continue
+        if n <= 0:
+            return None
+        return xs // n, ys // n
+
     def _push_cell(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
         """Raid > visible leftover > mental base > ghost > last contact > fog.
 
         Never resolve_beacon / BEACON_BY_MAP. Shared dest with adapter/live
         via war_objective. Mental base: densest seen enemy-building cluster.
+        El fog se pide desde el centroide del ejercito (tierra alcanzable)
+        y salta dests envenenados por el anti-stuck.
         """
         self._refresh_contact(obs)
-        return war_objective(
-            obs, last_contact=self._last_contact, belief=self.belief)
+        base = war_objective(
+            obs, last_contact=self._last_contact, belief=self.belief,
+            from_xy=self._army_centroid(obs))
+        if base is not None:
+            try:
+                cell = (int(base[0]), int(base[1]))
+            except (TypeError, ValueError, IndexError):
+                return base
+            if cell not in self._poisoned:
+                return base
+        for alt in fog_scout_destinations(
+                obs, 6, from_xy=self._army_centroid(obs)):
+            try:
+                cell = (int(alt[0]), int(alt[1]))
+            except (TypeError, ValueError, IndexError):
+                continue
+            if cell not in self._poisoned and (
+                    base is None or cell != (int(base[0]), int(base[1]))):
+                self._log(f"Push evita envenenado {base} -> {cell}")
+                return cell
+        return base
+
+    def _track_push(self, obs: OpenRAObservation) -> None:
+        """Ventana anti-stuck: mismo dest + centroide quieto + sin contacto."""
+        try:
+            dest = self._push_cell(obs)
+        except Exception:
+            return
+        centroid = self._army_centroid(obs)
+        leftover = bool(getattr(obs, "visible_enemy_buildings", None)
+                        or getattr(obs, "visible_enemies", None))
+        self._push_hist.append((dest, centroid, leftover))
+        win = int(self.STUCK_WINDOW)
+        if len(self._push_hist) > win:
+            self._push_hist = self._push_hist[-win:]
+        if len(self._push_hist) < win or dest is None or centroid is None:
+            return
+        if any(lo for _, _, lo in self._push_hist):
+            return
+        first_d = self._push_hist[0][0]
+        if first_d is None:
+            return
+        try:
+            same = all(d is not None and _cheb(d, first_d) <= 2
+                       for d, _, _ in self._push_hist)
+        except (TypeError, ValueError):
+            return
+        if not same:
+            return
+        try:
+            spread = max(_cheb(c, centroid) for _, c, _ in self._push_hist
+                         if c is not None)
+        except (TypeError, ValueError):
+            return
+        if spread <= int(self.STUCK_DISPLACE):
+            try:
+                cell = (int(dest[0]), int(dest[1]))
+            except (TypeError, ValueError, IndexError):
+                return
+            if cell not in self._poisoned:
+                self._poisoned.add(cell)
+                self._log(f"Anti-stuck: envenena {cell} "
+                          f"(quieto {win} dec sin contacto)")
+            self._push_hist = []
 
     def _own_fact(self, obs: OpenRAObservation) -> Optional[Tuple[int, int]]:
         for b in obs.buildings or []:
@@ -1739,7 +1830,8 @@ class ScriptedTeacher(ScriptedBot):
         pile = None if leftover else self._away_pile(obs, combat)
         if pile is not None:
             hunt_anchor = self._last_contact or pile
-            hunt = hunt_near_cell(obs, hunt_anchor)
+            hunt = hunt_near_cell(obs, hunt_anchor,
+                                  from_xy=self._army_centroid(obs))
             if n_combat >= PACK_ARMY:
                 commands.append(CommandModel(
                     action=ActionType.ARMY_ATTACK_MOVE,

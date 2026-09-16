@@ -103,10 +103,13 @@ def _snap(obs, aidx, xy):
     return nearest_passable(x, y, grid, h, w)
 
 
-def war_objective(obs, aidx=None, last_contact=None, belief=None):
+def war_objective(obs, aidx=None, last_contact=None, belief=None,
+                  from_xy=None):
     """Raid > visible leftover > mental base > ghost > last contact > fog.
 
     Never resolve_beacon / BEACON_BY_MAP. Returns (x, y) or None.
+    Con from_xy (posición del ejército), el fog/hunt cae en tierra
+    alcanzable en vez del otro lado del lago.
     """
     origin = own_anchor(obs)
     raids = home_raid_targets(obs)
@@ -144,10 +147,10 @@ def war_objective(obs, aidx=None, last_contact=None, belief=None):
             combat = _combat_units(getattr(obs, "units", None) or [])
             n_at = _n_combat_at(combat, anchor, ARRIVED_CELLS)
             if n_at >= MIN_PILE_FOR_HUNT:
-                return _snap(obs, aidx, hunt_near_cell(obs, anchor))
+                return _snap(obs, aidx, hunt_near_cell(obs, anchor, from_xy))
             return _snap(obs, aidx, anchor)
 
-    fog = fog_scout_destinations(obs, 1, aidx)
+    fog = fog_scout_destinations(obs, 1, aidx, from_xy)
     if fog:
         return _snap(obs, aidx, fog[0])
     return None

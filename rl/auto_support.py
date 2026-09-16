@@ -326,7 +326,32 @@ def _snap_passable(obs, dest, aidx=None):
     h = int(getattr(info, "height", 64) or 64)
     x = min(max(x, 0), max(0, w - 1))
     y = min(max(y, 0), min(max(0, h - 1), HUNT_Y_MAX))
-    return int(x), int(y)
+    snap = _nearest_land(obs, (x, y))
+    return snap if snap is not None else (int(x), int(y))
+
+
+def _nearest_land(obs, dest, max_r: int = 16):
+    """Pasable más cercana (cualquier componente) o None sin terreno."""
+    pas, _ = _terrain_grids(obs)
+    if pas is None:
+        return None
+    try:
+        x0, y0 = int(dest[0]), int(dest[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    h, w = pas.shape
+    if 0 <= x0 < w and 0 <= y0 < h and bool(pas[y0, x0]):
+        return x0, y0
+    for r in range(1, int(max_r) + 1):
+        for dx in range(-r, r + 1):
+            for nx, ny in ((x0 + dx, y0 - r), (x0 + dx, y0 + r)):
+                if 0 <= nx < w and 0 <= ny < h and bool(pas[ny, nx]):
+                    return nx, ny
+        for dy in range(-r + 1, r):
+            for nx, ny in ((x0 - r, y0 + dy), (x0 + r, y0 + dy)):
+                if 0 <= nx < w and 0 <= ny < h and bool(pas[ny, nx]):
+                    return nx, ny
+    return None
 
 
 def _cell_mask_ok(aidx, cell_flat) -> bool:
@@ -442,8 +467,11 @@ HUNT_NEAR_OFFSETS = (
 )
 
 
-def hunt_near_cell(obs, anchor) -> tuple[int, int]:
-    """Sweep cell around last_seen / pile. Map-agnostic (no BEACON_BY_MAP)."""
+def hunt_near_cell(obs, anchor, from_xy=None) -> tuple[int, int]:
+    """Sweep cell around last_seen / pile. Map-agnostic (no BEACON_BY_MAP).
+
+    Con from_xy, el barrido cae en tierra alcanzable desde el ejército.
+    """
     info = getattr(obs, "map_info", None)
     w = int(getattr(info, "width", 128) or 128)
     h = int(getattr(info, "height", 64) or 64)
@@ -452,6 +480,10 @@ def hunt_near_cell(obs, anchor) -> tuple[int, int]:
     dx, dy = HUNT_NEAR_OFFSETS[(tick // HUNT_PERIOD_TICKS) % len(HUNT_NEAR_OFFSETS)]
     x = min(max(ax + dx, 1), max(1, w - 2))
     y = min(max(ay + dy, 1), max(1, h - 2))
+    if from_xy is not None:
+        nr = nearest_reachable(obs, (x, y), from_xy)
+        if nr is not None:
+            return int(nr[0]), int(nr[1])
     return int(x), int(y)
 
 
@@ -496,6 +528,156 @@ def _proc_xy(blds):
             except (TypeError, ValueError):
                 return None
     return None
+
+
+# Terreno por episodio: pasabilidad (Ch3) + componentes conexas 8-dir.
+# El hunt ciego ordenaba niebla al otro lado del lago (a_short oeste:
+# 20 rifles idle 54k ticks hacia (109,32) sin contacto). Sin spatial se
+# comporta como antes (sin filtro). Cache por hash del grid: el mapa no
+# cambia dentro del episodio.
+_TERRAIN = {"key": None, "pass": None, "comp": None}
+
+
+def _terrain_grids(obs):
+    """(pass_bool_HxW, comp_int32_HxW) cacheado, o (None, None)."""
+    import hashlib
+    import numpy as np
+    arr = _spatial_chw(obs)
+    if arr is None or int(arr.shape[0]) < 4:
+        return None, None
+    ch3 = arr[3]
+    h, w = int(ch3.shape[0]), int(ch3.shape[1])
+    if h < 1 or w < 1:
+        return None, None
+    pas = np.asarray(ch3 > 0.5, dtype=bool)
+    key = (h, w, hashlib.md5(pas.tobytes()).hexdigest())
+    c = _TERRAIN
+    if c["key"] == key and c["pass"] is not None:
+        return c["pass"], c["comp"]
+    comp = np.full((h, w), -1, dtype=np.int32)
+    ncomp = 0
+    for y in range(h):
+        for x in range(w):
+            if not bool(pas[y, x]) or int(comp[y, x]) >= 0:
+                continue
+            stack = [(x, y)]
+            comp[y, x] = ncomp
+            while stack:
+                cx, cy = stack.pop()
+                for dy in (-1, 0, 1):
+                    ny = cy + dy
+                    if ny < 0 or ny >= h:
+                        continue
+                    row_p = pas[ny]
+                    row_c = comp[ny]
+                    for dx in (-1, 0, 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        nx = cx + dx
+                        if (0 <= nx < w and bool(row_p[nx])
+                                and int(row_c[nx]) < 0):
+                            row_c[nx] = ncomp
+                            stack.append((nx, ny))
+            ncomp += 1
+    c["key"] = key
+    c["pass"] = pas
+    c["comp"] = comp
+    return pas, comp
+
+
+def _comp_id(comp, xy):
+    try:
+        x, y = int(xy[0]), int(xy[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    h, w = comp.shape
+    if not (0 <= x < w and 0 <= y < h):
+        return None
+    v = int(comp[y, x])
+    return v if v >= 0 else None
+
+
+def land_connected(obs, a, b) -> bool:
+    """Misma isla de tierra. Sin terreno → True (comportamiento previo)."""
+    _, comp = _terrain_grids(obs)
+    if comp is None:
+        return True
+    ca, cb = _comp_id(comp, a), _comp_id(comp, b)
+    if ca is None or cb is None:
+        return False
+    return ca == cb
+
+
+def nearest_reachable(obs, xy, from_xy, max_r: int = 40):
+    """Pasable más cercana a xy en la componente de from_xy (o None)."""
+    _, comp = _terrain_grids(obs)
+    if comp is None:
+        return None
+    fc = _comp_id(comp, from_xy)
+    if fc is None:
+        return None
+    try:
+        x0, y0 = int(xy[0]), int(xy[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    h, w = comp.shape
+    if 0 <= x0 < w and 0 <= y0 < h and int(comp[y0, x0]) == fc:
+        return x0, y0
+    for r in range(1, int(max_r) + 1):
+        best = None
+        best_d = None
+        # Anillo exterior del cuadrado (Chebyshev == r).
+        ring = []
+        for dx in range(-r, r + 1):
+            ring.append((x0 + dx, y0 - r))
+            ring.append((x0 + dx, y0 + r))
+        for dy in range(-r + 1, r):
+            ring.append((x0 - r, y0 + dy))
+            ring.append((x0 + r, y0 + dy))
+        for nx, ny in ring:
+            if not (0 <= nx < w and 0 <= ny < h):
+                continue
+            if int(comp[ny, nx]) != fc:
+                continue
+            d = max(abs(nx - x0), abs(ny - y0))
+            if best_d is None or d < best_d:
+                best, best_d = (nx, ny), d
+        if best is not None:
+            return best[0], best[1]
+    return None
+
+
+def _keep_reachable(obs, dests, from_xy):
+    """Filtra dests a la componente de from_xy (ancla si None).
+
+    Cada dest al otro lado del agua se reemplaza por la pasable más
+    cercana alcanzable; si no hay en radio, se dropea el sector.
+    Sin terreno → lista intacta.
+    """
+    _, comp = _terrain_grids(obs)
+    if comp is None:
+        return list(dests)
+    origin = from_xy if from_xy is not None else (
+        _own_anchor(obs) or _map_center(obs))
+    try:
+        origin = (int(origin[0]), int(origin[1]))
+    except (TypeError, ValueError, IndexError):
+        return list(dests)
+    if _comp_id(comp, origin) is None:
+        return list(dests)
+    out = []
+    for d in dests:
+        try:
+            dd = (int(d[0]), int(d[1]))
+        except (TypeError, ValueError, IndexError):
+            continue
+        if _comp_id(comp, dd) == _comp_id(comp, origin):
+            out.append(dd)
+            continue
+        nr = nearest_reachable(obs, dd, origin)
+        if nr is not None:
+            out.append((int(nr[0]), int(nr[1])))
+    return out
 
 
 def _best_ore_near(arr, origin, radius: int = _ORE_HOME_RADIUS):
@@ -562,11 +744,12 @@ def _fog_scout_angle_dests(obs, n: int, aidx=None):
     return out
 
 
-def fog_scout_destinations(obs, n: int, aidx=None):
+def fog_scout_destinations(obs, n: int, aidx=None, from_xy=None):
     """Hasta n celdas distintas en niebla pasable, una por sector angular.
 
     Usa Ch3 (passable) + Ch4 (fog). Sin spatial → rumbos equiespaciados.
-    Nunca resolve_beacon / BEACON_BY_MAP.
+    Nunca resolve_beacon / BEACON_BY_MAP. Con from_xy (o el ancla), los
+    sectores al otro lado del agua se reemplazan por tierra alcanzable.
     """
     import math
     import numpy as np
@@ -577,13 +760,15 @@ def fog_scout_destinations(obs, n: int, aidx=None):
     ox, oy = int(origin[0]), int(origin[1])
     arr = _spatial_chw(obs)
     if arr is None or arr.shape[0] < 5:
-        return _fog_scout_angle_dests(obs, n, aidx)
+        return _keep_reachable(obs, _fog_scout_angle_dests(obs, n, aidx),
+                               from_xy)
     ch3, ch4 = arr[3], arr[4]
     h, w = int(ch3.shape[0]), int(ch3.shape[1])
     # Unexplored / heavy shroud, walkable, not on top of the yard.
     ys, xs = np.where((ch3 > 0.5) & (ch4 < 0.45))
     if len(xs) == 0:
-        return _fog_scout_angle_dests(obs, n, aidx)
+        return _keep_reachable(obs, _fog_scout_angle_dests(obs, n, aidx),
+                               from_xy)
     # Bin by angle from origin; pick farthest cell in each of n sectors.
     sectors = [[] for _ in range(n)]
     for x, y in zip(xs.tolist(), ys.tolist()):
@@ -626,7 +811,7 @@ def fog_scout_destinations(obs, n: int, aidx=None):
                    for dx, dy in dests):
                 continue
             dests.append(raw)
-    return dests[:n]
+    return _keep_reachable(obs, dests[:n], from_xy)
 
 
 def _spectator_enemy_wealth(obs):
