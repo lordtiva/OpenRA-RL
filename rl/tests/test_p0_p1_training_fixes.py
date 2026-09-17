@@ -104,7 +104,7 @@ def test_evaluate_actions_seq_batch_smoke():
     net = AlphaLiteNet()
     net.train()
     segs = [_make_seg(net, T=4), _make_seg(net, T=3)]
-    lp, ent, val, valid = net.evaluate_actions_seq_batch(segs, "cpu")
+    lp, ent, val, valid = net.evaluate_actions_seq_batch(segs, "cpu")[:4]
     assert lp.shape == (2, 4)
     assert ent.shape == (2, 4)
     assert val.shape == (2, 4)

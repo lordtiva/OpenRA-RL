@@ -21,10 +21,18 @@ from rl.roles import (
     role_of,
     ROLE_AIRBOMBER,
     ROLE_AIRFIGHTER,
+    ROLE_ARTILLERY,
     ROLE_HELI,
+    ROLE_INFANTRY_ANTIARMOR,
+    ROLE_INFANTRY_ANTIINF,
+    ROLE_INFANTRY_BASIC,
+    ROLE_ROCKET_TRUCK,
     ROLE_SHIP_AMPHIB,
     ROLE_SHIP_ASW,
     ROLE_SHIP_COMBAT,
+    ROLE_TANK_HEAVY,
+    ROLE_TANK_LIGHT,
+    ROLE_TANK_MEDIUM,
     ROLE_TRANSPORTER,
 )
 from rl.force_estimate import aoa_features
@@ -58,7 +66,31 @@ def count_domain_units(units) -> tuple[int, int]:
             n_air += 1
     return n_nav, n_air
 
-SPATIAL_CHANNELS = 9
+SPATIAL_ENGINE_CH = 9
+SPATIAL_EXTRA_CH = 11  # typed bldgs + armor/inf + threat (client-side)
+SPATIAL_CHANNELS = 9  # wire format from C# (unchanged)
+SPATIAL_TOTAL_CH = SPATIAL_ENGINE_CH + SPATIAL_EXTRA_CH  # 20 after augment
+
+# Building-type buckets for extra spatial channels (own 9-11, enemy 12-14).
+_SPATIAL_PROD = frozenset({
+    "fact", "afac", "proc", "weap", "barr", "tent", "kenn",
+    "hpad", "afld", "syrd",
+})
+_SPATIAL_DEFENSE = frozenset({
+    "pbox", "hbox", "gun", "agun", "ftur", "tsla", "sam",
+})
+_SPATIAL_INFRA = frozenset({
+    "powr", "apwr", "silo", "sbag", "brik", "fenc", "dome", "fix",
+})
+_ARMOR_ROLES = frozenset({
+    ROLE_TANK_LIGHT, ROLE_TANK_MEDIUM, ROLE_TANK_HEAVY,
+    ROLE_ARTILLERY, ROLE_ROCKET_TRUCK,
+})
+_INFANTRY_ROLES = frozenset({
+    ROLE_INFANTRY_BASIC, ROLE_INFANTRY_ANTIINF, ROLE_INFANTRY_ANTIARMOR,
+})
+_ANTIINF_ROLES = frozenset({ROLE_INFANTRY_BASIC, ROLE_INFANTRY_ANTIINF})
+_ANTIARMOR_ROLES = frozenset({ROLE_INFANTRY_ANTIARMOR, ROLE_ROCKET_TRUCK})
 # Colas que terminan en PLACE (no Infantry/Vehicle). Defense = pbox/gun/ftur.
 PLACE_QUEUE_TYPES = frozenset({"building", "defense"})
 
@@ -138,6 +170,85 @@ def decode_spatial(spatial_b64: str, height: int, width: int, channels: int,
     return np.ascontiguousarray(arr, dtype=np.float32)
 
 
+def _paint_actor(ch, actor, value=1.0):
+    try:
+        x, y = int(actor.cell_x), int(actor.cell_y)
+    except (TypeError, ValueError):
+        return
+    h, w = ch.shape
+    if 0 <= y < h and 0 <= x < w:
+        ch[y, x] = max(ch[y, x], float(value))
+
+
+def _bldg_bucket(typ: str) -> str:
+    t = str(typ or "").lower()
+    if t in _SPATIAL_PROD:
+        return "prod"
+    if t in _SPATIAL_DEFENSE:
+        return "def"
+    if t in _SPATIAL_INFRA:
+        return "infra"
+    return "infra"
+
+
+def augment_spatial(spatial, obs):
+    """Append typed-building / armor-infantry / threat channels (C=20).
+
+    Engine wire stays 9 channels. Extra maps are derived client-side so
+    the U-Net first conv can Net2Net-pad (or a zero-init extra stem).
+    """
+    if spatial is None:
+        return None
+    arr = np.asarray(spatial, dtype=np.float32)
+    if arr.ndim != 3:
+        return arr
+    h, w = int(arr.shape[1]), int(arr.shape[2])
+    extra = np.zeros((SPATIAL_EXTRA_CH, h, w), dtype=np.float32)
+    # 0-2 own prod/def/infra; 3-5 enemy prod/def/infra
+    bucket_i = {"prod": 0, "def": 1, "infra": 2}
+    for b in getattr(obs, "buildings", None) or []:
+        _paint_actor(extra[bucket_i[_bldg_bucket(getattr(b, "type", ""))]], b)
+    for b in getattr(obs, "visible_enemy_buildings", None) or []:
+        _paint_actor(
+            extra[3 + bucket_i[_bldg_bucket(getattr(b, "type", ""))]], b)
+    # 6 own armor, 7 own infantry, 8 enemy armor, 9 enemy infantry
+    for u in getattr(obs, "units", None) or []:
+        rol = role_of(getattr(u, "type", "") or "")
+        if rol in _ARMOR_ROLES:
+            _paint_actor(extra[6], u, 1.0)
+        elif rol in _INFANTRY_ROLES:
+            _paint_actor(extra[7], u, 1.0)
+    for u in getattr(obs, "visible_enemies", None) or []:
+        rol = role_of(getattr(u, "type", "") or "")
+        if rol in _ARMOR_ROLES:
+            _paint_actor(extra[8], u, 1.0)
+        elif rol in _INFANTRY_ROLES:
+            _paint_actor(extra[9], u, 1.0)
+    # 10 threat: disk around enemy defenses / armor
+    threat = extra[10]
+    radius = 4
+    for u in list(getattr(obs, "visible_enemies", None) or []) + list(
+            getattr(obs, "visible_enemy_buildings", None) or []):
+        rol = role_of(getattr(u, "type", "") or "")
+        typ = str(getattr(u, "type", "") or "").lower()
+        if rol not in _ARMOR_ROLES and typ not in _SPATIAL_DEFENSE:
+            continue
+        try:
+            ux, uy = int(u.cell_x), int(u.cell_y)
+        except (TypeError, ValueError):
+            continue
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                if dx * dx + dy * dy > radius * radius:
+                    continue
+                x, y = ux + dx, uy + dy
+                if 0 <= y < h and 0 <= x < w:
+                    fall = 1.0 - math.sqrt(dx * dx + dy * dy) / float(radius)
+                    threat[y, x] = max(threat[y, x], fall)
+    return np.ascontiguousarray(np.concatenate([arr, extra], axis=0),
+                                dtype=np.float32)
+
+
 def apply_beacon(spatial, cx: int, cy: int, height: int, width: int,
                  radius: int = 3):
     """Marca la celda enemiga en Ch7 (building) y Ch8 (unit) en un radio.
@@ -157,7 +268,7 @@ def apply_beacon(spatial, cx: int, cy: int, height: int, width: int,
     return spatial
 
 
-SCALAR_DIM = 34  # 33 + signed power_balance (append-only; soft-pad via adapt_scalar)
+SCALAR_DIM = 41  # 34 + weap-save/vehicle-queue/power-proj/Lanchester/has_weap
 # Scalar layout (indices):
 #  0 cash, 1 ore, 2 silo_full, 3 power_ratio, 4 low_power, 5 harvs,
 #  6 n_units, 7 n_buildings, 8 n_enemies, 9 n_enemy_bldgs,
@@ -169,6 +280,9 @@ SCALAR_DIM = 34  # 33 + signed power_balance (append-only; soft-pad via adapt_sc
 # 29 own_naval, 30 own_air, 31 ene_naval (visible), 32 ene_air (visible).
 # 33 power_balance (provided-drained)/400 clipped [-1,1]. Index 3 saturates
 #    at 2× drain; this keeps magnitude past that (ck103 was 100/570).
+# 34 weap_save_ratio min(cash/2000,1). 35 vehicle_queue_progress.
+# 36 vehicle_queue_busy. 37 projected_power_balance (in-flight).
+# 38 armor_ratio. 39 antiinf_vs_antitank. 40 has_weap.
 POWER_BALANCE_NOM = 400.0
 #    Domain counts /10 clipped — distinguish navy/air from land vehicle globally.
 #    Per-token domain still via role_emb (ROLE_SHIP_* / ROLE_AIR* / heli).
@@ -281,6 +395,48 @@ def scalar_features(obs, belief=None) -> np.ndarray:
     ene_naval, ene_air = count_domain_units(
         getattr(obs, "visible_enemies", None))
 
+    has_weap = 1.0 if "weap" in btypes else 0.0
+    vehicle_prog = 0.0
+    vehicle_busy = False
+    inflight_power = 0.0
+    for p in getattr(obs, "production", None) or []:
+        q = str(getattr(p, "queue_type", "") or "").lower()
+        item = str(getattr(p, "item", "") or "").lower()
+        prog = float(getattr(p, "progress", 0.0) or 0.0)
+        if q == "vehicle":
+            vehicle_busy = True
+            vehicle_prog = max(vehicle_prog, prog)
+        try:
+            from openra_env.game_data import get_building_stats
+            st = get_building_stats(item) or {}
+            inflight_power += float(st.get("power", 0) or 0)
+        except Exception:
+            pass
+    try:
+        proj_power = (
+            float(eco.power_provided) - float(eco.power_drained)
+            + float(inflight_power)
+        ) / float(POWER_BALANCE_NOM)
+    except (TypeError, ValueError):
+        proj_power = power_balance
+    proj_power = max(-1.0, min(1.0, proj_power))
+
+    def _count_roles(units, roles):
+        n = 0
+        for u in units or ():
+            if role_of(getattr(u, "type", "") or "") in roles:
+                n += 1
+        return n
+
+    own_armor = _count_roles(getattr(obs, "units", None), _ARMOR_ROLES)
+    ene_armor = _count_roles(getattr(obs, "visible_enemies", None), _ARMOR_ROLES)
+    armor_ratio = (own_armor + 0.1) / (ene_armor + 0.1)
+    armor_ratio = min(armor_ratio, 3.0) / 3.0
+    own_antiinf = _count_roles(getattr(obs, "units", None), _ANTIINF_ROLES)
+    own_antiarm = _count_roles(getattr(obs, "units", None), _ANTIARMOR_ROLES)
+    anti_ratio = (own_antiinf + 0.1) / (own_antiarm + 0.1)
+    anti_ratio = min(anti_ratio, 3.0) / 3.0
+
     return np.array([
         cash_norm,
         ore_norm,
@@ -316,6 +472,13 @@ def scalar_features(obs, belief=None) -> np.ndarray:
         min(ene_naval / 10.0, 1.0),
         min(ene_air / 10.0, 1.0),
         power_balance,
+        min(float(eco.cash) / 2000.0, 1.0),
+        vehicle_prog,
+        1.0 if vehicle_busy else 0.0,
+        proj_power,
+        armor_ratio,
+        anti_ratio,
+        has_weap,
     ], dtype=np.float32)
 
 

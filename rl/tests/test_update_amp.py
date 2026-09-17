@@ -117,7 +117,7 @@ seg_b = [_dummy_step(ep=1, kind="move")]
 with torch.no_grad():
     lp1, e1, v1 = net.evaluate_actions_seq(seg_a, "cpu")
     lp2, e2, v2 = net.evaluate_actions_seq(seg_b, "cpu")
-    lpb, eb, vb, valid = net.evaluate_actions_seq_batch([seg_a, seg_b], "cpu")
+    lpb, eb, vb, valid = net.evaluate_actions_seq_batch([seg_a, seg_b], "cpu")[:4]
 check("batch T=max(2,1)", lpb.shape == (2, 2) and valid[0].sum() == 2
       and valid[1].sum() == 1)
 check("batch vs seq seg A lp", torch.allclose(lpb[0, :2], lp1, atol=1e-5))
@@ -126,7 +126,7 @@ check("batch pad B no cuenta", bool(valid[1, 1] == False))
 
 # grafo: un backward batcheado llega a los pesos
 net.train()
-lpb, eb, vb, valid = net.evaluate_actions_seq_batch([seg_a, seg_b], "cpu")
+lpb, eb, vb, valid = net.evaluate_actions_seq_batch([seg_a, seg_b], "cpu")[:4]
 loss = (lpb * valid.float()).sum()
 loss.backward()
 gn = torch.nn.utils.clip_grad_norm_(net.parameters(), 10.0).item()

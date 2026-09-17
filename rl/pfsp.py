@@ -11,6 +11,7 @@ N iters — ready for real SP later, unused as an opponent today.
 from __future__ import annotations
 
 import json
+import math
 import os
 import random
 import shutil
@@ -35,6 +36,10 @@ class BotPFSP:
         stats_name: str = "pfsp_stats.json",
         prev20_every: int = 20,
         rng: random.Random | None = None,
+        mab: bool = False,
+        mab_tau: float = 0.25,
+        mab_floor: float = 0.05,
+        hist_cap: int = 15,
     ):
         self.ckpt_dir = Path(ckpt_dir)
         self.anchor = str(anchor or "easy")
@@ -50,6 +55,10 @@ class BotPFSP:
         self.stats_path = self.ckpt_dir / stats_name
         self.prev20_every = int(prev20_every)
         self.rng = rng or random.Random()
+        self.mab = bool(mab)
+        self.mab_tau = max(1e-6, float(mab_tau))
+        self.mab_floor = min(0.49, max(0.0, float(mab_floor)))
+        self.hist_cap = max(0, int(hist_cap))
         self.stats = {b: {"wins": 0, "games": 0} for b in self.pool}
         self.stats.setdefault(self.anchor, {"wins": 0, "games": 0})
         self._load()
@@ -99,8 +108,48 @@ class BotPFSP:
         """Higher when we lose more often to this bot."""
         return max(_EPS, 1.0 - self.winrate(bot))
 
+    def mab_probs(self) -> dict[str, float]:
+        """Softmax P(bot) ∝ exp((1-WR)/τ), then mix with a floor.
+
+        Volume concentrates on the 30–60% winrate zone (zone of proximal
+        development). Crushed bots (WR>85%) decay toward `mab_floor`.
+        """
+        bots = []
+        for b in [self.anchor, *self.pool]:
+            if b not in bots:
+                bots.append(b)
+        if not bots:
+            return {self.anchor: 1.0}
+        logits = []
+        for b in bots:
+            wr = self.winrate(b)
+            zpd = 1.5 if 0.30 <= wr <= 0.60 else 1.0
+            logits.append(((1.0 - wr) / self.mab_tau) * zpd)
+        m = max(logits)
+        exps = [math.exp(x - m) for x in logits]
+        s = sum(exps) or 1.0
+        probs = [e / s for e in exps]
+        floor = self.mab_floor
+        n = len(bots)
+        if floor > 0.0 and n * floor < 1.0:
+            rest = 1.0 - n * floor
+            probs = [floor + rest * p for p in probs]
+        return {b: p for b, p in zip(bots, probs)}
+
     def sample(self) -> str:
-        """anchor_prob vs north star; else PFSP over challengers (never the anchor)."""
+        """MAB softmax over the pool, or anchor_prob vs PFSP challengers."""
+        if self.mab:
+            dist = self.mab_probs()
+            bots = list(dist.keys())
+            weights = [dist[b] for b in bots]
+            total = sum(weights) or 1.0
+            r = self.rng.random() * total
+            acc = 0.0
+            for b, w in zip(bots, weights):
+                acc += w
+                if r <= acc:
+                    return b
+            return bots[-1]
         if self.rng.random() < self.anchor_prob:
             return self.anchor
         cands = self.challengers
@@ -150,12 +199,40 @@ class BotPFSP:
         return out
 
     def pick_rl_ckpt(self) -> Path | None:
-        """Uniform over existing latest/prev20/best for frozen Multi0."""
+        """Uniform over latest/prev20/best plus hist_*.pt frozen clones."""
         names = ("latest.pt", "prev20.pt", "best.pt")
         cands = [self.ckpt_dir / n for n in names if (self.ckpt_dir / n).exists()]
+        if self.hist_cap > 0:
+            for p in sorted(self.ckpt_dir.glob("hist_*.pt")):
+                if p not in cands:
+                    cands.append(p)
         if not cands:
             return None
         return self.rng.choice(cands)
+
+    def maybe_rotate_hist(self, iteration: int, latest_path: str | Path) -> bool:
+        """Every prev20_every iters, copy latest into a ring of hist_XX.pt."""
+        if self.hist_cap <= 0 or self.prev20_every <= 0:
+            return False
+        if int(iteration) % self.prev20_every != 0:
+            return False
+        latest = Path(latest_path)
+        if not latest.exists():
+            return False
+        slot = (int(iteration) // self.prev20_every - 1) % self.hist_cap
+        dest = self.ckpt_dir / f"hist_{slot:02d}.pt"
+        tmp = self.ckpt_dir / f"hist_{slot:02d}.pt.tmp"
+        try:
+            shutil.copy2(latest, tmp)
+            os.replace(tmp, dest)
+            return True
+        except OSError:
+            try:
+                if tmp.exists():
+                    tmp.unlink()
+            except OSError:
+                pass
+            return False
 
     def maybe_rotate_prev20(self, iteration: int, latest_path: str | Path) -> bool:
         """Every prev20_every iters, copy latest.pt -> prev20.pt (frozen ring)."""

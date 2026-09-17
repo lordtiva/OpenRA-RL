@@ -94,6 +94,7 @@
     <div class="meta">North star = <b>wr vs ancla</b> · poll 2s · <span id="pathHint">rl/ckpts_v2/</span></div>
   </div>
   <div class="row" style="align-items:center">
+    <span class="pill" id="shaperPill">shaper …</span>
     <span class="pill" id="pfspPill">PFSP …</span>
     <span class="pill" id="livePill">live</span>
     <span class="meta" id="updated">—</span>
@@ -125,19 +126,12 @@
 
   <section class="card span12" id="hyperCard">
     <h2>HyperHealth <span id="hyperPill" class="pill off" style="margin-left:8px">—</span></h2>
-    <div class="row" style="margin-bottom:10px" id="hyperChips">
+    <div class="row" id="hyperChips">
       <div class="chip"><div class="l">lr</div><div class="v accent" id="hLr">—</div></div>
       <div class="chip"><div class="l">entropy_coef</div><div class="v" id="hEntCoef">—</div></div>
       <div class="chip"><div class="l">última acción</div><div class="v" id="hAct">—</div></div>
       <div class="chip"><div class="l">razón</div><div class="v" id="hReason" style="font-size:13px;font-weight:500">—</div></div>
       <div class="chip"><div class="l">paused</div><div class="v" id="hPaused">—</div></div>
-    </div>
-    <canvas id="cHyper" height="120"></canvas>
-    <div class="legend">
-      <span style="--c:var(--accent)">kl×10</span>
-      <span style="--c:var(--warn)">clip</span>
-      <span style="--c:var(--good)">lr×1e4</span>
-      <span style="--c:var(--purple)">entropy</span>
     </div>
   </section>
 
@@ -166,7 +160,6 @@
     <div class="legend">
       <span style="--c:var(--good)">own harvest/1k</span>
       <span style="--c:var(--bad)">enemy harvest/1k</span>
-      <span style="--c:var(--cyan)">harvest edge</span>
     </div>
   </section>
 
@@ -184,10 +177,10 @@
     <h2>Mix de acciones</h2>
     <canvas id="cAct"></canvas>
     <div class="legend">
-      <span style="--c:var(--bad)">land combat (attack / *attack_move army/infantry/vehicle)</span>
-      <span style="--c:#38bdf8">naval_attack_move</span>
-      <span style="--c:#c084fc">air_attack_move</span>
-      <span style="--c:var(--good)">eco (build/place/harvest/train/harvesters_move)</span>
+      <span style="--c:var(--bad)">land combat</span>
+      <span style="--c:#38bdf8">naval</span>
+      <span style="--c:#c084fc">air</span>
+      <span style="--c:var(--good)">eco</span>
       <span style="--c:var(--muted)">no_op</span>
     </div>
   </section>
@@ -199,7 +192,8 @@
       <span style="--c:var(--good)">win</span>
       <span style="--c:var(--orange)">raze</span>
       <span style="--c:var(--cyan)">mining</span>
-      <span style="--c:var(--bad)">defense_loss</span>
+      <span style="--c:var(--purple)">exchange</span>
+      <span style="--c:var(--accent)">tier</span>
     </div>
   </section>
   <section class="card span4">
@@ -216,9 +210,8 @@
   </section>
 </main>
 <footer>
-  Fuentes: <code id="srcMetrics">rl/ckpts_v2/metrics.jsonl</code> · <code id="srcPfsp">…/pfsp_stats.json</code> · <code id="srcBest">…/best.json</code> · <code id="srcCollapse">…/last_collapse.json</code> · <code>rl/auto_train.log</code>.
-  Alertas: último collapse (no reloj). combat* = land + naval_attack_move + air_attack_move (no esconder navy/air bajo vehicle); eco incluye harvesters_move; gris = solo no_op.
-  Cambiá carpeta con <code>?dir=rl/ckpts</code> (v1.1) o <code>?dir=rl/ckpts_v2</code> (default). Backup: <code>dashboard.html.bak</code>.
+  <code id="srcMetrics">rl/ckpts_v2/metrics.jsonl</code> · <code id="srcPfsp">…/pfsp_stats.json</code> · <code id="srcBest">…/best.json</code> · <code id="srcCollapse">…/last_collapse.json</code>.
+  Carpeta: <code>?dir=rl/ckpts_v2</code> (default) o <code>?dir=rl/ckpts</code>.
 </footer>
 
 <script>
@@ -507,11 +500,6 @@ function buildAlerts(rows, pfsp, collapse) {
   const edge = r.economy_race && r.economy_race.harvest_edge;
   const ownB = r.n_buildings && r.n_buildings.own;
   const bc = isBcOnly(r);
-  const phase = r.onboard_phase;
-
-  if (phase)
-    a.push(["accent", "Onboard fase " + phase + (bc ? " (bc_only / sin PPO)" : "")
-      + " · bot " + (r.bot_type || "?") + " · iter " + r.iter]);
 
   if (bc) {
     if (r.bc_nll != null && r.bc_nll > 12)
@@ -625,7 +613,6 @@ function render(rows, pfsp, best, collapse) {
   drawLines($("cEco"), [
     { ys: rows.map(x => x.economy_race && x.economy_race.own_harvest_per_1k), color: "#3dd68c" },
     { ys: rows.map(x => x.economy_race && x.economy_race.enemy_harvest_per_1k), color: "#ff6b7a" },
-    { ys: rows.map(x => x.economy_race && x.economy_race.harvest_edge), color: "#67e8f9" },
   ]);
 
   {
@@ -669,12 +656,16 @@ function render(rows, pfsp, best, collapse) {
     { ys: rows.map(x => noopFrac(x.action_hist)), color: "#8b9bb0" },
   ], { ymin: 0, ymax: 1 });
 
-  const rc = (row, k) => (row.reward_components && row.reward_components[k]) || 0;
+  const rc = (row, k) => {
+    const v = row.reward_components && row.reward_components[k];
+    return (v == null || !isFinite(v)) ? null : v;
+  };
   drawLines($("cRew"), [
     { ys: rows.map(x => rc(x,"win")), color: "#3dd68c" },
     { ys: rows.map(x => rc(x,"raze")), color: "#fb923c" },
     { ys: rows.map(x => rc(x,"mining")), color: "#67e8f9" },
-    { ys: rows.map(x => rc(x,"defense_loss")), color: "#ff6b7a" },
+    { ys: rows.map(x => rc(x,"exchange")), color: "#b794f6" },
+    { ys: rows.map(x => rc(x,"tier")), color: "#6ea8fe" },
   ]);
 
   drawLines($("cBld"), [
@@ -683,7 +674,7 @@ function render(rows, pfsp, best, collapse) {
   ]);
 
 
-  // HyperHealth panel
+  // HyperHealth chips (Salud chart already has H/clip/kl)
   {
     const pill = $("hyperPill");
     const act = r.hyper_action;
@@ -715,13 +706,16 @@ function render(rows, pfsp, best, collapse) {
       hPa.textContent = paused ? "sí" : "no";
       hPa.className = "v " + (paused ? "warn" : "good");
     }
-    const lastN = rows.slice(-40);
-    drawLines($("cHyper"), [
-      { ys: lastN.map(x => x.kl == null || !isFinite(x.kl) ? null : Math.min(x.kl * 10, 2.5)), color: "#6ea8fe" },
-      { ys: lastN.map(x => x.clip_frac), color: "#f5c542" },
-      { ys: lastN.map(x => x.lr == null ? null : x.lr * 1e4), color: "#3dd68c" },
-      { ys: lastN.map(x => x.entropy), color: "#b794f6" },
-    ], { ymin: 0 });
+  }
+
+  // Shaper preset pill
+  {
+    const sp = $("shaperPill");
+    if (sp) {
+      const name = r.shaper_preset || "—";
+      sp.textContent = "shaper " + name;
+      sp.className = "pill " + (name && name !== "—" ? "on" : "off");
+    }
   }
 
   buildAlerts(rows, pfsp, collapse);

@@ -78,7 +78,7 @@ check("A teacher beginner", fa[fa.index("--bc-teacher-bot") + 1] == "beginner")
 check("A 4 games paralelo", fa[fa.index("--bc-games") + 1] == "4")
 check("A eval alumno 4", fa[fa.index("--eval-games") + 1] == "4")
 check("A rush 8", fa[fa.index("--bc-rush") + 1] == "8")
-check("A teacher-mode rush", fa[fa.index("--bc-teacher-mode") + 1] == "rush")
+check("A teacher-mode expand", fa[fa.index("--bc-teacher-mode") + 1] == "expand")
 check("A win-cap 64000", fa[fa.index("--bc-win-cap") + 1] == "64000")
 check("A ep-cap 40", fa[fa.index("--bc-win-ep-cap") + 1] == "40")
 check("A prefer-ticks 20000", fa[fa.index("--bc-win-prefer-ticks") + 1] == "20000")
@@ -103,16 +103,16 @@ check("B sil beginner", "--sil" in fb and fb[fb.index("--bot-type") + 1] == "beg
 check("B bc mezclado no bc-only", "--bc" in fb and "--bc-only" not in fb)
 check("B teacher beginner", fb[fb.index("--bc-teacher-bot") + 1] == "beginner")
 check("B bc-games 2", fb[fb.index("--bc-games") + 1] == "2")
-check("B bc-warmup 40", fb[fb.index("--bc-warmup") + 1] == "40")
+check("B bc-warmup 30", fb[fb.index("--bc-warmup") + 1] == "30")
 check("B wins-only (no keep incomplete)", "--bc-keep-incomplete" not in fb)
-check("B lambda piso 0.10", fb[fb.index("--bc-lambda-end") + 1] == "0.10")
+check("B lambda piso 0.05", fb[fb.index("--bc-lambda-end") + 1] == "0.05")
 check("B lr 1e-5", fb[fb.index("--lr") + 1] == "1.0e-5")
 check("B adv-mode global", fb[fb.index("--adv-mode") + 1] == "global")
 check("B no-amp", "--no-amp" in fb and "--amp-init-scale" not in fb)
 check("B teacher macro 40", fb[fb.index("--bc-macro-ticks") + 1] == "40")
 check("B teacher max-steps 1800", fb[fb.index("--bc-max-steps") + 1] == "1800")
 check("B rush 8", fb[fb.index("--bc-rush") + 1] == "8")
-check("B teacher-mode rush", fb[fb.index("--bc-teacher-mode") + 1] == "rush")
+check("B teacher-mode expand", fb[fb.index("--bc-teacher-mode") + 1] == "expand")
 check("B ep-cap 40", fb[fb.index("--bc-win-ep-cap") + 1] == "40")
 cfg_b_start = dict(cfg)
 cfg_b_start["phase"] = "B"
@@ -130,14 +130,13 @@ cfg_s_flags["phase"] = "S"
 cfg_s_flags["phase_started_iter"] = 100
 cfg_s_flags["b_bc_start_iter"] = 20
 fs = phase_flags("S", cfg_s_flags)
-check("S pfsp+pfsp-rl", "--pfsp" in fs and "--pfsp-rl" in fs)
+check("S pfsp+mab", "--pfsp" in fs and "--mab" in fs)
 check("S bot-type beginner anchor", fs[fs.index("--bot-type") + 1] == "beginner")
-check("S pfsp-pool rl", fs[fs.index("--pfsp-pool") + 1] == "rl")
-check("S anchor_prob 0.25", fs[fs.index("--pfsp-anchor-prob") + 1] == "0.25")
-check("S teacher-mode rush not expand",
-      fs[fs.index("--bc-teacher-mode") + 1] == "rush")
-check("S lambda end floor 0.10", fs[fs.index("--bc-lambda-end") + 1] == "0.10")
-check("S lambda start at floor", fs[fs.index("--bc-lambda-start") + 1] == "0.10")
+check("S pfsp-pool beginner,easy", fs[fs.index("--pfsp-pool") + 1] == "beginner,easy")
+check("S teacher-mode expand",
+      fs[fs.index("--bc-teacher-mode") + 1] == "expand")
+check("S lambda end floor 0.05", fs[fs.index("--bc-lambda-end") + 1] == "0.05")
+check("S lambda start at floor", fs[fs.index("--bc-lambda-start") + 1] == "0.05")
 check("S bc-start pinned to B origin",
       fs[fs.index("--bc-start-iter") + 1] == "20")
 check("S sil + auto-hyper", "--sil" in fs and "--auto-hyper" in fs)
@@ -147,15 +146,11 @@ check("S no wipe/expand", "--bc-only" not in fs)
 fc_sft = phase_flags("C", cfg)
 check("A lr 1e-4", fa[fa.index("--lr") + 1] == "1.0e-4")
 check("A adv-mode episode", fa[fa.index("--adv-mode") + 1] == "episode")
-check("C SFT bc-only expand", "--bc-only" in fc_sft and "--bc" in fc_sft
-      and fc_sft[fc_sft.index("--bc-teacher-mode") + 1] == "expand")
-check("C SFT teacher-bot easy",
-      fc_sft[fc_sft.index("--bc-teacher-bot") + 1] == "easy")
-check("C SFT no sil / no mix",
-      "--sil" not in fc_sft and "--mix-from" not in fc_sft)
-check("C SFT lr 1e-4", fc_sft[fc_sft.index("--lr") + 1] == "1.0e-4")
-check("C SFT no-auto-hyper", "--no-auto-hyper" in fc_sft)
-check("C SFT no reset-opt in flags", "--reset-opt" not in fc_sft)
+check("C default is PPO not SFT", "--bc-only" not in fc_sft and "--sil" in fc_sft)
+check("C teacher-mode expand",
+      fc_sft[fc_sft.index("--bc-teacher-mode") + 1] == "expand")
+check("C MAB on", "--mab" in fc_sft and "--pfsp" in fc_sft)
+check("C no reset-opt in flags", "--reset-opt" not in fc_sft)
 cfg_ppo = dict(cfg)
 cfg_ppo["c_sft_done"] = True
 cfg_ppo["phase_started_iter"] = 60
@@ -165,31 +160,26 @@ check("C easy sin reset-opt", fc[fc.index("--bot-type") + 1] == "easy"
 check("C PPO lr 1e-4", fc[fc.index("--lr") + 1] == "1.0e-4")
 check("C adv-mode global", fc[fc.index("--adv-mode") + 1] == "global")
 check("C no-amp", "--no-amp" in fc and "--amp-init-scale" not in fc)
-check("C mix-from beginner", fc[fc.index("--mix-from") + 1] == "beginner")
-check("C mix-warmup 100", fc[fc.index("--mix-warmup") + 1] == "100")
-check("C mix-start 0.50", fc[fc.index("--mix-start") + 1] == "0.50")
+check("C no mix-from cliff", "--mix-from" not in fc)
 check("C sil + expand BC", "--sil" in fc and "--bc" in fc
       and "--bc-only" not in fc)
-check("C teacher-mode expand", fc[fc.index("--bc-teacher-mode") + 1] == "expand")
+check("C teacher-mode expand ppo", fc[fc.index("--bc-teacher-mode") + 1] == "expand")
 check("C teacher-bot easy", fc[fc.index("--bc-teacher-bot") + 1] == "easy")
 check("C ep-cap 40", fc[fc.index("--bc-win-ep-cap") + 1] == "40")
-check("C PPO bc-start = phase_started",
-      fc[fc.index("--bc-start-iter") + 1] == "60")
-check("C PPO lambda-start 0.50",
-      fc[fc.index("--bc-lambda-start") + 1] == "0.50")
-check("C PPO lambda-end 0.20",
-      fc[fc.index("--bc-lambda-end") + 1] == "0.20")
+check("C PPO lambda floor 0.05",
+      fc[fc.index("--bc-lambda-start") + 1] == "0.05"
+      and fc[fc.index("--bc-lambda-end") + 1] == "0.05")
 fd = phase_flags("D", cfg)
 check("D bot medium", fd[fd.index("--bot-type") + 1] == "medium")
-check("D mix-from easy", fd[fd.index("--mix-from") + 1] == "easy")
+check("D MAB", "--mab" in fd)
 check("D expand BC", "--bc" in fd and fd[fd.index("--bc-teacher-mode") + 1] == "expand")
 fe = phase_flags("E", cfg)
 check("E bot hard", fe[fe.index("--bot-type") + 1] == "hard")
-check("E mix-from medium", fe[fe.index("--mix-from") + 1] == "medium")
+check("E pfsp-rl league", "--pfsp-rl" in fe)
 check("E expand BC", "--bc" in fe and fe[fe.index("--bc-teacher-mode") + 1] == "expand")
-check("teacher_mode A/B/S rush CDE expand",
-      teacher_mode_for_phase("B") == "rush"
-      and teacher_mode_for_phase("S") == "rush"
+check("teacher_mode always expand",
+      teacher_mode_for_phase("B") == "expand"
+      and teacher_mode_for_phase("S") == "expand"
       and teacher_mode_for_phase("C") == "expand")
 cfg["c_reset_opt_done"] = True
 cfg["c_sft_done"] = True
@@ -200,12 +190,11 @@ cfg_c_start["c_sft_done"] = True
 cfg_c_start["phase_started_iter"] = 132
 cfg_c_start["b_bc_start_iter"] = 36
 fc132 = phase_flags("C", cfg_c_start)
-check("C mix-start-iter = phase_started+1",
-      fc132[fc132.index("--mix-start-iter") + 1] == "133")
-check("C PPO bc-start = C origin not B",
-      fc132[fc132.index("--bc-start-iter") + 1] == "132")
-check("C bc-lambda-start 0.50",
-      abs(float(fc132[fc132.index("--bc-lambda-start") + 1]) - 0.50) < 1e-9)
+check("C no mix-start-iter", "--mix-start-iter" not in fc132)
+check("C PPO bc-start pinned to B origin",
+      fc132[fc132.index("--bc-start-iter") + 1] == "36")
+check("C bc-lambda-start floor 0.05",
+      abs(float(fc132[fc132.index("--bc-lambda-start") + 1]) - 0.05) < 1e-9)
 cfg_c_nofloor = dict(cfg)
 cfg_c_nofloor["c_sft_done"] = True
 cfg_c_nofloor["phase_started_iter"] = 132
@@ -218,7 +207,7 @@ _warm = int(fc_nf[fc_nf.index("--bc-warmup") + 1])
 _ls = float(fc_nf[fc_nf.index("--bc-lambda-start") + 1])
 _le = float(fc_nf[fc_nf.index("--bc-lambda-end") + 1])
 _lmb = lambda_bc_at(_it, _start, _warm, start=_ls, end=_le)
-check("C PPO entry λ_bc ~0.50 not floor/1.0", 0.40 <= _lmb <= 0.55)
+check("C PPO entry λ_bc at residual floor", abs(_lmb - 0.05) < 1e-6)
 
 cmd = build_train_argv(base, "A", new_curriculum())
 check("argv A last bot-type beginner",
@@ -370,8 +359,8 @@ check("argv B last teacher beginner",
       == "beginner")
 check("argv B sin pfsp", "--pfsp" not in cmd_b)
 cmd_s = build_train_argv(base, "S", cfg_s_flags)
-check("argv S tiene pfsp+pfsp-rl",
-      "--pfsp" in cmd_s and "--pfsp-rl" in cmd_s)
+check("argv S tiene pfsp+mab",
+      "--pfsp" in cmd_s and "--mab" in cmd_s)
 check("argv S last bot beginner",
       cmd_s[[i for i, a in enumerate(cmd_s) if a == "--bot-type"][-1] + 1]
       == "beginner")
@@ -439,16 +428,14 @@ check("finish_c_sft marks done + pins origin",
       and int(cfg_sft["phase_started_iter"]) == 75
       and cfg_sft["c_reset_opt_done"] is False)
 check("c_sft_active False after finish", c_sft_active(cfg_sft) is False)
-check("C SFT extras reset-opt",
-      "--reset-opt" in c_launch_extras({"phase": "C", "c_sft_done": False}))
+check("C SFT extras never reset-opt",
+      "--reset-opt" not in c_launch_extras({"phase": "C", "c_sft_done": False}))
 ex_ppo = c_launch_extras({
     "phase": "C", "c_sft_done": True, "c_reset_opt_done": False,
     "c_hyper_pause_iters": 25,
 })
-check("C PPO extras reset + pause 25",
-      "--reset-opt" in ex_ppo
-      and "--hyper-pause-iters" in ex_ppo
-      and ex_ppo[ex_ppo.index("--hyper-pause-iters") + 1] == "25")
+check("C PPO extras empty (no Adam reset)",
+      "--reset-opt" not in ex_ppo)
 check("C extras empty after reset consumed",
       c_launch_extras({"phase": "C", "c_sft_done": True,
                        "c_reset_opt_done": True}) == [])
@@ -764,7 +751,7 @@ from unittest import mock
 td = Path(tempfile.mkdtemp())
 (td / "teacher_wins").mkdir()
 man = {
-    "schema": "eco_and_combat_scout_v1",
+    "schema": "eco_and_combat_expand_v3",
     "episodes": [{"file": "ep_0000.pt"} for _ in range(40)],
 }
 (td / "teacher_wins" / "manifest.json").write_text(
@@ -830,13 +817,23 @@ try:
 
     at._replay_tapes = False
     at._collect_only = False
-    check("arm_replay B with v4 tapes",
+    check("arm_replay B with expand tapes",
           at.arm_replay_for_phase("B") is True)
     check("arm_replay B armed _replay_tapes", at._replay_tapes is True)
     at._replay_tapes = False
+    (td / "teacher_wins" / "manifest.json").write_text(
+        json.dumps({
+            "schema": "eco_and_combat_scout_v1",
+            "episodes": [{"file": "ep_0000.pt"} for _ in range(40)],
+        }), encoding="utf-8")
     check("arm_replay C with rush tapes False",
           at.arm_replay_for_phase("C") is False)
     check("arm_replay C did not arm", at._replay_tapes is False)
+    (td / "teacher_wins" / "manifest.json").write_text(
+        json.dumps({
+            "schema": "eco_and_combat_expand_v3",
+            "episodes": [{"file": "ep_0000.pt"} for _ in range(40)],
+        }), encoding="utf-8")
 
     at._onboard = {
         "phase": "A", "sft_iters": 20, "promote_wr20": 0.5,
@@ -856,6 +853,11 @@ try:
     check("try_promote A->B arms replay", at._replay_tapes is True)
 
     # Phase C resume with RUSH tapes: schema mismatch, re-collect.
+    (td / "teacher_wins" / "manifest.json").write_text(
+        json.dumps({
+            "schema": "eco_and_combat_scout_v1",
+            "episodes": [{"file": "ep_0000.pt"} for _ in range(40)],
+        }), encoding="utf-8")
     (td / "curriculum.json").write_text(
         json.dumps({
             "phase": "C", "sft_iters": 20, "promote_wr20": 0.5,

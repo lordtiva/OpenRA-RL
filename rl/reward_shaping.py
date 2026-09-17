@@ -15,7 +15,39 @@ Presets disponibles (elegir UNO por run: un cambio de regimen por vez):
 import math
 
 
-PRESETS = ("legacy", "eradicate", "eradicate_v2", "eradicate_v3", "eradicate_v4")
+PRESETS = ("legacy", "eradicate", "eradicate_v2", "eradicate_v3",
+           "eradicate_v4", "eradicate_v5")
+
+# Production buildings: razing these hurts the rival's tech ladder.
+_PROD_BUILDINGS = frozenset({
+    "fact", "afac", "proc", "weap", "tent", "barr", "kenn",
+    "hpad", "afld", "syrd", "dome", "atek", "stek",
+})
+_DENSE_PRESETS = ("eradicate_v2", "eradicate_v3", "eradicate_v4", "eradicate_v5")
+_ECON_PRESETS = ("eradicate_v3", "eradicate_v4", "eradicate_v5")
+
+
+def tech_tier_level(obs) -> int:
+    """0 ConYard, 1 barracks+proc, 2 weap, 3 dome/atek/stek."""
+    btypes = {str(getattr(b, "type", "") or "").lower()
+              for b in (getattr(obs, "buildings", None) or [])}
+    if "atek" in btypes or "stek" in btypes or "dome" in btypes:
+        return 3
+    if "weap" in btypes:
+        return 2
+    has_proc = "proc" in btypes
+    has_barr = "barr" in btypes or "tent" in btypes
+    if has_proc and has_barr:
+        return 1
+    return 0
+
+
+def _n_enemy_prod(obs) -> int:
+    n = 0
+    for b in getattr(obs, "visible_enemy_buildings", None) or []:
+        if str(getattr(b, "type", "") or "").lower() in _PROD_BUILDINGS:
+            n += 1
+    return n
 
 
 def _preset_kwargs(preset: str) -> dict:
@@ -112,6 +144,30 @@ def _preset_kwargs(preset: str) -> dict:
                         # (no auto-support). Escala chica vs combate/raze.
                         w_force_edge=0.5,
                     )
+    if preset == "eradicate_v5":
+        # Macro-first: v4 + symmetric combat (no normalized exchange) + PBRS tech.
+        # Suicide e1 waves are no longer +EV; weap/dome get a potential bonus.
+        return dict(
+            w_kills=0.15, w_deaths=0.15, combat_scale=1000.0,
+            w_assets=0.0, w_building=0.0, w_new_type=0.0,
+            w_refinery=1.0, w_harvester=0.25, harvester_cap=4,
+            w_raze=2.0, raze_cap=0, raze_value_scale=2000.0,
+            w_defense_loss=0.25, defense_value_scale=2000.0, w_defense_first=3.0,
+            w_hold_zero=0.06, w_spread=0.002, spread_scale=1000.0, w_produce=0.0,
+            w_cancel=0.15, w_refinery_early=2.0, refinery_target_tick=6000,
+            w_first_ore=1.5,
+            w_garrison=0.005, w_naked_base=0.005,
+            w_mining_rate=0.04, mining_rate_scale=1000.0, w_harvester_idle=0.01,
+            w_margin=1.0, margin_scale=3000.0, margin_on_truncate=False,
+            w_win=8.0, w_lose=2.5, w_timeout=6.0,
+            w_no_econ_lose=4.0,
+            w_force_edge=0.5,
+            # Linear symmetric combat (w_kills=w_deaths) keeps $ magnitude.
+            # Normalized exchange maps any loss to ±w_exchange (e1 == 2tnk).
+            w_exchange=0.0, exchange_eps=1.0,
+            w_tier=0.5, tier_gamma=0.99,
+            w_raze_prod=2.0,
+        )
     raise ValueError(f"preset desconocido: {preset!r} (validos: {PRESETS})")
 
 
@@ -160,9 +216,16 @@ class ShapedReward:
         self.w_naked_base = cfg.get("w_naked_base", 0.0)
         self.w_no_econ_lose = cfg.get("w_no_econ_lose", 0.0)
         self.w_force_edge = cfg.get("w_force_edge", 0.0)
+        self.w_exchange = cfg.get("w_exchange", 0.0)
+        self.exchange_eps = cfg.get("exchange_eps", 1.0)
+        self.w_tier = cfg.get("w_tier", 0.0)
+        self.tier_gamma = cfg.get("tier_gamma", 0.99)
+        self.w_raze_prod = cfg.get("w_raze_prod", 1.0)
         self._first_ore_paid = False
-        # en v2/v3/v4 el raze se paga por VALOR del global_summary (no counting)
-        self._raze_by_value = preset in ("eradicate_v2", "eradicate_v3", "eradicate_v4")
+        self._prev_tier = 0
+        self._prev_ene_prod = 0
+        # en v2+ el raze se paga por VALOR del global_summary (no counting)
+        self._raze_by_value = preset in _DENSE_PRESETS
         # Compat: tests/docs viejos leen w_combat como el peso simetrico.
         self.w_combat = self.w_kills
 
@@ -194,6 +257,8 @@ class ShapedReward:
             "garrison": 0.0, "early_refinery": 0.0, "first_ore": 0.0,
             "no_econ_lose": 0.0,
             "force_edge": 0.0,
+            "exchange": 0.0,
+            "tier": 0.0,
         }
 
     def reset(self, obs):
@@ -222,6 +287,8 @@ class ShapedReward:
         self._defense_first_paid = False
         self._prev_earned = None
         self._first_ore_paid = False
+        self._prev_tier = tech_tier_level(obs)
+        self._prev_ene_prod = _n_enemy_prod(obs)
 
     def step(self, obs, done: bool, gs=None, action_type=None, closing=False) -> float:
         """Reward conformado por el delta de estado desde el paso anterior.
@@ -239,7 +306,12 @@ class ShapedReward:
         d_assets = mil.assets_value - self._prev_assets
         scale = self.combat_scale if self.combat_scale else 1.0
 
-        r_combat = (self.w_kills * d_kills - self.w_deaths * d_deaths) / scale
+        if self.w_exchange > 0.0 and (d_kills != 0 or d_deaths != 0):
+            den = max(abs(d_kills) + abs(d_deaths), float(self.exchange_eps))
+            r_combat = self.w_exchange * (d_kills - d_deaths) / den
+            self.last_components["exchange"] += r_combat
+        else:
+            r_combat = (self.w_kills * d_kills - self.w_deaths * d_deaths) / scale
         r_assets = self.w_assets * d_assets / 100.0
         n_new_bldgs = max(0, len(obs.buildings) - self._prev_n_buildings)
         r_building = self.w_building * n_new_bldgs
@@ -255,7 +327,7 @@ class ShapedReward:
         # Minería base: solo para presets anteriores a v3.
         # v3 y v4 delegan el ciclo económico completo a _v3_econ() (incluye w_refinery_early).
         r_mining = 0.0
-        if self.preset not in ("eradicate_v3", "eradicate_v4"):
+        if self.preset not in _ECON_PRESETS:
             n_harv = getattr(obs.economy, "harvester_count", 0)
             if not self._refinery_paid and "proc" in {b.type for b in obs.buildings}:
                 self._refinery_paid = True
@@ -271,12 +343,45 @@ class ShapedReward:
 
         # gradiente denso del espectador (v2/v3/v4). Reemplaza al raze counting.
         r_v2 = 0.0
+        raze_dense_this = 0.0
         if self._raze_by_value:
+            raze_before = float(self.last_components.get("raze", 0.0) or 0.0)
             r_v2 = self._v2_dense(gs)
-            if self.preset in ("eradicate_v3", "eradicate_v4"):
+            raze_dense_this = (
+                float(self.last_components.get("raze", 0.0) or 0.0) - raze_before)
+            if self.preset in _ECON_PRESETS:
                 r_v2 += self._v3_econ(obs, gs, action_type, closing)
 
         r += r_v2
+
+        ene_prod = _n_enemy_prod(obs)
+        killed_diff = int(getattr(mil, "buildings_killed", 0) or 0) - int(
+            self._prev_buildings_killed or 0)
+        # Gate prod-raze on THIS step only. last_components["raze"] is episode-
+        # cumulative and _v2_dense already updated _prev_ene_bv, so neither is
+        # a safe "value fell" signal (fog leave would phantom-pay).
+        raze_this_step = float(r_raze) + max(0.0, float(raze_dense_this))
+        if (self.w_raze_prod and self.w_raze_prod != 1.0
+                and ene_prod < self._prev_ene_prod
+                and (killed_diff > 0 or raze_this_step > 0.0)):
+            extra = ((self._prev_ene_prod - ene_prod)
+                     * 0.25 * float(self.w_raze_prod))
+            r += extra
+            self.last_components["raze"] += extra
+        self._prev_ene_prod = ene_prod
+
+        r_tier = 0.0
+        if self.w_tier:
+            tier = tech_tier_level(obs)
+            # PBRS with Φ=tier, γ=tier_gamma. Only the discrete jump is
+            # paid (stay-put γΦ-Φ over 500 macros would dominate combat).
+            if tier != self._prev_tier:
+                r_tier = self.w_tier * (
+                    float(self.tier_gamma) * float(tier)
+                    - float(self._prev_tier))
+            self._prev_tier = tier
+            r += r_tier
+            self.last_components["tier"] += r_tier
 
         r_force = self._force_edge(obs)
         r += r_force

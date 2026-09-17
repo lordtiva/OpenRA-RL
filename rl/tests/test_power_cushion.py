@@ -85,10 +85,10 @@ def test_spendable_includes_silo_ore():
 
 
 def test_scalar_power_balance_past_2x_clamp():
-    assert SCALAR_DIM == 34
+    assert SCALAR_DIM == 41
     obs = _obs(provided=100, drained=570)
     sc = scalar_features(obs)
-    assert sc.shape == (34,)
+    assert sc.shape == (41,)
     # index 3 saturates at 2x → 1.0; signed col still at floor -1
     assert float(sc[3]) == 1.0
     assert float(sc[4]) == 1.0
@@ -127,7 +127,8 @@ def test_remap_train_e1_to_build_power():
 
 
 def test_surplus_power_does_not_mask_train():
-    obs = _obs(provided=200, drained=50, cash=5000, ore=0)
+    obs = _obs(provided=200, drained=50, cash=5000, ore=0,
+               bldgs=("fact", "proc", "powr", "tent", "weap"))
     assert power_in_deficit(obs) is False
     aidx = _aidx(obs)
     assert bool(aidx.type_mask[TYPE_TO_IDX["train"]]) is True
@@ -154,9 +155,9 @@ def test_net2net_pad_33_loads():
     adapted = adapt_scalar_state_dict(net, raw)
     net2 = AlphaLiteNet()
     net2.load_state_dict(adapted, strict=False)
-    assert net2.scalar_mlp[0].weight.shape[1] == 34
+    assert net2.scalar_mlp[0].weight.shape[1] == 41
     assert torch.allclose(net2.scalar_mlp[0].weight[:, 33:],
-                          torch.zeros(net2.scalar_mlp[0].weight.size(0), 1))
+                          torch.zeros(net2.scalar_mlp[0].weight.size(0), 8))
 
 
 def test_adapted_shapes_changed_scalar_33_to_34():
@@ -173,7 +174,7 @@ def test_adapted_shapes_changed_scalar_33_to_34():
     assert chg is not None
     assert chg[0] == key
     assert chg[1] == (256, 33)
-    assert chg[2] == (256, 34)
+    assert chg[2] == (256, 41)
     # identical shapes → False
     same = {k: v.clone() for k, v in net.state_dict().items()}
     assert _adapted_shapes_changed(same, same) is False
@@ -211,4 +212,4 @@ def test_load_checkpoint_adam_reset_on_scalar_pad(tmp_path):
     # With do_reset=True we never call opt.load_state_dict, so state stays
     # at fresh init (empty state dict).
     assert after.get("state", {}) == {} or set(after.get("state", {}).keys()) == before_state_keys
-    assert net2.scalar_mlp[0].weight.shape[1] == 34
+    assert net2.scalar_mlp[0].weight.shape[1] == 41

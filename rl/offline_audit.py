@@ -937,7 +937,7 @@ def check_policy_forward(
                 hdim = net.core.weight_hh.shape[1]
                 h = torch.zeros(len(chunk), hdim, device=device)
 
-            lp, ent, val = net.evaluate_actions(batch, h, actions)
+            lp, ent, val, *_ = net.evaluate_actions(batch, h, actions)
             if not torch.isfinite(lp).all() or not torch.isfinite(ent).all() \
                     or not torch.isfinite(val).all():
                 if (torch.isinf(lp).any() or torch.isinf(ent).any()

@@ -155,6 +155,13 @@ IDENTITY_ITEMS = frozenset({
     "ctnk", "stnk", "mh60",
     # Storage, not a proc substitute. cheapest_of(refinery) was always silo.
     "silo",
+    # Tech units: do not fold 2tnk behind 1tnk or e3 behind a role bucket.
+    "1tnk", "2tnk", "e3", "e2", "v2rl", "arty",
+})
+
+# Items the item-head must be able to sample (tech ladder). Subset of IDENTITY.
+TECH_ITEMS = frozenset({
+    "1tnk", "2tnk", "e3", "e2", "v2rl", "arty",
 })
 
 
@@ -205,7 +212,8 @@ def cheapest_of(items) -> str:
     """Concreto más barato del rol (pbox antes que gun/agun; ftur antes que tsla).
 
     El adapter decía 'más barato primero' pero ordenaba alfabético (agun < gun
-    < pbox). Desempate alfabético para estabilidad.
+    < pbox). Desempate alfabético para estabilidad. No usar para TECH_ITEMS:
+    esos van por IDENTITY_ITEMS y la cabeza de ítems los muestrea.
     """
     its = [str(x).lower() for x in (items or []) if x]
     if not its:
@@ -217,6 +225,23 @@ def cheapest_of(items) -> str:
         if not its:
             return "proc"
     return min(its, key=lambda it: (item_cost(it), it))
+
+
+def sample_of(items, rng=None) -> str:
+    """Uniform pick among concretes of a role (tech exploration).
+
+    silo never wins a shared bucket with proc. Empty → "".
+    """
+    import random as _random
+    its = [str(x).lower() for x in (items or []) if x]
+    if not its:
+        return ""
+    if "proc" in its:
+        its = [x for x in its if x != "silo"]
+        if not its:
+            return "proc"
+    pick = rng.choice(its) if rng is not None else _random.choice(its)
+    return str(pick)
 
 
 def concretos_de(rol: str) -> list[str]:

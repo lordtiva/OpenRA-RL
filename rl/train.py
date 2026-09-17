@@ -58,8 +58,8 @@ from rl.live_lobby import apply_episode_lobby
 
 
 def _teacher_mode(args) -> str:
-    m = str(getattr(args, "bc_teacher_mode", "") or "rush").lower().strip()
-    return m if m in ("rush", "expand") else "rush"
+    m = str(getattr(args, "bc_teacher_mode", "") or "expand").lower().strip()
+    return m if m in ("rush", "expand") else "expand"
 
 
 def pick_device(requested: str) -> str:
@@ -574,13 +574,25 @@ async def amain(args):
             pool=parse_pool(getattr(args, "pfsp_pool", None)),
             anchor_prob=float(getattr(args, "pfsp_anchor_prob", 0.5) or 0.5),
             prev20_every=int(getattr(args, "pfsp_prev20_every", 20) or 20),
+            mab=bool(getattr(args, "mab", False)),
+            mab_tau=float(getattr(args, "mab_tau", 0.25) or 0.25),
+            mab_floor=float(getattr(args, "mab_floor", 0.05) or 0.05),
+            hist_cap=int(getattr(args, "pfsp_hist_cap", 15) or 0),
         )
-        print(
-            f"PFSP bots ON: {int(pfsp.anchor_prob*100)}% vs {pfsp.anchor}, "
-            f"else challengers={pfsp.challengers} (priority=who beats you). "
-            f"North-star wr / best.pt solo cuentan vs {pfsp.anchor}.",
-            flush=True,
-        )
+        if pfsp.mab:
+            print(
+                f"MAB bots ON: softmax (1-WR)/τ={pfsp.mab_tau} floor="
+                f"{pfsp.mab_floor} pool={pfsp.pool} anchor={pfsp.anchor}. "
+                f"North-star wr / best.pt solo cuentan vs {pfsp.anchor}.",
+                flush=True,
+            )
+        else:
+            print(
+                f"PFSP bots ON: {int(pfsp.anchor_prob*100)}% vs {pfsp.anchor}, "
+                f"else challengers={pfsp.challengers} (priority=who beats you). "
+                f"North-star wr / best.pt solo cuentan vs {pfsp.anchor}.",
+                flush=True,
+            )
         if getattr(args, "pfsp_rl", False):
             if "rl" not in pfsp.pool:
                 pfsp.pool.append("rl")
@@ -1307,6 +1319,8 @@ async def amain(args):
                             net, trainer.opt, it, extra=ckpt_blob)
         if pfsp is not None and pfsp.maybe_rotate_prev20(it, ckpt_path):
             print(f"  [pfsp] prev20.pt <- latest @ iter {it}", flush=True)
+        if pfsp is not None and pfsp.maybe_rotate_hist(it, ckpt_path):
+            print(f"  [pfsp] hist ring <- latest @ iter {it}", flush=True)
 
         if args.metrics:
             os.makedirs(os.path.dirname(args.metrics) or ".", exist_ok=True)
@@ -1446,6 +1460,7 @@ async def amain(args):
                          / len(anchor_outs))
                         if anchor_outs else 0.0, 3),
                     "mean_episode_reward": round(mean_ep_reward, 4),
+                    "shaper_preset": getattr(args, "shaper_preset", None),
                     "reward_components": comp_means,
                     "sim_ticks_per_s": round(sim_tps),
                     "wins": wins,
@@ -1490,11 +1505,11 @@ async def amain(args):
               f"clip {stats.get('clip_frac', 0.0):.3f} "
               f"gn {stats.get('grad_norm', 0.0):.2f} | "
               f"winrate {wins}/{total} | "
-              f"c[cbt {comp_means.get('combat', 0):+.2f} "
-              f"ast {comp_means.get('assets', 0):+.2f} "
-              f"bld {comp_means.get('buildings', 0):+.2f} "
-              f"typ {comp_means.get('new_types', 0):+.2f} "
+              f"c[win {comp_means.get('win', 0):+.2f} "
+              f"raz {comp_means.get('raze', 0):+.2f} "
               f"min {comp_means.get('mining', 0):+.2f} "
+              f"xch {comp_means.get('exchange', 0):+.2f} "
+              f"tier {comp_means.get('tier', 0):+.2f} "
               f"mrg {comp_means.get('margin', 0):+.2f}] | "
               + (f"eco[cosecha nos {race_mean.get('own_harvest_per_1k', 0):+.0f} vs "
                  f"rival {race_mean.get('enemy_harvest_per_1k', 0):+.0f} | "
@@ -1623,6 +1638,15 @@ def main():
                     help="Incluye oponente RL (bot_type=rl) en PFSP; requiere daemon dual.")
     ap.add_argument("--pfsp-prev20-every", type=int, default=20,
                     help="Cada N iters copia latest.pt -> prev20.pt.")
+    ap.add_argument("--mab", action="store_true",
+                    help="Softmax bandit over --pfsp-pool instead of 50/50 "
+                         "anchor coin. P(bot) ∝ exp((1-WR)/τ).")
+    ap.add_argument("--mab-tau", type=float, default=0.25,
+                    help="MAB temperature (smaller → greedier on hard bots).")
+    ap.add_argument("--mab-floor", type=float, default=0.05,
+                    help="Minimum P(bot) so crushed opponents stay in mix.")
+    ap.add_argument("--pfsp-hist-cap", type=int, default=15,
+                    help="Frozen self-play snapshots (hist_XX.pt). 0=off.")
     ap.add_argument("--mix-from", default=None,
                     choices=("beginner", "easy", "medium", "hard", "brutal",
                              "dummy"),
@@ -1652,10 +1676,9 @@ def main():
                          "FastAdvance must fail ~100s; episode length is many "
                          "advances (no max_steps*3 scaling).")
     ap.add_argument("--shaper-preset", choices=SHAPER_PRESETS,
-                    default="eradicate",
-                    help="Régimen de reward: 'eradicate' (combate asimétrico + "
-                         "raze, objetivo Fase 2) o 'legacy' (SimCity histórico). "
-                         "Un cambio de régimen por run.")
+                    default="eradicate_v5",
+                    help="Régimen de reward (default eradicate_v5 = macro-first: "
+                         "cost-exchange + PBRS tech tier). legacy = SimCity.")
     ap.add_argument("--auto-support", action="store_true",
                     help="Pilar B: autonomía de soporte (repair hp<35%% + power_down) — "
                          "0 decisiones, gratis para PPO. Activo en Run3/v4.")
@@ -1701,10 +1724,10 @@ def main():
     ap.add_argument("--idle-truncate-idle-ticks", type=int, default=5000,
                     help="Consecutive ticks with no combat and no income "
                          "before idle-truncate (0=off).")
-    ap.add_argument("--bc-teacher-mode", default="rush",
+    ap.add_argument("--bc-teacher-mode", default="expand",
                     choices=("rush", "expand"),
-                    help="ScriptedTeacher: rush (A/B rifle) o expand "
-                         "(C/D/E weap+1tnk+e3).")
+                    help="ScriptedTeacher: expand (macro-first, default) o "
+                         "rush (rifle ablation).")
     ap.add_argument("--eval-games", type=int, default=0,
                     help="En --bc-only: partidas del ALUMNO por iter (wr, sin PPO). "
                          "0 = no mide. Fase A usa 4.")

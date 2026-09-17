@@ -208,10 +208,11 @@ TRAIN_ARGS = [
     "--clip-eps", "0.15",
     "--max-grad-norm", "1.0",
     "--burn-in", "8",
-    "--xf-topk", "16",
-    "--qsa-topk", "8",
+    # Dense XF/QSA: custom top-k materializes N×N anyway and spills on 8GB.
+    "--xf-topk", "0",
+    "--qsa-topk", "0",
     "--qsa-block", "8",
-    "--batch-size", "128",
+    "--batch-size", "64",
     "--scenario", "a_short",
     "--spawn", "random",
     "--player-faction", "RandomAllies",
@@ -221,7 +222,7 @@ TRAIN_ARGS = [
     "--pfsp-rl",
     "--pfsp-pool", "rl",
     "--pfsp-anchor-prob", "0.5",
-    "--shaper-preset", "eradicate_v4",
+    "--shaper-preset", "eradicate_v5",
     "--auto-support",
     "--no-war-nudge",
     # Scratch / Capa 1: BC activo las primeras --bc-warmup iters (lambda 1->0),
@@ -802,25 +803,15 @@ def try_promote(last_iter: int) -> str | None:
         # First C launch passes --reset-opt via promote relaunch; mark after
         # launch in _after_onboard_launch. Do not pre-set True here for C.
         if nxt == "C":
-            # Opcion 1 (sin C-SFT): el SFT bc-only vs easy puro es unwinnable
-            # (expand 0/4) y flipea por conteo, no por wins -> 15 iters muertos.
-            # C entra directo a PPO+mix, el regimen que dio wins (mix 67%).
+            # Macro-first: A/B already used expand teacher. Keep elite SIL
+            # and teacher_wins — no wipe, no Adam reset.
             _onboard["c_sft_done"] = True
-            _onboard["c_reset_opt_done"] = False
-            if ob.wipe_elite(CKPT_DIR):
-                log("  wiped elite.pt (rifle SIL must not clone into C)")
+            _onboard["c_reset_opt_done"] = True
         else:
             _onboard["c_reset_opt_done"] = True
             _onboard["c_sft_done"] = True
-        # Rifle/S tapes must not clone into expand BC. Keep expand wins
-        # already collected (collect-only before re-entry).
-        tw = CKPT_DIR / "teacher_wins"
-        if ob.expand_tapes_ready(CKPT_DIR):
-            if arm_replay_for_phase(nxt):
-                log("  keeping teacher_wins/ (expand schema already ready)")
-        elif tw.is_dir():
-            shutil.rmtree(tw, ignore_errors=True)
-            log(f"  wiped teacher_wins/ (schema {old} → expand {nxt})")
+        if arm_replay_for_phase(nxt):
+            log("  keeping teacher_wins/ (expand schema is cumulative)")
     if nxt in notes:
         ob.append_era_reset(METRICS, notes[nxt][0], notes[nxt][1])
     ob.save_curriculum(CURRICULUM, _onboard)
@@ -879,15 +870,8 @@ def _history_promote_side_effects(earned: list[str], last_iter: int) -> None:
             snap = ob.snapshot_phase_best(CKPT_DIR, old)
             if snap:
                 log(f"onboard snapshot {snap.name} (best {old})")
-            if nxt == "C" and ob.wipe_elite(CKPT_DIR):
-                log("  wiped elite.pt (history promote -> C)")
-            tw = CKPT_DIR / "teacher_wins"
-            if ob.expand_tapes_ready(CKPT_DIR):
-                if arm_replay_for_phase(nxt):
-                    log("  keeping teacher_wins/ (history expand tapes)")
-            elif tw.is_dir():
-                shutil.rmtree(tw, ignore_errors=True)
-                log(f"  wiped teacher_wins/ (history promote -> {nxt})")
+            if arm_replay_for_phase(nxt):
+                log("  keeping teacher_wins/ (history expand tapes)")
         if nxt in notes:
             ob.append_era_reset(METRICS, notes[nxt][0], notes[nxt][1])
 

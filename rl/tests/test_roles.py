@@ -76,6 +76,12 @@ check("silo es IDENTITY_ITEMS (no se pliega a refinery)",
       "silo" in R.IDENTITY_ITEMS)
 check("silo sigue siendo rol refinery en entidad",
       R.role_of("silo") == R.ROLE_REFINERY)
+check("1tnk/2tnk/e3 son IDENTITY (no cheapest_of)",
+      "1tnk" in R.IDENTITY_ITEMS and "2tnk" in R.IDENTITY_ITEMS
+      and "e3" in R.IDENTITY_ITEMS)
+check("sample_of no colapsa a cheapest",
+      R.sample_of(["1tnk", "2tnk"], rng=__import__("random").Random(0))
+      in ("1tnk", "2tnk"))
 check("ftur más barato que tsla",
       R.cheapest_of(["tsla", "ftur", "sam"]) == "ftur")
 check("e7 Tanya es specialist (no misc)", R.role_of("e7") == R.ROLE_COMMANDO_SPY)

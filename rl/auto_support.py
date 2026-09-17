@@ -271,6 +271,12 @@ SELL_HP = 0.12
 _BARRACKS_ITEMS = ("tent", "barr")
 TENT_COST = 500
 HARV_COST = 1100
+WEAP_COST = 2000
+DOME_COST = 1800
+# Assist weap/dome once the infantry opening is standing (doc 1.md).
+SUPPORT_WEAP_CASH = 2500
+_WEAP_ITEMS = ("weap",)
+_DOME_ITEMS = ("dome",)
 # Easy InitialHarvesters: 2. We only replaced at 0 → 1 truck vs their 2.
 MIN_HARVESTERS = 2
 # Apertura estándar: 2 refinerías (2 muelles de descarga + 2 cosechadoras).
@@ -1061,6 +1067,20 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None, war_n
             str(getattr(p, "item", "")).lower() in _BARRACKS_ITEMS for p in prod)
         barr_item = next((n for n in _BARRACKS_ITEMS if n in avail), None)
 
+        weap_ready = next(
+            (str(getattr(p, "item", "")).lower()
+             for p in prod
+             if str(getattr(p, "item", "")).lower() in _WEAP_ITEMS
+             and float(getattr(p, "progress", 0) or 0) >= 1.0),
+            None,
+        )
+        dome_ready = next(
+            (str(getattr(p, "item", "")).lower()
+             for p in prod
+             if str(getattr(p, "item", "")).lower() in _DOME_ITEMS
+             and float(getattr(p, "progress", 0) or 0) >= 1.0),
+            None,
+        )
         if proc_ready:
             ax, ay = _place_near_base(obs)
             out.append(CommandModel(
@@ -1070,6 +1090,16 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None, war_n
             ax, ay = _place_near_base(obs)
             out.append(CommandModel(
                 action=ActionType.PLACE_BUILDING, item_type=barr_ready,
+                target_x=ax, target_y=ay))
+        elif weap_ready:
+            ax, ay = _place_near_base(obs)
+            out.append(CommandModel(
+                action=ActionType.PLACE_BUILDING, item_type=weap_ready,
+                target_x=ax, target_y=ay))
+        elif dome_ready:
+            ax, ay = _place_near_base(obs)
+            out.append(CommandModel(
+                action=ActionType.PLACE_BUILDING, item_type=dome_ready,
                 target_x=ax, target_y=ay))
 
         # Cola de vehículos / entrenamiento: reponer cosechadora si hay fábrica de armas
@@ -1091,6 +1121,52 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None, war_n
               and cash >= 2000):
             # Fast 2-proc: 2da refinería = 2da cosechadora gratis + doble muelle
             out.append(CommandModel(action=ActionType.BUILD, item_type="proc"))
+        else:
+            # After barracks + 2 procs: assist weap then radar (doc 1.md).
+            # Policy still decides BUILD; we only PLACE a ready weap/dome
+            # and queue weap when cash >= 2500 so the opening is not stuck
+            # on infantry forever.
+            has_weap = any(
+                str(getattr(b, "type", "")).lower() == "weap" for b in blds)
+            has_dome = any(
+                str(getattr(b, "type", "")).lower() == "dome" for b in blds)
+            weap_ready = next(
+                (str(getattr(p, "item", "")).lower()
+                 for p in prod
+                 if str(getattr(p, "item", "")).lower() in _WEAP_ITEMS
+                 and float(getattr(p, "progress", 0) or 0) >= 1.0),
+                None,
+            )
+            dome_ready = next(
+                (str(getattr(p, "item", "")).lower()
+                 for p in prod
+                 if str(getattr(p, "item", "")).lower() in _DOME_ITEMS
+                 and float(getattr(p, "progress", 0) or 0) >= 1.0),
+                None,
+            )
+            weap_queued = any(
+                str(getattr(p, "item", "")).lower() in _WEAP_ITEMS for p in prod)
+            dome_queued = any(
+                str(getattr(p, "item", "")).lower() in _DOME_ITEMS for p in prod)
+            if weap_ready:
+                ax, ay = _place_near_base(obs)
+                out.append(CommandModel(
+                    action=ActionType.PLACE_BUILDING, item_type=weap_ready,
+                    target_x=ax, target_y=ay))
+            elif dome_ready:
+                ax, ay = _place_near_base(obs)
+                out.append(CommandModel(
+                    action=ActionType.PLACE_BUILDING, item_type=dome_ready,
+                    target_x=ax, target_y=ay))
+            elif (has_barracks and n_procs >= 1
+                  and (not has_weap) and (not weap_queued)
+                  and "weap" in avail
+                  and cash >= SUPPORT_WEAP_CASH):
+                out.append(CommandModel(action=ActionType.BUILD, item_type="weap"))
+            elif (has_weap and (not has_dome) and (not dome_queued)
+                  and "dome" in avail
+                  and cash >= SUPPORT_WEAP_CASH):
+                out.append(CommandModel(action=ActionType.BUILD, item_type="dome"))
 
     # 1) Auto-repair — umbral hard (35%)
     if cash > 500:

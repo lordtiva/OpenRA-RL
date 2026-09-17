@@ -1,17 +1,12 @@
-"""Onboarding curriculum A → E with self-play bridge S (no .pt required).
+"""Onboarding curriculum: 3 continuous stages (A/B → C/D → E).
 
-A: SFT rifle teacher vs beginner.
-B: PPO+SIL+rifle BC vs beginner until wr20 holds.
-S: PFSP-RL bridge (beginner anchor) — softens B→C cliff.
-C: expand SFT (bc-only) then PPO+SIL+expand BC vs easy (mix beginner→easy).
-D: same vs medium (mix easy→medium).
-E: same vs hard/OpenRA normal (mix medium→hard) until wr20 holds.
+Stage 1 (A+B, iters ~1-40): expand teacher from tick 0. A is --bc-only;
+B is PPO+SIL with λ_bc 1.0 → 0.05. No rifle rush schema.
+Stage 2 (S+C+D, ~40-200): MAB over scripted bots (no cliff mix, no wipes).
+Stage 3 (E, 200+): PFSP-RL league with frozen hist snapshots + 20% hard/medium.
 
-Expand teacher (weap+1tnk+e3) is the expert vs easy+. Rifle teacher is not.
-Phase S keeps rush/mental schema and λ_bc at the B floor. C restarts λ_bc
-from phase_started_iter (0.50→0.20) after a short expand SFT. auto_train
-owns promotion (kill + relaunch). train.py only sees the flags of the
-current phase. State lives in curriculum.json so a crash does not restart SFT.
+Teacher is always mode=expand. Adam is never reset on promote (only on
+true collapse in auto_train). Elite / teacher_wins accumulate.
 """
 from __future__ import annotations
 
@@ -31,8 +26,8 @@ PHASE_NEXT = {
     "A": "B", "B": "S", "S": "C", "C": "D", "D": "E", "E": "done",
 }
 EXPAND_PHASES = ("C", "D", "E")
-# Rush/mental schema phases (not expand teacher).
-RUSH_PHASES = ("A", "B", "S")
+# Legacy name: all onboard phases now use the expand teacher.
+RUSH_PHASES = ()
 
 DEFAULTS = {
     "sft_iters": 20,
@@ -54,8 +49,8 @@ DEFAULTS = {
     # Phase B mixed BC (not A's 4 games / 6 epochs — that is SFT).
     "b_bc_games": 2,
     "b_bc_epochs": 2,
-    "b_bc_warmup": 40,
-    "b_bc_lambda_end": 0.10,
+    "b_bc_warmup": 30,
+    "b_bc_lambda_end": 0.05,
     "b_bc_start_iter": 0,  # 0 = use phase_started_iter
     # P1.4: anneal stage/guard army heuristics after Phase B start
     "heuristic_anneal_iters": 60,
@@ -69,8 +64,8 @@ DEFAULTS = {
     "c_mix_start": 0.50,
     # C PPO: restart λ_bc from phase_started_iter (not B origin). SFT is
     # --bc-only (λ ignored); this is the PPO kickstart after c_sft_iters.
-    "c_bc_lambda_start": 0.50,
-    "c_bc_lambda_end": 0.20,
+    "c_bc_lambda_start": 0.05,
+    "c_bc_lambda_end": 0.05,
     "c_sft_iters": 15,
     "c_sft_done": False,
     "c_hyper_pause_iters": 25,
@@ -92,6 +87,7 @@ _STORE_TRUE = {
     "--reset-opt", "--bc-keep-incomplete", "--bc-replay",
     "--auto-hyper", "--no-auto-hyper", "--hyper-pause",
     "--bc-collect-only", "--no-amp",
+    "--mab",
 }
 _STRIP = {
     "--bot-type", "--pfsp", "--pfsp-rl", "--pfsp-pool", "--pfsp-anchor-prob",
@@ -109,6 +105,7 @@ _STRIP = {
     "--map-pool",
     "--heuristic-p", "--heuristic-anneal-iters", "--heuristic-phase-start",
     "--auto-hyper", "--no-auto-hyper", "--hyper-pause", "--hyper-pause-iters",
+    "--mab", "--mab-tau", "--mab-floor", "--pfsp-hist-cap",
 }
 
 
@@ -246,7 +243,7 @@ def new_curriculum(overrides: dict | None = None) -> dict:
     cfg["phase"] = "A"
     cfg["a_launched"] = False
     cfg["c_reset_opt_done"] = False
-    cfg["c_sft_done"] = False
+    cfg["c_sft_done"] = True
     cfg["phase_started_iter"] = 0
     cfg["heuristic_phase_start"] = 0
     return cfg
@@ -269,7 +266,7 @@ def mix_target_prob(it: int, start_iter: int, warmup: int,
 
 
 def teacher_mode_for_phase(phase: str) -> str:
-    return "expand" if str(phase) in EXPAND_PHASES else "rush"
+    return "expand"
 
 
 def tape_schema_for_phase(phase: str) -> str:
@@ -355,16 +352,7 @@ def finish_c_sft(cfg: dict, last_iter: int) -> None:
 
 
 def c_launch_extras(cfg: dict | None) -> list[str]:
-    """One-shot --reset-opt / hyper-pause for C SFT or first C PPO."""
-    cfg = cfg or {}
-    if str(cfg.get("phase") or "") != "C":
-        return []
-    pause = str(int(cfg.get("c_hyper_pause_iters")
-                    or DEFAULTS["c_hyper_pause_iters"]))
-    if not cfg.get("c_sft_done"):
-        return ["--reset-opt", "--hyper-pause"]
-    if not cfg.get("c_reset_opt_done"):
-        return ["--reset-opt", "--hyper-pause", "--hyper-pause-iters", pause]
+    """Promote never resets Adam. Collapse restore in auto_train still can."""
     return []
 
 
@@ -376,7 +364,7 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--bot-type", "beginner",
             "--bc", "--bc-only",
             "--bc-teacher-bot", "beginner",
-            "--bc-teacher-mode", "rush",
+            "--bc-teacher-mode", "expand",
             "--bc-games", str(int(cfg["bc_games"])),
             "--bc-epochs", str(int(cfg["bc_epochs"])),
             "--bc-rush", str(int(cfg.get("a_rush") or DEFAULTS["a_rush"])),
@@ -409,7 +397,7 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--bot-type", "beginner",
             "--bc",
             "--bc-teacher-bot", "beginner",
-            "--bc-teacher-mode", "rush",
+            "--bc-teacher-mode", "expand",
             # wins-only BC (no --bc-keep-incomplete): incompletes = timeout turtle
             "--bc-games", str(int(cfg.get("b_bc_games") or DEFAULTS["b_bc_games"])),
             "--bc-epochs", str(int(cfg.get("b_bc_epochs") or DEFAULTS["b_bc_epochs"])),
@@ -417,6 +405,7 @@ def phase_flags(phase: str, cfg: dict) -> list[str]:
             "--bc-warmup", str(int(cfg.get("b_bc_warmup") or DEFAULTS["b_bc_warmup"])),
             "--bc-lambda-end", "{:.2f}".format(float(
                 cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))),
+            "--bc-lambda-start", "1.00",
             "--bc-start-iter", str(bc_start),
             "--bc-macro-ticks", str(int(cfg.get("a_macro_ticks") or DEFAULTS["a_macro_ticks"])),
             "--bc-max-steps", str(int(cfg.get("a_max_steps") or DEFAULTS["a_max_steps"])),
@@ -468,26 +457,26 @@ def _bc_start_at_floor(cfg: dict) -> int:
 
 
 def _s_phase_flags(cfg: dict) -> list[str]:
-    """S: PFSP-RL bridge, beginner anchor, rush BC at B λ floor."""
+    """S: MAB ladder start (beginner/easy), expand BC at B λ floor."""
     cfg = _cfg(cfg)
     bc_start = _bc_start_at_floor(cfg)
-    anchor_prob = float(cfg.get("s_anchor_prob", DEFAULTS["s_anchor_prob"]))
+    lam = float(cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))
     return [
         "--bot-type", "beginner",
-        "--pfsp", "--pfsp-rl",
-        "--pfsp-pool", "rl",
-        "--pfsp-anchor-prob", "{:.2f}".format(anchor_prob),
+        "--pfsp", "--mab",
+        "--pfsp-pool", "beginner,easy",
+        "--pfsp-anchor-prob", "0.00",
+        "--mab-tau", "0.25",
+        "--mab-floor", "0.05",
         "--bc",
         "--bc-teacher-bot", "beginner",
-        "--bc-teacher-mode", "rush",
+        "--bc-teacher-mode", "expand",
         "--bc-games", str(int(cfg.get("b_bc_games") or DEFAULTS["b_bc_games"])),
         "--bc-epochs", str(int(cfg.get("b_bc_epochs") or DEFAULTS["b_bc_epochs"])),
         "--bc-rush", str(int(cfg.get("a_rush") or DEFAULTS["a_rush"])),
         "--bc-warmup", str(int(cfg.get("b_bc_warmup") or DEFAULTS["b_bc_warmup"])),
-        "--bc-lambda-end", "{:.2f}".format(float(
-            cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))),
-        "--bc-lambda-start", "{:.2f}".format(float(
-            cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))),
+        "--bc-lambda-end", "{:.2f}".format(lam),
+        "--bc-lambda-start", "{:.2f}".format(lam),
         "--bc-start-iter", str(bc_start),
         "--bc-macro-ticks", str(int(cfg.get("a_macro_ticks") or DEFAULTS["a_macro_ticks"])),
         "--bc-max-steps", str(int(cfg.get("a_max_steps") or DEFAULTS["a_max_steps"])),
@@ -544,36 +533,25 @@ def _c_sft_flags(cfg: dict) -> list[str]:
 
 
 def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
-    """C/D/E: PPO+SIL+expand BC vs easy/medium/hard with mix ramp.
+    """C/D: MAB scripted ladder. E: PFSP-RL league + 20% hard/medium anchors.
 
-    C starts with expand SFT (`c_sft_done` False) then PPO with λ_bc
-    restarted at phase_started_iter (0.50→0.20). D/E stay at the B floor.
+    λ_bc stays at the residual floor (0.05). No mix cliffs, no C-SFT.
     """
-    if phase == "C" and not bool(cfg.get("c_sft_done")):
-        return _c_sft_flags(cfg)
     bot = PHASE_BOT[phase]
-    mix_from = {
-        "C": str(cfg.get("c_mix_from") or DEFAULTS["c_mix_from"]),
-        "D": str(cfg.get("d_mix_from") or DEFAULTS["d_mix_from"]),
-        "E": str(cfg.get("e_mix_from") or DEFAULTS["e_mix_from"]),
-    }[phase]
-    mix_start_iter = int(cfg.get("phase_started_iter") or 0) + 1
+    bc_start = _bc_start_at_floor(cfg)
+    lam = float(cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))
+    lr = "1.0e-4" if phase == "C" else "2.0e-5"
     if phase == "C":
-        # Restart λ from this C PPO origin, not B's start_iter (that made
-        # c_bc_lambda_start a no-op once warmup from B had already ended).
-        bc_start = max(1, int(cfg.get("phase_started_iter") or 0) or 1)
-        lam_start = float(cfg.get(
-            "c_bc_lambda_start", DEFAULTS["c_bc_lambda_start"]))
-        lam_end = float(cfg.get(
-            "c_bc_lambda_end", DEFAULTS["c_bc_lambda_end"]))
-        lr = "1.0e-4"
+        pool, mab, pfsp_rl, anchor_p = "beginner,easy,medium", True, False, "0.00"
+    elif phase == "D":
+        pool, mab, pfsp_rl, anchor_p = "easy,medium,hard", True, False, "0.00"
     else:
-        bc_start = _bc_start_at_floor(cfg)
-        lam_end = float(cfg.get("b_bc_lambda_end", DEFAULTS["b_bc_lambda_end"]))
-        lam_start = lam_end
-        lr = "2.0e-5"
-    return [
+        pool, mab, pfsp_rl, anchor_p = "rl,medium,hard", False, True, "0.20"
+    flags = [
         "--bot-type", bot,
+        "--pfsp",
+        "--pfsp-pool", pool,
+        "--pfsp-anchor-prob", anchor_p,
         "--bc",
         "--bc-teacher-bot", bot,
         "--bc-teacher-mode", "expand",
@@ -581,8 +559,8 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
         "--bc-epochs", str(int(cfg.get("b_bc_epochs") or DEFAULTS["b_bc_epochs"])),
         "--bc-rush", str(int(cfg.get("a_rush") or DEFAULTS["a_rush"])),
         "--bc-warmup", str(int(cfg.get("b_bc_warmup") or DEFAULTS["b_bc_warmup"])),
-        "--bc-lambda-end", "{:.2f}".format(lam_end),
-        "--bc-lambda-start", "{:.2f}".format(lam_start),
+        "--bc-lambda-end", "{:.2f}".format(lam),
+        "--bc-lambda-start", "{:.2f}".format(lam),
         "--bc-start-iter", str(bc_start),
         "--bc-macro-ticks", str(int(cfg.get("a_macro_ticks") or DEFAULTS["a_macro_ticks"])),
         "--bc-max-steps", str(int(cfg.get("a_max_steps") or DEFAULTS["a_max_steps"])),
@@ -595,15 +573,8 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
         "--adv-mode", "global",
         "--sil", "--lambda-sil", "0.5",
         "--no-amp",
-        "--mix-from", mix_from,
-        "--mix-warmup", str(int(
-            cfg.get("c_mix_warmup", DEFAULTS["c_mix_warmup"]))),
-        "--mix-start", "{:.2f}".format(float(
-            cfg.get("c_mix_start", DEFAULTS["c_mix_start"]))),
-        "--mix-start-iter", str(max(1, mix_start_iter)),
         "--iters", str(int(cfg["bc_iters"])),
         "--onboard-phase", phase,
-        # P1.4: continue guard anneal from frozen B-start across C/D/E.
         "--heuristic-phase-start", str(int(
             cfg.get("heuristic_phase_start")
             or ((int(cfg.get("phase_started_iter") or 0) + 1)
@@ -614,6 +585,11 @@ def _expand_phase_flags(phase: str, cfg: dict) -> list[str]:
             or DEFAULTS.get("heuristic_anneal_iters", 60))),
         "--auto-hyper",
     ]
+    if mab:
+        flags.extend(["--mab", "--mab-tau", "0.25", "--mab-floor", "0.05"])
+    if pfsp_rl:
+        flags.extend(["--pfsp-rl", "--pfsp-hist-cap", "15"])
+    return flags
 
 
 def build_train_argv(base: list[str], phase: str, cfg: dict) -> list[str]:
@@ -821,8 +797,8 @@ ows. Ambiguous history: if
             if int(cfg.get("b_bc_start_iter") or 0) <= 0:
                 cfg["b_bc_start_iter"] = prev_started or 1
         if nxt == "C":
-            cfg["c_sft_done"] = False
-            cfg["c_reset_opt_done"] = False
+            cfg["c_sft_done"] = True
+            cfg["c_reset_opt_done"] = True
         elif nxt in EXPAND_PHASES or nxt == "done":
             cfg["c_reset_opt_done"] = True
             cfg["c_sft_done"] = True

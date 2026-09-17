@@ -73,9 +73,34 @@ def _rifles(n):
     return [_U("harv")] + [_U("e1", aid=10 + i) for i in range(n)]
 
 
-def test_default_mode_is_rush():
+# Former A_SHORT_MINES — tests plant them as Ch2+Ch4 blobs (no hardcoded GPS).
+_TEST_MINES = (
+    (23, 5), (4, 30), (32, 28),
+    (80, 4), (77, 22), (104, 25),
+    (56, 35),
+)
+
+
+def _plant_mines(obs, mines=_TEST_MINES, radius=3):
+    import numpy as np
+    h = int(obs.map_info.height)
+    w = int(obs.map_info.width)
+    arr = np.zeros((9, h, w), dtype=np.float32)
+    arr[3] = 1.0
+    arr[4] = 1.0
+    for mx, my in mines:
+        for dy in range(-radius, radius + 1):
+            for dx in range(-radius, radius + 1):
+                x, y = mx + dx, my + dy
+                if 0 <= y < h and 0 <= x < w:
+                    arr[2, y, x] = 8.0
+    obs._spatial_chw = arr
+    return arr
+
+
+def test_default_mode_is_expand():
     t = ScriptedTeacher()
-    assert t.mode == "rush"
+    assert t.mode == "expand"
     assert "weap" not in t.BUILD_PRIORITY
 
 
@@ -234,6 +259,7 @@ def test_expand_mcv_moves_then_deploys_at_mid():
     obs.map_info = type("MI", (), {
         "height": 50, "width": 108, "map_name": "fase2_a_short.oramap",
     })()
+    _plant_mines(obs)
     obs.tick = 100
     out = t._handle_mcv_expand(obs)
     assert any(c.action == ActionType.MOVE and c.actor_id == 50 for c in out)
@@ -245,6 +271,7 @@ def test_expand_mcv_moves_then_deploys_at_mid():
         units=[_U("mcv", aid=50, x=50, y=34, is_idle=True)],
         cash=100)
     obs2.map_info = obs.map_info
+    _plant_mines(obs2)
     obs2.tick = 200
     out2 = t._handle_mcv_expand(obs2)
     assert any(c.action == ActionType.DEPLOY and c.actor_id == 50
@@ -420,6 +447,7 @@ def test_expand_proc_place_prefers_ore():
     obs.map_info = type("MI", (), {
         "height": 50, "width": 108, "map_name": "fase2_a_short.oramap",
     })()
+    _plant_mines(obs)
     x, y = t._ore_place_cell(obs, cy)
     # Adjacent=8: must stay in the CY halo (else C# dumps on the yard ring).
     assert max(abs(x - 12), abs(y - 16)) <= t.EXPAND_PROC_BASE_REACH
@@ -439,6 +467,7 @@ def test_expand_second_proc_other_ore_zone():
     obs.map_info = type("MI", (), {
         "height": 50, "width": 108, "map_name": "fase2_a_short.oramap",
     })()
+    _plant_mines(obs)
     x, y = t._ore_place_cell(obs, cy)
     assert max(abs(x - 12), abs(y - 16)) <= t.EXPAND_PROC_BASE_REACH or \
         max(abs(x - 18), abs(y - 10)) <= t.EXPAND_PROC_BASE_REACH
@@ -457,11 +486,9 @@ def test_expand_proc_ignores_fog_crumbs_near_cy():
     obs.map_info = type("MI", (), {
         "height": 50, "width": 108, "map_name": "fase2_a_short.oramap",
     })()
-    arr = np.zeros((9, 50, 108), dtype=np.float32)
-    arr[3] = 1.0
-    arr[4] = 1.0
-    # Fog-revealed crumbs hugging the yard (what live spatial looks like
-    # at first PLACE). Must not steal the (23,5) identity.
+    arr = _plant_mines(obs)
+    # Fog-revealed crumbs hugging the yard. Real mine (23,5) is also
+    # visible — crumbs must not steal that zone.
     for x0 in range(14, 18):
         for y0 in range(14, 18):
             arr[2, y0, x0] = 8.0
@@ -482,6 +509,7 @@ def test_expand_idle_harv_harvests_home_mine():
     obs.map_info = type("MI", (), {
         "height": 50, "width": 108, "map_name": "fase2_a_short.oramap",
     })()
+    _plant_mines(obs)
     out = t._handle_harvesters(obs)
     hits = [c for c in out if c.action == ActionType.HARVEST
             and c.actor_id == 11]
@@ -508,6 +536,7 @@ def test_expand_east_proc_toward_se_mine():
     obs.map_info = type("MI", (), {
         "height": 50, "width": 108, "map_name": "fase2_a_short.oramap",
     })()
+    _plant_mines(obs)
     x, y = t._ore_place_cell(obs, cy)
     assert max(abs(x - 95), abs(y - 11)) <= t.EXPAND_PROC_BASE_REACH
     # East nearest mine is (104, 25) — SE, not CY+3 (98,11).
@@ -1014,6 +1043,7 @@ def test_expand_second_proc_prefers_mid_facing_home_mine():
     obs.map_info = type("MI", (), {
         "height": 50, "width": 108, "map_name": "fase2_a_short.oramap",
     })()
+    _plant_mines(obs)
     x, y = t._ore_place_cell(obs, cy)
     # Toward SE home mine (32,28), not SW (4,30).
     assert x >= 18
@@ -1032,6 +1062,7 @@ def test_expand_mid_proc_place_near_mid_when_anchored():
     obs.map_info = type("MI", (), {
         "height": 50, "width": 108, "map_name": "fase2_a_short.oramap",
     })()
+    _plant_mines(obs)
     x, y = t._ore_place_cell(obs, cy)
     assert abs(x - 56) <= 14
     assert abs(y - 35) <= 14
@@ -1048,6 +1079,7 @@ def test_expand_idle_harv_can_target_mid():
     obs.map_info = type("MI", (), {
         "height": 50, "width": 108, "map_name": "fase2_a_short.oramap",
     })()
+    _plant_mines(obs)
     obs.tick = 500
     out = t._handle_harvesters(obs)
     assert any(c.action == ActionType.HARVEST for c in out)

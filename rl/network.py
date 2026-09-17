@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from rl.obs_encoding import (
     MAX_TOKENS, MAX_UNITS, MAX_BUILDINGS, SCALAR_DIM, UNIT_FEAT_DIM,
     BUILDING_FEAT_DIM, ready_place_items,
+    SPATIAL_ENGINE_CH, SPATIAL_EXTRA_CH,
 )
 from rl.roles import N_ROLES, ROLE_VOCAB
 
@@ -65,6 +66,8 @@ TOKEN_DIM = 128  # unit_mlp out / residual stream
 FUSION_IN = TOKEN_DIM * 5  # 640
 FUSION_HIDDEN = 256
 UNIT_VEC_DIM = 128  # GRU unit branch (keeps fused = ch+128+128)
+SPATIAL_XATTN_DIM = 64
+SPATIAL_XATTN_HW = 16  # downsample fmap for cross-attn keys
 SCATTER_CH = 8
 UNIT_COND_DIM = 64
 QSA_DIM = 32
@@ -427,7 +430,12 @@ class AlphaLiteNet(nn.Module):
         # profundos en mid=64; skip full-res y fmap final siguen en ch=96
         # (cell_head / QSA / scatter / GRU spatial_vec sin romper firma).
         self.spatial_in = nn.Sequential(
-            nn.Conv2d(9 + 2, ch, 3, padding=1), nn.ReLU())
+            nn.Conv2d(SPATIAL_ENGINE_CH + 2, ch, 3, padding=1), nn.ReLU())
+        # Client-side extra channels (typed bldgs / armor / threat). Zero-init
+        # so old 9-ch ckpts behave as identity until the extra stem learns.
+        self.spatial_extra = nn.Conv2d(SPATIAL_EXTRA_CH, ch, 3, padding=1)
+        nn.init.zeros_(self.spatial_extra.weight)
+        nn.init.zeros_(self.spatial_extra.bias)
         self.enc1 = nn.Sequential(
             ResBlock(ch),
             nn.Conv2d(ch, mid, 3, stride=2, padding=1), nn.ReLU(),
@@ -511,8 +519,26 @@ class AlphaLiteNet(nn.Module):
         )
         # Capa 2: fmap + scatter + tipo + GRU + unidad elegida (o pool).
         self.scatter_proj = nn.Linear(UNIT_MLP_IN, SCATTER_CH)
-        nn.init.zeros_(self.scatter_proj.weight)
+        # Small nonzero init: zero-init scatter starved spatial↔entity coupling (doc 1 §4A).
+        nn.init.normal_(self.scatter_proj.weight, std=0.02)
         nn.init.zeros_(self.scatter_proj.bias)
+        # Spatial cross-attn: unit tokens Q, downsampled fmap K/V (doc 1 §4A).
+        self.spatial_xattn_q = nn.Linear(128, SPATIAL_XATTN_DIM)
+        self.spatial_xattn_kv = nn.Conv2d(ch, SPATIAL_XATTN_DIM * 2, 1)
+        self.spatial_xattn_out = nn.Linear(SPATIAL_XATTN_DIM, 128)
+        nn.init.normal_(self.spatial_xattn_q.weight, std=0.02)
+        nn.init.zeros_(self.spatial_xattn_q.bias)
+        nn.init.normal_(self.spatial_xattn_kv.weight, std=0.02)
+        nn.init.zeros_(self.spatial_xattn_kv.bias)
+        nn.init.zeros_(self.spatial_xattn_out.weight)
+        nn.init.zeros_(self.spatial_xattn_out.bias)
+        self.spatial_xattn_scale = nn.Parameter(torch.tensor(0.1))
+        # Building tokens join the unit XF stream (doc 1 §2C).
+        self.building_tok_proj = nn.Sequential(
+            nn.Linear(BUILDING_FEAT_DIM, 128), nn.ReLU(),
+            nn.Linear(128, 128),
+        )
+        self.building_is_flag = nn.Parameter(torch.tensor([1.0]))
         self.unit_cond_proj = nn.Linear(128, UNIT_COND_DIM)
         nn.init.zeros_(self.unit_cond_proj.weight)
         nn.init.zeros_(self.unit_cond_proj.bias)
@@ -532,17 +558,27 @@ class AlphaLiteNet(nn.Module):
         )
 
     def _coord_conv(self, spatial):
-        """CoordConv: canales 9-10 con x,y normalizados a [-1,1]."""
-        B, _, H, W = spatial.shape
+        """CoordConv on the 9 engine channels; extra maps go through spatial_extra."""
+        B, C, H, W = spatial.shape
+        engine = spatial[:, :SPATIAL_ENGINE_CH]
+        extra = spatial[:, SPATIAL_ENGINE_CH:SPATIAL_ENGINE_CH + SPATIAL_EXTRA_CH] if C > SPATIAL_ENGINE_CH else None
         ys = torch.linspace(-1.0, 1.0, H, device=spatial.device).view(1, 1, H, 1)
         xs = torch.linspace(-1.0, 1.0, W, device=spatial.device).view(1, 1, 1, W)
         yy = ys.expand(B, 1, H, W)
         xx = xs.expand(B, 1, H, W)
-        return torch.cat([spatial, xx, yy], dim=1)
+        return torch.cat([engine, xx, yy], dim=1), extra
 
     def _enc_spatial(self, x):
         """U-Net lite: 2 niveles down/up con skip, devuelve fmap [B,ch,H,W]."""
-        x = self.spatial_in(x)          # [B,ch,H,W]
+        coord, extra = self._coord_conv(x)
+        x = self.spatial_in(coord)          # [B,ch,H,W]
+        if extra is not None and extra.size(1) > 0:
+            if extra.size(1) < SPATIAL_EXTRA_CH:
+                pad = extra.new_zeros(
+                    extra.size(0), SPATIAL_EXTRA_CH - extra.size(1),
+                    extra.size(2), extra.size(3))
+                extra = torch.cat([extra, pad], dim=1)
+            x = x + self.spatial_extra(extra[:, :SPATIAL_EXTRA_CH])
         s1 = x
         x = self.enc1(x)                # [B,ch,H/2,W/2]
         s2 = x
@@ -642,6 +678,72 @@ class AlphaLiteNet(nn.Module):
             own = valid
         return feats, valid, role_ids, own
 
+
+    def _spatial_cross_attn(self, tokens, fmap, unit_valid):
+        """Unit tokens attend to downsampled spatial keys (cheap 16x16)."""
+        B, U, D = tokens.shape
+        q = self.spatial_xattn_q(tokens)  # [B,U,Dattn]
+        kv_map = F.adaptive_avg_pool2d(fmap, SPATIAL_XATTN_HW)
+        kv = self.spatial_xattn_kv(kv_map)  # [B,2Dattn,h,w]
+        k, v = kv.chunk(2, dim=1)
+        N = SPATIAL_XATTN_HW * SPATIAL_XATTN_HW
+        k = k.flatten(2).transpose(1, 2)  # [B,N,D]
+        v = v.flatten(2).transpose(1, 2)
+        scale = float(SPATIAL_XATTN_DIM) ** -0.5
+        attn = torch.matmul(q, k.transpose(1, 2)) * scale
+        attn = torch.softmax(attn, dim=-1)
+        ctx = torch.matmul(attn, v)
+        out = self.spatial_xattn_out(ctx)
+        mask = unit_valid.unsqueeze(-1).float()
+        return tokens + self.spatial_xattn_scale * out * mask
+
+    def _building_tokens(self, building_feats, building_valid):
+        """Project buildings into the same 128-d stream as units."""
+        if building_feats is None or building_valid is None:
+            return None, None
+        if not torch.is_tensor(building_feats):
+            return None, None
+        feats = building_feats.float()
+        if feats.dim() != 3:
+            return None, None
+        B, Nb, F = feats.shape
+        if F != BUILDING_FEAT_DIM:
+            if F < BUILDING_FEAT_DIM:
+                feats = torch.cat(
+                    [feats, feats.new_zeros(B, Nb, BUILDING_FEAT_DIM - F)],
+                    dim=-1)
+            else:
+                feats = feats[..., :BUILDING_FEAT_DIM]
+        bv = building_valid.bool()
+        if bv.dim() == 1:
+            bv = bv.unsqueeze(0)
+        if bv.size(0) != B:
+            return None, None
+        if bv.size(-1) != Nb:
+            if bv.size(-1) < Nb:
+                bv = torch.cat(
+                    [bv, bv.new_zeros(B, Nb - bv.size(-1))], dim=-1)
+            else:
+                bv = bv[..., :Nb]
+                feats = feats[..., :bv.size(-1), :]
+                Nb = bv.size(-1)
+        if Nb != MAX_BUILDINGS:
+            if Nb < MAX_BUILDINGS:
+                feats = torch.cat(
+                    [feats, feats.new_zeros(B, MAX_BUILDINGS - Nb, feats.size(-1))],
+                    dim=1)
+                bv = torch.cat(
+                    [bv, bv.new_zeros(B, MAX_BUILDINGS - Nb)], dim=-1)
+            else:
+                feats = feats[:, :MAX_BUILDINGS]
+                bv = bv[..., :MAX_BUILDINGS]
+        tok = self.building_tok_proj(feats)
+        # Mark as buildings via a learned additive flag on dim 0.
+        flag = self.building_is_flag.to(device=tok.device, dtype=tok.dtype)
+        tok = tok.clone()
+        tok[..., 0] = tok[..., 0] + flag
+        return tok, bv
+
     def _scatter_units(self, unit_feats, unit_valid, hw, role_ids=None):
         """Pinta cada slot (HP/idle/xy/team/rol) en el fmap. Pesos 0 al init."""
         B, U, _ = unit_feats.shape
@@ -694,19 +796,42 @@ class AlphaLiteNet(nn.Module):
             [mean_own, max_own, mean_ene, max_ene, mean_all], dim=-1))
 
     def encode_features(self, spatial, scalars, unit_feats, unit_valid,
-                        unit_role_ids=None, unit_own_mask=None):
+                        unit_role_ids=None, unit_own_mask=None,
+                        building_feats=None, building_valid=None):
         """Encoder path independent of GRU hidden.
 
         Returns (fmap, tokens, fused) where fused feeds ``self.core``.
         Spatial/scalar/unit features do not depend on h — used by ``encode``,
         ``_eval_step``, and K=2 ``act`` (expose fused without advancing GRU).
         Seq eval intentionally encodes per-t (P0.1 BxT stack reverted).
+
+        Buildings join the unit XF when provided (doc 1 §2C): joint self-attn
+        then unit tokens are sliced back for scorers / spatial cross-attn.
+        Factorized π_macro·π_micro is the K=2 eco+push emit + decoupled
+        lp_macro/lp_micro PPO split (not a second simultaneous head).
         """
-        fmap = self._enc_spatial(self._coord_conv(spatial))
+        fmap = self._enc_spatial(spatial)
         spatial_vec = F.adaptive_avg_pool2d(fmap, 1).flatten(1)
 
         u = self.unit_mlp(self._unit_in(unit_feats, unit_role_ids))
-        tokens = self._entity_tokens(u, unit_valid)
+        b_tok, b_valid = self._building_tokens(building_feats, building_valid)
+        # Only join buildings that are valid somewhere in the batch.
+        # Padding all MAX_BUILDINGS (96) made XF seq 128+96 every step and
+        # blew update_s (~6x s/sample vs pre-macro-first runs).
+        if b_tok is not None and b_valid is not None and bool(b_valid.any()):
+            keep = b_valid.any(dim=0)  # [Nb]
+            b_tok = b_tok[:, keep]
+            b_valid = b_valid[:, keep]
+            U = u.size(1)
+            joint = torch.cat([u, b_tok], dim=1)
+            joint_valid = torch.cat(
+                [unit_valid.bool(), b_valid.bool()], dim=1)
+            joint_tokens = self._entity_tokens(joint, joint_valid)
+            tokens = joint_tokens[:, :U]
+        else:
+            tokens = self._entity_tokens(u, unit_valid)
+        # Spatial cross-attn after XF (doc 1 §4A); downsample keeps VRAM modest.
+        tokens = self._spatial_cross_attn(tokens, fmap, unit_valid)
         unit_vec = self._unit_vec_for_gru(tokens, unit_valid, unit_own_mask)
 
         s = self.scalar_mlp(scalars)
@@ -714,7 +839,8 @@ class AlphaLiteNet(nn.Module):
         return fmap, tokens, fused
 
     def encode(self, spatial, scalars, unit_feats, unit_valid, hidden,
-               unit_role_ids=None, unit_own_mask=None):
+               unit_role_ids=None, unit_own_mask=None,
+               building_feats=None, building_valid=None):
         """spatial [B,9,H,W], scalars [B,S], units [B,U,F], valid [B,U] bool.
 
         Devuelve (fmap, feat_map_flat, new_hidden, tokens). tokens [B,U,128]
@@ -724,7 +850,8 @@ class AlphaLiteNet(nn.Module):
         """
         fmap, tokens, fused = self.encode_features(
             spatial, scalars, unit_feats, unit_valid,
-            unit_role_ids=unit_role_ids, unit_own_mask=unit_own_mask)
+            unit_role_ids=unit_role_ids, unit_own_mask=unit_own_mask,
+            building_feats=building_feats, building_valid=building_valid)
         feat_map_flat = fmap.flatten(1)
         new_hidden = self.core(fused, hidden)
         return fmap, feat_map_flat, new_hidden, tokens
@@ -1032,18 +1159,20 @@ class AlphaLiteNet(nn.Module):
         zero = torch.zeros_like(dist_t.log_prob(t_idx))
         # building slot stored in unit_slot; clamp for building dist width
         u_for_b = u_idx.clamp(min=0, max=MAX_BUILDINGS - 1)
-        lp = (dist_t.log_prob(t_idx)
-              + torch.where(use_u, dist_u.log_prob(u_idx), zero)
-              + torch.where(use_b, dist_b.log_prob(u_for_b), zero)
-              + torch.where(use_c, dist_c.log_prob(c_idx), zero)
-              + torch.where(use_i & has_items, dist_i.log_prob(i_idx.clamp(
-                  min=0, max=safe_item_mask.size(1) - 1)), zero))
+        lp_macro = (dist_t.log_prob(t_idx)
+                    + torch.where(use_i & has_items, dist_i.log_prob(i_idx.clamp(
+                        min=0, max=safe_item_mask.size(1) - 1)), zero))
+        lp_micro = (torch.where(use_u, dist_u.log_prob(u_idx), zero)
+                    + torch.where(use_b, dist_b.log_prob(u_for_b), zero)
+                    + torch.where(use_c, dist_c.log_prob(c_idx), zero))
+        lp = lp_macro + lp_micro
 
         value = self.value_head(new_hidden).squeeze(-1)
         return {
             "type": t_idx, "unit_slot": u_idx, "cell_flat": c_idx,
             "item_slot": i_idx,
-            "log_prob": lp, "value": value,
+            "log_prob": lp, "log_prob_macro": lp_macro,
+            "log_prob_micro": lp_micro, "value": value,
         }
 
     @torch.no_grad()
@@ -1068,6 +1197,8 @@ class AlphaLiteNet(nn.Module):
             batch["spatial"], batch["scalars"],
             feats, valid,
             unit_role_ids=role_ids, unit_own_mask=own,
+            building_feats=batch.get("building_feats"),
+            building_valid=batch.get("building_valid"),
         )
         new_hidden = self.core(fused, hidden)
         out = self._sample_ar(
@@ -1132,6 +1263,8 @@ class AlphaLiteNet(nn.Module):
             batch["spatial"], batch["scalars"],
             feats, valid, hidden,
             unit_role_ids=role_ids, unit_own_mask=own,
+            building_feats=batch.get("building_feats"),
+            building_valid=batch.get("building_valid"),
         )
         t_idx = actions["type"]
         dist_t = self.dist_type(new_hidden, batch["type_mask"])
@@ -1157,14 +1290,21 @@ class AlphaLiteNet(nn.Module):
         zero = torch.zeros_like(dist_t.log_prob(t_idx))
         u_slot = actions["unit_slot"]
         u_for_b = u_slot.clamp(min=0, max=MAX_BUILDINGS - 1)
-        lp = (dist_t.log_prob(t_idx)
-              + torch.where(use_u, dist_u.log_prob(u_slot), zero)
-              + torch.where(use_b, dist_b.log_prob(u_for_b), zero)
-              + torch.where(use_c, dist_c.log_prob(actions["cell_flat"]), zero)
-              + torch.where(use_i & has_items & actions["had_item"],
-                            dist_i.log_prob(actions["item_slot"].clamp(
-                                min=0, max=batch["item_mask"].size(1) - 1)),
-                            zero))
+        had = actions["had_item"]
+        if not torch.is_tensor(had):
+            had = torch.as_tensor(had, device=t_idx.device)
+        had = had.reshape(-1).bool()
+        # Keep macro/micro split so remap re-eval does not kill decoupled PPO.
+        lp_macro = (dist_t.log_prob(t_idx)
+                    + torch.where(use_i & has_items & had,
+                                  dist_i.log_prob(actions["item_slot"].clamp(
+                                      min=0, max=batch["item_mask"].size(1) - 1)),
+                                  zero))
+        lp_micro = (torch.where(use_u, dist_u.log_prob(u_slot), zero)
+                    + torch.where(use_b, dist_b.log_prob(u_for_b), zero)
+                    + torch.where(use_c, dist_c.log_prob(actions["cell_flat"]),
+                                  zero))
+        lp = lp_macro + lp_micro
 
         h_t = dist_t.entropy()
         h_u = dist_u.entropy()
@@ -1185,7 +1325,7 @@ class AlphaLiteNet(nn.Module):
                    / (1.0 + use_u_f + use_b_f + use_c_f + use_i_f))
 
         value = self.value_head(new_hidden).squeeze(-1)
-        return lp, entropy, value
+        return lp, entropy, value, lp_macro, lp_micro
 
     def _eval_heads(self, batch, h_new, actions, fmap, tokens, feats, valid,
                     role_ids, own):
@@ -1234,13 +1374,15 @@ class AlphaLiteNet(nn.Module):
                 had_item = torch.as_tensor(had_item, device=t_idx.device)
             had_item = had_item.reshape(-1).bool()
             u_for_b = u_idx.clamp(min=0, max=MAX_BUILDINGS - 1)
-            lp = (dist_t.log_prob(t_idx)
-                  + torch.where(use_u, dist_u.log_prob(u_idx), zero)
-                  + torch.where(use_b, dist_b.log_prob(u_for_b), zero)
-                  + torch.where(use_c, dist_c.log_prob(c_idx), zero)
-                  + torch.where(use_i & has_items & had_item,
-                                dist_i.log_prob(i_idx.clamp(
-                                    min=0, max=safe_item.size(1) - 1)), zero))
+            lp_macro = (dist_t.log_prob(t_idx)
+                        + torch.where(use_i & has_items & had_item,
+                                      dist_i.log_prob(i_idx.clamp(
+                                          min=0, max=safe_item.size(1) - 1)),
+                                      zero))
+            lp_micro = (torch.where(use_u, dist_u.log_prob(u_idx), zero)
+                        + torch.where(use_b, dist_b.log_prob(u_for_b), zero)
+                        + torch.where(use_c, dist_c.log_prob(c_idx), zero))
+            lp = lp_macro + lp_micro
 
             ht = dist_t.entropy()
             hu = dist_u.entropy()
@@ -1261,7 +1403,7 @@ class AlphaLiteNet(nn.Module):
                        / (1.0 + use_u_f + use_b_f + use_c_f + use_i_f))
 
             value = self.value_head(h_f).squeeze(-1)
-        return lp, entropy, value
+        return lp, entropy, value, lp_macro, lp_micro
 
     def _eval_step(self, batch, h, actions):
         """Un paso BPTT, B>=1. actions: type/unit/cell/item/had_item [B].
@@ -1272,15 +1414,17 @@ class AlphaLiteNet(nn.Module):
         feats, valid, role_ids, own = self._unit_ctx(batch)
         fmap, tokens, fused = self.encode_features(
             batch["spatial"], batch["scalars"], feats, valid,
-            unit_role_ids=role_ids, unit_own_mask=own)
+            unit_role_ids=role_ids, unit_own_mask=own,
+            building_feats=batch.get("building_feats"),
+            building_valid=batch.get("building_valid"))
         h_new = self.core(fused, h)
-        lp, entropy, value = self._eval_heads(
+        lp, entropy, value, lp_m, lp_u = self._eval_heads(
             batch, h_new, actions, fmap, tokens, feats, valid, role_ids, own)
-        return lp, entropy, value, h_new
+        return lp, entropy, value, h_new, lp_m, lp_u
 
     def evaluate_actions_seq(self, seg, device):
         """BPTT truncado sobre UN segmento. Wrapper de evaluate_actions_seq_batch."""
-        lp, ent, val, valid = self.evaluate_actions_seq_batch([seg], device)
+        lp, ent, val, valid = self.evaluate_actions_seq_batch([seg], device)[:4]
         m = valid[0]
         return lp[0][m], ent[0][m], val[0][m]
 
@@ -1316,7 +1460,7 @@ class AlphaLiteNet(nn.Module):
         h = torch.cat(h0, dim=0)
         if h.dim() > 2:
             h = h.reshape(B, -1)
-        lp_t, ent_t, val_t, valid_t = [], [], [], []
+        lp_t, ent_t, val_t, valid_t, lm_t, lu_t = [], [], [], [], [], []
         for t in range(T):
             steps = []
             active = []
@@ -1334,14 +1478,17 @@ class AlphaLiteNet(nn.Module):
             row_burn = torch.tensor(burn, dtype=torch.bool, device=device)
             row_valid = row_active & ~row_burn
             batch, actions = _stack_steps(steps, device)
-            lp, ent, val, h_new = self._eval_step(batch, h, actions)
+            lp, ent, val, h_new, lp_m, lp_u = self._eval_step(batch, h, actions)
             h = torch.where(row_active.unsqueeze(-1), h_new, h)
             lp_t.append(lp)
             ent_t.append(ent)
             val_t.append(val)
             valid_t.append(row_valid)
+            lm_t.append(lp_m)
+            lu_t.append(lp_u)
         return (torch.stack(lp_t, dim=1), torch.stack(ent_t, dim=1),
-                torch.stack(val_t, dim=1), torch.stack(valid_t, dim=1))
+                torch.stack(val_t, dim=1), torch.stack(valid_t, dim=1),
+                torch.stack(lm_t, dim=1), torch.stack(lu_t, dim=1))
 
 
 

@@ -38,7 +38,7 @@ from rl.imitation import (
 from rl.network import ACTION_TYPES, COMBAT_PUSH_TYPES, HIDDEN_DIM
 from rl.obs_encoding import (
     decode_spatial, scalar_features, unit_tokens, EnemyBeliefStore,
-    building_tokens, MAX_BUILDINGS,
+    building_tokens, MAX_BUILDINGS, augment_spatial,
 )
 from rl.reward_shaping import PRESETS, ShapedReward
 from rl.supremacy import evaluate_supremacy
@@ -133,6 +133,7 @@ def _batch_of(obs, vocab, device, belief: EnemyBeliefStore | None = None):
                              beacon=None)
     if spatial is None:
         spatial = np.zeros((9, h, w), dtype=np.float32)
+    spatial = augment_spatial(spatial, obs)
 
     units_feats, role_ids, unit_valid, own_mask = unit_tokens(obs, belief=belief)
     b_feats, _b_valid = building_tokens(obs)
@@ -382,9 +383,11 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     out_cell = c0
                     out_value = float(value_t.item())
                     out_ctx = None
+                    log_prob_macro = None
+                    log_prob_micro = None
                     cell_t = torch.tensor([int(eff_c)], device=device)
                     with torch.no_grad():
-                        log_prob, _, _ = net.evaluate_actions(
+                        log_prob, _, _, _lm, _lu = net.evaluate_actions(
                             batch, h_in, {
                                 "type": torch.tensor([eff_t], device=device),
                                 "unit_slot": torch.tensor([eff_u], device=device),
@@ -392,6 +395,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                 "item_slot": torch.tensor([eff_i], device=device),
                                 "had_item": had_item,
                             })
+                        log_prob_macro = _lm
+                        log_prob_micro = _lu
                 else:
                     out = net.act(batch, hidden, temperature=temperature)
                     hidden = out["hidden"].detach()
@@ -409,6 +414,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     out_cell = int(out["cell_flat"])
                     out_value = float(out["value"].item())
                     log_prob = out["log_prob"]
+                    log_prob_macro = out.get("log_prob_macro")
+                    log_prob_micro = out.get("log_prob_micro")
                     cell_t = out["cell_flat"]
                 # Crédito de dest (Capa 0/1, no Capa 2): army/attack_move entra al
                 # buffer con el dest de auto_support, no el sample en casa (Ch6).
@@ -434,7 +441,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     cell_t = torch.tensor([int(eff_c)], device=device)
                 if sampled != effective:
                     with torch.no_grad():
-                        re_lp, _, _ = net.evaluate_actions(
+                        re_lp, _, _, _lm, _lu = net.evaluate_actions(
                             batch, h_in, {
                                 "type": torch.tensor([eff_t], device=device),
                                 "unit_slot": torch.tensor([eff_u], device=device),
@@ -444,6 +451,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                 "had_item": had_item,
                             })
                         log_prob = re_lp
+                        log_prob_macro = _lm
+                        log_prob_micro = _lu
                 # Histograma de tipos de acción EFECTIVOS (traduce la política:
                 # train/no_op vs el remate army_attack_move que nunca usa).
                 atype = ACTION_TYPES[eff_t]
@@ -510,7 +519,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         if psampled != peffective:
                             with torch.no_grad():
                                 # Recalc under push h_in (pre-second-GRU), not eco h_in.
-                                plp, _, _ = net.evaluate_actions(
+                                plp, _, _, _lm, _lu = net.evaluate_actions(
                                     batch, h_in_push, {
                                         "type": torch.tensor([pt], device=device),
                                         "unit_slot": torch.tensor(
@@ -521,9 +530,16 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                             [pi], device=device),
                                         "had_item": had_item,
                                     })
+                                # peer split preserved
+                                _peer_lm, _peer_lu = _lm, _lu
                         # value under post-micro hidden (h_push)
                         push_value = float(out2["value"].detach().cpu().item())                             if "value" in out2 else out_value
                         # Stash for traj append with pending_bc_extra below.
+                        if psampled != peffective:
+                            _push_lm, _push_lu = _peer_lm, _peer_lu
+                        else:
+                            _push_lm = out2.get("log_prob_macro")
+                            _push_lu = out2.get("log_prob_micro")
                         student_push_sample = {
                             "batch": {k: v.cpu() for k, v in batch.items()},
                             "action": {
@@ -533,6 +549,10 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                 "item_slot": torch.tensor([int(pi)]),
                                 "had_item": had_item.cpu(),
                                 "log_prob": plp.detach().cpu(),
+                                **({"log_prob_macro": _push_lm.detach().cpu(),
+                                    "log_prob_micro": _push_lu.detach().cpu()}
+                                   if _push_lm is not None
+                                   and _push_lu is not None else {}),
                             },
                             "reward": 0.0,
                             "value_pred": push_value,
@@ -591,6 +611,10 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         "had_item": had_item.cpu(),
                         # CONGELADOS: la referencia contra la que PPO mide el drift
                         "log_prob": log_prob.detach().cpu(),
+                        **({"log_prob_macro": log_prob_macro.detach().cpu(),
+                            "log_prob_micro": log_prob_micro.detach().cpu()}
+                           if log_prob_macro is not None
+                           and log_prob_micro is not None else {}),
                     },
                     "reward": 0.0,
                     "value_pred": out_value,
@@ -610,7 +634,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                 action_counts.get("item_slot_fallback", 0) + _fb)
                         xcell = torch.tensor([int(xec)])
                         with torch.no_grad():
-                            xlp, _, _ = net.evaluate_actions(
+                            xlp, _, _, _lm, _lu = net.evaluate_actions(
                                 batch, h_in, {
                                     "type": torch.tensor([xet], device=device),
                                     "unit_slot": torch.tensor([xeu], device=device),
@@ -619,6 +643,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                     "item_slot": torch.tensor([xei], device=device),
                                     "had_item": had_item,
                                 })
+                            _x_lm, _x_lu = _lm, _lu
                         pending_bc_extra.append({
                             "batch": {k: v.cpu() for k, v in batch.items()},
                             "action": {

@@ -358,7 +358,7 @@ def test_evaluate_actions_uses_building_head():
         "item_slot": torch.tensor([0]),
         "had_item": torch.tensor([False]),
     }
-    lp, ent, val = net.evaluate_actions(batch, h, actions)
+    lp, ent, val, *_ = net.evaluate_actions(batch, h, actions)
     assert lp.shape == (1,)
     assert torch.isfinite(lp).all()
     lp.sum().backward()

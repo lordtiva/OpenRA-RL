@@ -639,7 +639,7 @@ async def run_episode_live(env: OpenRAEnv, net, vocab, device, args,
             effective = (eff_t, eff_u, eff_i)
             if sampled != effective:
                 with torch.no_grad():
-                    re_lp, _, _ = net.evaluate_actions(batch, h_in, {
+                    re_lp, _, _, *_ = net.evaluate_actions(batch, h_in, {
                         "type": torch.tensor([eff_t], device=device),
                         "unit_slot": torch.tensor([eff_u], device=device),
                         "cell_flat": out["cell_flat"],

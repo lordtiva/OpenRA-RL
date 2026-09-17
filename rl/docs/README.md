@@ -12,6 +12,7 @@ Historia de runs, auditorías v1 e informes de revisión: [`_archive/`](_archive
 
 | Querés | Doc |
 |--------|-----|
+| Currícula macro-first (expand desde A, v5, arch) | [`design/macro-first.md`](design/macro-first.md) |
 | Clonaste el repo y no tenés pesos | [`start/onboard.md`](start/onboard.md) |
 | Docker, dash, skirmish, reglas de run | [`start/operacion.md`](start/operacion.md) |
 | El agente es RA **Aliados** (lock, catálogo, superpoderes) | [`contract/ra-aliados.md`](contract/ra-aliados.md) |
@@ -48,6 +49,7 @@ Rebuild C# / Docker es obligatorio después del corte Aliados (lobby + órdenes 
 | [`design/capa2c-identidad-matchup.md`](design/capa2c-identidad-matchup.md) | Capa 2c: A+B shipped. Pointer 2c-C revertido |
 | [`design/advance-macro.md`](design/advance-macro.md) | `advance()` con interrupciones |
 | [`design/rl-vs-rl.md`](design/rl-vs-rl.md) | Dual bridge + PFSP-RL (`--pfsp-rl`). El log de Run 42 queda como ejemplo |
+| [`design/macro-first.md`](design/macro-first.md) | **Vigente 2026-09:** expand desde A, `eradicate_v5`, XF buildings, PPO split, MAB, VRAM 2070 |
 
 Diario empírico de Capa 0 (Runs 8–36, 49 kB): [`_archive/runs/13-capa0-status-post-run8.md`](_archive/runs/13-capa0-status-post-run8.md).
 
@@ -56,8 +58,8 @@ Diario empírico de Capa 0 (Runs 8–36, 49 kB): [`_archive/runs/13-capa0-status
 ## Cómo leer (casos)
 
 1. **Train Aliados:** `start/onboard.md` + `start/operacion.md` + `contract/ra-aliados.md`.
-2. **Tocar reward:** `design/filosofia-rl.md` + `rl/reward_shaping.py` (fuente). El preset vivo es `eradicate_v4`.
-3. **Tocar red / action set:** `design/capa2c-identidad-matchup.md` + `design/plan-4-capas.md`. Un régimen por vez. No crecer `ENABLED_TYPES` el mismo corte que la arch.
+2. **Tocar reward:** `design/filosofia-rl.md` + `design/macro-first.md` + `rl/reward_shaping.py`. Preset vivo: **`eradicate_v5`**.
+3. **Tocar red / action set / currícula:** `design/macro-first.md` (estado) + `design/capa2c-identidad-matchup.md` + `design/plan-4-capas.md`. Un régimen por vez.
 4. **Self-play:** `design/rl-vs-rl.md`.
 5. **Otro mod:** `contract/facciones-mods-roles.md` — no es este run.
 
@@ -68,10 +70,10 @@ Diario empírico de Capa 0 (Runs 8–36, 49 kB): [`_archive/runs/13-capa0-status
 | Tema | Código | Proto / config |
 |------|--------|----------------|
 | `advance()` | `openra_env/server/bridge_client.py`, `openra_environment.py` | `proto/rl_bridge.proto` |
-| Red | `rl/network.py` `AlphaLiteNet` | `rl/obs_encoding.py` `SCALAR_DIM=33` `MAX_UNITS=96` |
+| Red | `rl/network.py` `AlphaLiteNet` | `rl/obs_encoding.py` `SCALAR_DIM=41` `SPATIAL_TOTAL_CH=20` `MAX_UNITS=96` |
 | Acciones | `rl/action_adapter.py` | `ActionType` en proto + `openra_env/models.py` |
 | Roles / uniques | `rl/roles.py` `IDENTITY_ITEMS`, `rl/allies.py` | — |
-| Reward `eradicate_v4` | `rl/reward_shaping.py` + `rl/auto_support.py` | — |
+| Reward `eradicate_v5` | `rl/reward_shaping.py` + `rl/auto_support.py` | macro-first default |
 | Lobby Aliados | `RLSessionManager.ResolvePlayerFaction` | `CreateSessionRequest.player_faction` |
 | RL-vs-RL | `ExternalBotBridge` + `rl/peer_obs.py` + `rl/pfsp.py` | `peer_commands` / `GetObservation` |
 
@@ -80,7 +82,8 @@ Diario empírico de Capa 0 (Runs 8–36, 49 kB): [`_archive/runs/13-capa0-status
 ## Convenciones
 
 - **Un cambio de régimen por vez** (reward *o* red *o* vocab *o* oponente). Incluye estado latente: no mezclar en el mismo resume.
-- **`SCALAR_DIM = 33`** (P4: + naval/air). Ckpts land `in=29` padan. Los de 21/19/16 son otra era — scratch o adapt explícito.
+- **`SCALAR_DIM = 41`** (macro-first: weap-save / colas / Lanchester / …). Soft-pad Net2Net desde 33/34. Eras 21/19/16 → scratch.
+- **VRAM 2070 (8 GB):** `TRAIN_ARGS` con `--xf-topk 0 --qsa-topk 0`; joint XF solo buildings válidos. Ver `design/macro-first.md`.
 - **Métrica norte:** `wr20` vs el ancla (`beginner` / `easy` / PFSP). Reward medio y `P(win)` son diagnóstico.
 - **Type-head append-only:** `patrol` + `support_power` están al final. Resume land = partial load (`adapt_v2_state_dict`).
 - **Escala:** antes de tocar red, verificar que el cuello no sea señal/entorno (lección de la era económica, archivada).

@@ -1,5 +1,8 @@
 # Onboarding: de 0 a ~50% vs easy, sin un `best.pt`
 
+> **Macro-first (2026-09):** teacher **expand desde A**, preset **`eradicate_v5`**, tapes acumulativas (sin wipe en promote sano).
+> Arch / reward / VRAM: [`../design/macro-first.md`](../design/macro-first.md).
+>
 > **Para quién:** clonaste el repo y **no tenés checkpoints**.
 > **Qué no es:** un atajo para medir una arch nueva contra un run viejo. Eso sigue siendo `--scratch` vs 100% easy (sin `--onboard`).
 > **Contrato Aliados:** [`../contract/ra-aliados.md`](../contract/ra-aliados.md). Docker / dash: [`operacion.md`](operacion.md).
@@ -19,7 +22,7 @@ Comando: `.\.venv\Scripts\python.exe rl\auto_train.py --scratch --onboard` (desp
 4. `reject_feet_push_cell`: always-on. AM de grupo sobre el centroide/yard con pack idle ≥12 se reescribe a `war_objective` (raid/visible/mental/fog).
 5. `guard_army_push_cell`: annealable (`heuristic_p`). No tira una vanguardia **lejos del objetivo** hacia el yard. Spawn-agnóstico.
 
-**2026-09-13 — dest agnóstico / spawn aleatorio:** `war_objective` compartido (teacher + adapter + tape). Nunca `BEACON_BY_MAP` / `(95,11)`. Opening = fog scout desde el conyard. `--spawn random` (SW|NE por episodio), `--player-faction RandomAllies`, `--enemy-faction Random`. Sin map pool. Schema A/B/S `eco_and_combat_scout_v1`, C/D/E `eco_and_combat_expand_v3`. Requiere `--scratch --onboard` (cintas v4 no hidratan).
+**2026-09-13 — dest agnóstico / spawn aleatorio:** `war_objective` compartido (teacher + adapter + tape). Nunca `BEACON_BY_MAP` / `(95,11)`. Opening = fog scout desde el conyard. `--spawn random` (SW|NE por episodio), `--player-faction RandomAllies`, `--enemy-faction Random`. Sin map pool. Schema **`eco_and_combat_expand_v3`** en todas las fases. Scratch si venís de tapes rush/scout viejas.
 
 **2026-09-06 — Phase A inactivity:** Phase A / `--onboard` forces `--qsa-topk 0` and `--xf-topk 0` (dense). `balance_bc_samples` defaults **512/512**. Teacher `_push_cell` = `war_objective`. `bc_only` eval usa **temperature=0.0**.
 
@@ -33,16 +36,19 @@ Comando: `.\.venv\Scripts\python.exe rl\auto_train.py --scratch --onboard` (desp
 
 
 
-El camino más corto que **viaja con el git** (sin pesos) es:
+El camino más corto que **viaja con el git** (sin pesos) es la currícula **macro-first**
+(3 etapas lógicas; labels A…E en `curriculum.json`):
 
-1. **A** — clonar al `ScriptedTeacher` **rush** vs `beginner` (SFT, sin PPO)
-2. **B** — PPO + SIL + BC rifle vs `beginner` hasta wr20 ~50%
-3. **S** — bridge PFSP-RL (ancla `beginner`, pool `rl`) — suaviza el cliff B→C
-4. **C** — teacher **expand** (weap + `1tnk` + mix `e3`) + PPO vs `easy` (mix beginner→easy)
-5. **D** — lo mismo vs `medium` (mix easy→medium)
-6. **E** — lo mismo vs `hard` (OpenRA `normal`; mix medium→hard) hasta wr20 ~50%
+1. **A** — SFT (`--bc-only`) con `ScriptedTeacher` **expand** vs `beginner`
+2. **B** — PPO + SIL + BC expand, λ_bc → 0.05, vs `beginner`
+3. **S** — bridge PFSP-RL / MAB (ancla `beginner`) — suaviza el cliff hacia easy
+4. **C** — PPO + expand BC vs `easy` (**sin** wipe de elite/tapes ni reset-opt de doctrina)
+5. **D** — vs `medium`
+6. **E** — liga PFSP-RL vs `hard` (OpenRA `normal`) + hist hasta wr20 ~50%
 
-Eso es lo que hace `auto_train.py --scratch --onboard`. Un solo comando. El experto es código (`rl/scripted_teacher.py`). `hard` en este repo es el bot **normal** de OpenRA, no un ModularBot llamado hard.
+Eso es `auto_train.py --scratch --onboard`. El experto es código (`rl/scripted_teacher.py`,
+siempre `mode=expand`). Detalle: [`../design/macro-first.md`](../design/macro-first.md).
+
 
 
 
@@ -152,7 +158,7 @@ Ctrl+C para parar. El log: `rl/auto_train.log`.
 | `--onboard-collect` | — | Suma teacher games aunque ya haya tapes. |
 | `--onboard-collect-only` | — | Solo acumula `teacher_wins` hasta `--onboard-collect-target` (default 40); sin SFT/eval; no borra `latest.pt`; no requiere `--scratch`. |
 
-`--scratch --onboard`, el **resume** `--onboard` y el promote **A→B** reusan `teacher_wins/` si el schema coincide: A/B/S `eco_and_combat_scout_v1`, C/D/E `eco_and_combat_expand_v3`. Tope 40 eps (las más cortas pisan las más largas). Al promover B→C (y C→D, D→E) se **borran** las cintas: el rifle teacher no se clona vs easy. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas con schema distinto se ignoran (v4/expand_v2 no hidratan).
+`--scratch --onboard`, el **resume** `--onboard` y el promote **A→B** reusan `teacher_wins/` si el schema coincide: Todas las fases: schema **`eco_and_combat_expand_v3`** (teacher expand). Tope 40 eps. Promote B→C / C→D / D→E **conserva** `teacher_wins/` y elite (misma doctrina); wipe solo en rewind/collapse. `--onboard-collect` / `--onboard-collect-only` siguen re-jugando. Cintas con schema distinto se ignoran (v4/expand_v2 no hidratan).
 
 
 

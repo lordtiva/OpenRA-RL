@@ -160,24 +160,43 @@ def _seg_mean(x: torch.Tensor, valid: torch.Tensor) -> torch.Tensor:
 
 
 def _pad_targets(mb: list, T: int, device: str):
-    """lp_old / adv / ret / v_old [B, T] (constantes, sin grafo)."""
+    """lp_old / adv / ret / v_old [, lp_old_macro, lp_old_micro] [B, T]."""
     B = len(mb)
     lp_old = torch.zeros(B, T, device=device)
+    lp_old_m = torch.zeros(B, T, device=device)
+    lp_old_u = torch.zeros(B, T, device=device)
+    has_split = True
     adv = torch.zeros(B, T, device=device)
     ret = torch.zeros(B, T, device=device)
     v_old = torch.zeros(B, T, device=device)
     for b, seg in enumerate(mb):
         for t, s in enumerate(seg):
-            lp = s["action"]["log_prob"]
+            act = s["action"]
+            lp = act["log_prob"]
             if torch.is_tensor(lp):
                 lp_old[b, t] = lp.reshape(-1)[0].to(device)
             else:
                 lp_old[b, t] = float(lp)
+            lm = act.get("log_prob_macro")
+            lu = act.get("log_prob_micro")
+            if lm is None or lu is None:
+                has_split = False
+            else:
+                if torch.is_tensor(lm):
+                    lp_old_m[b, t] = lm.reshape(-1)[0].to(device)
+                else:
+                    lp_old_m[b, t] = float(lm)
+                if torch.is_tensor(lu):
+                    lp_old_u[b, t] = lu.reshape(-1)[0].to(device)
+                else:
+                    lp_old_u[b, t] = float(lu)
             adv[b, t] = s["adv"] if torch.is_tensor(s["adv"]) else float(s["adv"])
             ret[b, t] = s["ret"] if torch.is_tensor(s["ret"]) else float(s["ret"])
             vp = s["value_pred"]
             v_old[b, t] = vp if torch.is_tensor(vp) else float(vp)
-    return lp_old, adv, ret, v_old
+    if not has_split:
+        return lp_old, adv, ret, v_old, None, None
+    return lp_old, adv, ret, v_old, lp_old_m, lp_old_u
 
 
 class PPOTrainer:
@@ -212,10 +231,12 @@ class PPOTrainer:
             torch.backends.cudnn.benchmark = True
 
     def _eval_mb(self, mb: list):
-        """lp, ent, val, valid [B, T]. Fallback por-seg para nets de test."""
+        """lp, ent, val, valid [, lp_macro, lp_micro] [B, T]."""
         fn = getattr(self.net, "evaluate_actions_seq_batch", None)
         if callable(fn):
-            return fn(mb, self.device)
+            out = fn(mb, self.device)
+            if isinstance(out, (tuple, list)) and len(out) >= 4:
+                return out
         T = max(len(s) for s in mb)
         lps, ents, vals, masks = [], [], [], []
         for seg in mb:
@@ -236,8 +257,9 @@ class PPOTrainer:
             ents.append(e)
             vals.append(v)
             masks.append(valid)
-        return (torch.stack(lps), torch.stack(ents),
-                torch.stack(vals), torch.stack(masks))
+        lp = torch.stack(lps)
+        return (lp, torch.stack(ents),
+                torch.stack(vals), torch.stack(masks), lp, torch.zeros_like(lp))
 
     def _autocast_ctx(self):
         return _autocast(self.device, enabled=self.use_amp)
@@ -340,12 +362,18 @@ class PPOTrainer:
                 self._mb_seen += 1
                 self.net.zero_grad(set_to_none=True)
                 with self._autocast_ctx():
-                    lp_new, entropy, value, valid = self._eval_mb(mb)
+                    ev = self._eval_mb(mb)
+                lp_new, entropy, value, valid = ev[0], ev[1], ev[2], ev[3]
+                lp_m = ev[4].float() if len(ev) > 4 else None
+                lp_u = ev[5].float() if len(ev) > 5 else None
                 lp_new = lp_new.float()
                 entropy = entropy.float()
                 value = value.float()
                 T = lp_new.size(1)
-                lp_old, adv, ret, v_old = _pad_targets(mb, T, self.device)
+                padded = _pad_targets(mb, T, self.device)
+                lp_old, adv, ret, v_old = padded[0], padded[1], padded[2], padded[3]
+                lp_old_m = padded[4] if len(padded) > 4 else None
+                lp_old_u = padded[5] if len(padded) > 5 else None
                 finite = ((~valid)
                           | (torch.isfinite(lp_new)
                              & torch.isfinite(entropy)
@@ -359,10 +387,30 @@ class PPOTrainer:
                 ratio = torch.exp(log_ratio)
                 if not torch.isfinite(ratio).all():
                     continue
-                surr1 = ratio * adv
-                surr2 = torch.clamp(ratio, 1 - self.clip_eps,
-                                    1 + self.clip_eps) * adv
-                pi_t = -torch.min(surr1, surr2)
+                if (lp_m is not None and lp_u is not None
+                        and lp_old_m is not None and lp_old_u is not None
+                        and torch.isfinite(lp_m).all()
+                        and torch.isfinite(lp_u).all()):
+                    # Decoupled PPO: macro (type+item) vs spatial (cell+unit)
+                    # share advantages; cell-head noise does not swamp build.
+                    ratio_m = torch.exp((lp_m - lp_old_m).clamp(
+                        -_LOG_RATIO_CLAMP, _LOG_RATIO_CLAMP))
+                    ratio_u = torch.exp((lp_u - lp_old_u).clamp(
+                        -_LOG_RATIO_CLAMP, _LOG_RATIO_CLAMP))
+                    surr_m = torch.min(
+                        ratio_m * adv,
+                        torch.clamp(ratio_m, 1 - self.clip_eps,
+                                    1 + self.clip_eps) * adv)
+                    surr_u = torch.min(
+                        ratio_u * adv,
+                        torch.clamp(ratio_u, 1 - self.clip_eps,
+                                    1 + self.clip_eps) * adv)
+                    pi_t = -0.5 * (surr_m + surr_u)
+                else:
+                    surr1 = ratio * adv
+                    surr2 = torch.clamp(ratio, 1 - self.clip_eps,
+                                        1 + self.clip_eps) * adv
+                    pi_t = -torch.min(surr1, surr2)
                 pi_b = _seg_mean(pi_t, valid)
                 v_clipped = v_old + torch.clamp(
                     value - v_old, -self.clip_eps, self.clip_eps)
@@ -435,7 +483,8 @@ class PPOTrainer:
                 mb = [segs[i] for i in idx[start:start + segs_per_batch]]
                 self.net.zero_grad(set_to_none=True)
                 with self._autocast_ctx():
-                    lp, _, _, valid = self._eval_mb(mb)
+                    ev = self._eval_mb(mb)
+                    lp, valid = ev[0], ev[3]
                 lp = lp.float()
                 finite = ((~valid) | torch.isfinite(lp))
                 seg_ok = finite.all(dim=-1) & valid.any(dim=-1)

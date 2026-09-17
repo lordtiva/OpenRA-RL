@@ -254,7 +254,7 @@ check("elite save/load steps", n_load == len(buf_e) and n_load > 0)
 check("elite load missing = 0",
       EliteBuffer().load(_el_dir / "nope.pt") == 0)
 
-th = ScriptedTeacher()
+th = ScriptedTeacher(mode="rush")
 from rl.action_adapter import PACK_ARMY as _PACK
 
 check("teacher proc antes de barracks",
@@ -329,7 +329,7 @@ obs_vis = _obs(
     units=[_u(i, "e1", 12, 16) for i in range(1, 14)],
     enemy_bldgs=[_b("proc", 200, 70, 22)],
 )
-th2 = ScriptedTeacher()
+th2 = ScriptedTeacher(mode="rush")
 th2.phase = "attack"
 cell = th2._push_cell(obs_vis)
 check("push_cell prefiere visible enemigo sobre beacon",
@@ -337,7 +337,7 @@ check("push_cell prefiere visible enemigo sobre beacon",
 check("push_cell visible != beacon", cell != (95, 11))
 
 # Ghost last_seen: after seeing an enemy then fog, hunt the ghost cell.
-th3 = ScriptedTeacher()
+th3 = ScriptedTeacher(mode="rush")
 obs_see = _obs(
     cash=5000, harv=1,
     bldgs=("fact", "proc", "barr"),
@@ -391,7 +391,7 @@ check("denser cluster near (88-90,18-20)",
       and 86 <= bel.enemy_base_xy[0] <= 92
       and 16 <= bel.enemy_base_xy[1] <= 22)
 
-th4 = ScriptedTeacher()
+th4 = ScriptedTeacher(mode="rush")
 th4.phase = "attack"
 # Seed belief via visible buildings then fog — push should use mental base.
 obs_see_b = _obs(
@@ -417,7 +417,7 @@ check("push uses mental base after leftovers cleared",
 check("mental base push != GPS beacon", cell_mb != (95, 11))
 
 sc = scalar_features(obs_fog_base, belief=th4.belief)
-check("SCALAR_DIM is 34", SCALAR_DIM == 34 and sc.shape == (34,))
+check("SCALAR_DIM is 41", SCALAR_DIM == 41 and sc.shape == (41,))
 check("has_enemy_base_belief scalar on", float(sc[25]) == 1.0)
 check("base_conf > 0", float(sc[28]) > 0.0)
 
@@ -493,7 +493,7 @@ check("balance defaults 512/512",
       and _sig.parameters["combat_cap"].default == 512)
 
 # Opening prior: fresh teacher, empty belief → fog, never GPS beacon.
-th_open = ScriptedTeacher()
+th_open = ScriptedTeacher(mode="rush")
 obs_open = _obs(
     cash=5000, harv=1,
     bldgs=("fact", "proc", "barr"),

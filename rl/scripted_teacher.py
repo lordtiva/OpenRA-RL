@@ -25,13 +25,9 @@ Este teacher:
   - P3 land-first tech/defense AFTER eco/barracks (optional, not BUILD_PRIORITY):
     cheap defense → dome → weap → fix → atek/stek. Gates on rush rolling so
     a_short Allies rush stays intact. Navy/air stays light via _optional_naval_air.
-  - mode=expand (onboard C/D/E): 2nd powr/proc from starting cash, then weap,
-    tanks, two pbox. 2nd proc prefers the mid-facing home mine; after ~4
-    tanks, 3rd proc (mid fringe if Adjacent allows, else home). Idle harvs
-    deny shared mid ore. Fix+MCV mid expand tried/reverted (needs fix;
-    walk rarely completed). Spend cash+ore. Hold to 12 tanks, tanks-only
-    push, retreat under 7, 2nd weap, finish-hunt when committed.
-    A/B keep mode=rush.
+  - mode=expand (default, onboard all phases): 2nd powr/proc from starting
+    cash, then weap, tanks, two pbox. Ore placement is Ch2+Ch4 only
+    (map-agnostic). Spend cash+ore. Hold to 12 tanks, tanks-only push.
 """
 from __future__ import annotations
 
@@ -162,27 +158,23 @@ class ScriptedTeacher(ScriptedBot):
     # ore=0, which looked "stale" and yanked them onto CY crumbs (bench
     # seed 8047: earned 575 at t=5k and still 575 at t=10k).
     HARV_REORDER_TICKS = 200
-    A_SHORT_MINES = (
-        (23, 5), (4, 30), (32, 28),
-        (80, 4), (77, 22), (104, 25),
-        (56, 35),
-    )
     _PROD = frozenset({
         "fact", "afac", "proc", "weap", "tent", "barr", "kenn",
         "hpad", "afld", "syrd",
     })
 
     def __init__(self, verbose: bool = False, rush_attack_move: int | None = None,
-                 mode: str = "rush"):
-        """Optional per-instance RUSH override for benches; class default unchanged.
+                 mode: str = "expand"):
+        """Optional per-instance RUSH override for benches; class default expand.
 
-        mode=rush: A/B rifle teacher. mode=expand: C/D/E weap+tank overlay.
+        mode=expand: weap+tank overlay from iter 1 (macro-first).
+        mode=rush: rifle-only (kept for ablations, not used in onboard).
         """
         super().__init__(verbose=verbose)
         if rush_attack_move is not None:
             self.RUSH_ATTACK_MOVE = int(rush_attack_move)
-        m = str(mode or "rush").lower().strip()
-        self.mode = m if m in ("rush", "expand") else "rush"
+        m = str(mode or "expand").lower().strip()
+        self.mode = m if m in ("rush", "expand") else "expand"
         # Per-episode fog belief + last visible contact (map-agnostic hunt).
         self.belief = EnemyBeliefStore()
         self._last_contact: Optional[Tuple[int, int]] = None
@@ -426,15 +418,9 @@ class ScriptedTeacher(ScriptedBot):
     def _mid_ore_target(
         self, obs: OpenRAObservation,
     ) -> Optional[Tuple[int, int]]:
-        """Shared mid mine on a_short; else densest central ore zone."""
+        """Densest central explored-ore zone (Ch2 + Ch4). Map-agnostic."""
         arr = _spatial_chw(obs)
         w, h = self._map_wh(obs, arr)
-        name = str(getattr(getattr(obs, "map_info", None), "map_name", "")
-                   or "").lower()
-        known = ("a_short" in name or "singles" in name or "fase2" in name)
-        if known:
-            # Fixed a_short mid mine; ignore possibly-wrong unit-test map_info size.
-            return (56, 35)
         zones = self._ore_zones(arr)
         if not zones:
             return None
@@ -445,19 +431,11 @@ class ScriptedTeacher(ScriptedBot):
     def _all_mine_points(
         self, obs: OpenRAObservation,
     ) -> List[Tuple[int, int]]:
+        """Explored ore-zone centroids from Ch2 (mineral) + Ch4 (fog)."""
         arr = _spatial_chw(obs)
-        w, h = self._map_wh(obs, arr)
-        name = str(getattr(getattr(obs, "map_info", None), "map_name", "")
-                   or "").lower()
         pts: List[Tuple[int, int]] = []
-        known = ("a_short" in name or "singles" in name or "fase2" in name)
-        if known:
-            for mx, my in self.A_SHORT_MINES:
-                if 0 <= mx < w and 0 <= my < h:
-                    pts.append((int(mx), int(my)))
-        if not pts:
-            for z in self._ore_zones(arr):
-                pts.append(z["xy"])
+        for z in self._ore_zones(arr):
+            pts.append(z["xy"])
         uniq: List[Tuple[int, int]] = []
         for p in pts:
             if any(_cheb(p, q) < 8 for q in uniq):

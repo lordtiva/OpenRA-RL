@@ -152,6 +152,7 @@ COMBAT_TRAIN_ROLES = {
     "ship_sub", "ship_combat", "ship_amphib",
     # IDENTITY_ITEMS that are still combat (gated until proc+harv).
     "e7", "medi", "mech", "spy", "ctnk", "stnk", "mh60",
+    "1tnk", "2tnk", "e3", "e2", "v2rl", "arty",
 }
 ECONOMY_BUILD_ROLES = {"power", "refinery"}  # legal BUILD before proc exists
 MOVE_CELL_TYPES = {
@@ -182,6 +183,14 @@ GROUP_MACRO_TYPES = (
 PACK_ARMY = 12
 PACK_HOME_RADIUS = 18
 _NON_COMBAT_TAGS = ("harv", "mcv")
+# Save for War Factory: mask cheap infantry TRAIN once cash can bank $2000.
+WEAP_SAVE_CASH = 1200
+WEAP_COST = 2000
+CHEAP_TRAIN_ROLES = frozenset({
+    "infantry_basic", "infantry_antiinf",
+    # IDENTITY cheap infantry (soviets e2 etc.) must mask while saving for weap.
+    "e1", "e2",
+})
 
 
 def owns_proc(obs) -> bool:
@@ -190,6 +199,42 @@ def owns_proc(obs) -> bool:
         if str(getattr(b, "type", "")).lower() == "proc":
             return True
     return False
+
+
+def owns_weap(obs) -> bool:
+    """True if a war factory is standing."""
+    for b in getattr(obs, "buildings", None) or []:
+        if str(getattr(b, "type", "")).lower() == "weap":
+            return True
+    return False
+
+
+def weap_in_flight(obs) -> bool:
+    """True if weap is queued or ready to PLACE."""
+    for p in getattr(obs, "production", None) or []:
+        if str(getattr(p, "item", "") or "").lower() == "weap":
+            return True
+    pending = pending_place_item(obs)
+    return bool(pending) and str(pending).lower() == "weap"
+
+
+def should_save_for_weap(obs) -> bool:
+    """Bank cash for weap: barracks up, weap legal, no factory yet."""
+    if owns_weap(obs) or weap_in_flight(obs):
+        return False
+    if not owns_proc(obs):
+        return False
+    has_barracks = False
+    for b in getattr(obs, "buildings", None) or []:
+        if str(getattr(b, "type", "") or "").lower() in ("tent", "barr"):
+            has_barracks = True
+            break
+    if not has_barracks:
+        return False
+    avail = {str(x).lower() for x in (getattr(obs, "available_production", None) or [])}
+    if "weap" not in avail:
+        return False
+    return spendable_resources(obs) >= WEAP_SAVE_CASH
 
 
 def economy_ready_for_combat(obs) -> bool:
@@ -1119,14 +1164,16 @@ def _split_production(obs):
             por_rol.setdefault(key, []).append(it)
         return por_rol
 
-    from rl.roles import cheapest_of
+    from rl.roles import cheapest_of, sample_of
     train_por_rol = _roles(trainables)
     build_por_rol = _roles(buildables)
     train_roles = sorted(train_por_rol)
     build_roles = sorted(build_por_rol)
-    rol_a_concreto = {r: cheapest_of(items) for r, items in train_por_rol.items()}
+    # Stochastic concrete within a role bucket (tech exploration); IDENTITY
+    # items are already their own keys so they skip cheapest collapse.
+    rol_a_concreto = {r: sample_of(items) for r, items in train_por_rol.items()}
     for r, items in build_por_rol.items():
-        rol_a_concreto[r] = cheapest_of(items)
+        rol_a_concreto[r] = sample_of(items)
     return train_roles, build_roles, rol_a_concreto
 
 
@@ -1404,6 +1451,17 @@ class ActionIndex:
                 if slot >= n_vocab:
                     break
                 if role in COMBAT_TRAIN_ROLES:
+                    self.train_slot_mask[slot] = False
+                    self.item_mask[slot] = False
+            if not bool(self.train_slot_mask.any()):
+                m[TYPE_TO_IDX["train"]] = False
+                self.type_mask = torch.from_numpy(m)
+        # Save for weap: cheap e1 spam vacuums cash before $2000 banks.
+        if should_save_for_weap(obs):
+            for slot, role in enumerate(self.train_items):
+                if slot >= n_vocab:
+                    break
+                if role in CHEAP_TRAIN_ROLES:
                     self.train_slot_mask[slot] = False
                     self.item_mask[slot] = False
             if not bool(self.train_slot_mask.any()):
