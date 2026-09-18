@@ -75,7 +75,8 @@ DEFAULTS = {
     "s_min_iters": 20,
     "s_promote_wr20": 0.45,
     "s_streak": 5,
-    "s_anchor_prob": 0.25,  # 25% beginner anchor, 75% PFSP challengers
+    "s_anchor_prob": 0.40,  # keep beginner wins in the batch (anti Easy spiral)
+    "s_mab_floor": 0.35,  # do not let crushed beginner starve to ~0
     # P3 opt-in: named pool or comma keys ("" = a_short via TRAIN_ARGS --scenario).
     "map_pool": "",
 }
@@ -224,6 +225,8 @@ def save_curriculum(path: str | Path, cfg: dict) -> None:
         "s_streak": int(cfg.get("s_streak", DEFAULTS["s_streak"])),
         "s_anchor_prob": float(
             cfg.get("s_anchor_prob", DEFAULTS["s_anchor_prob"])),
+        "s_mab_floor": float(
+            cfg.get("s_mab_floor", DEFAULTS.get("s_mab_floor", 0.35))),
         "map_pool": str(cfg.get("map_pool") or DEFAULTS.get("map_pool") or ""),
         "a_launched": bool(cfg.get("a_launched")),
         "c_reset_opt_done": bool(cfg.get("c_reset_opt_done")),
@@ -465,9 +468,11 @@ def _s_phase_flags(cfg: dict) -> list[str]:
         "--bot-type", "beginner",
         "--pfsp", "--mab",
         "--pfsp-pool", "beginner,easy",
-        "--pfsp-anchor-prob", "0.00",
+        "--pfsp-anchor-prob", "{:.2f}".format(float(
+            cfg.get("s_anchor_prob", DEFAULTS["s_anchor_prob"]))),
         "--mab-tau", "0.25",
-        "--mab-floor", "0.05",
+        "--mab-floor", "{:.2f}".format(float(
+            cfg.get("s_mab_floor", DEFAULTS.get("s_mab_floor", 0.35)))),
         "--bc",
         "--bc-teacher-bot", "beginner",
         "--bc-teacher-mode", "expand",

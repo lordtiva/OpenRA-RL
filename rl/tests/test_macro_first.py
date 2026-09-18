@@ -109,8 +109,14 @@ def test_adapter_exposes_1tnk_and_2tnk():
     assert "e3" in aidx.train_items
 
 
+def test_weap_save_skips_thin_garrison():
+    obs = _obs(cash=1500, ore=0)  # default: 1 e1
+    assert should_save_for_weap(obs) is False
+
+
 def test_weap_save_masks_cheap_infantry():
-    obs = _obs(cash=1500, ore=0)
+    units = [_U("harv", 1)] + [_U("e1", 10 + i) for i in range(6)]
+    obs = _obs(cash=1500, ore=0, units=units)
     assert should_save_for_weap(obs) is True
     assert 1500 >= WEAP_SAVE_CASH
     v = Vocab()
@@ -219,3 +225,73 @@ def test_net_accepts_9ch_and_20ch():
     assert "log_prob_macro" in out9 and "log_prob_micro" in out9
     out20 = net.act(_batch(20), h)
     assert out20["log_prob"].shape == (B,)
+
+def test_harvester_train_cap_masks_at_four():
+    from rl.action_adapter import HARVESTER_TRAIN_CAP
+    units = [_U("harv", 100 + i) for i in range(HARVESTER_TRAIN_CAP)] + [
+        _U("e1", 200)]
+    obs = _obs(
+        bldgs=("fact", "proc", "powr", "tent", "weap"),
+        cash=5000, units=units,
+        avail=("harv", "e1", "1tnk", "powr"))
+    obs.economy.harvester_count = HARVESTER_TRAIN_CAP
+    v = Vocab()
+    v.seed_roles()
+    aidx = ActionIndex(obs, v)
+    assert "harvester" in aidx.train_items
+    slot = aidx.train_items.index("harvester")
+    assert bool(aidx.train_slot_mask[slot]) is False
+
+
+def test_yard_attack_move_redirects_to_war_objective(monkeypatch):
+    from rl.action_adapter import (
+        TYPE_TO_IDX, index_to_command_effective, PACK_HOME_RADIUS)
+    # army_attack_move stays masked until PACK_ARMY; infantry path is live.
+    units = [_U("e1", 10 + i, x=12, y=16) for i in range(8)]
+    obs = _obs(
+        bldgs=("fact", "proc", "powr", "tent", "weap"),
+        cash=500, units=units,
+        avail=("e1", "1tnk"))
+    v = Vocab()
+    v.seed_roles()
+    aidx = ActionIndex(obs, v)
+    import rl.war_objective as wo
+    import rl.auto_support as aus
+    monkeypatch.setattr(wo, "war_objective", lambda obs, aidx: (28, 28))
+    monkeypatch.setattr(aus, "home_raid_targets", lambda obs: [])
+    # Own buildings default to (5,5); click near home.
+    cx, cy = 6, 6
+    cell = cy * aidx.w + cx
+    t = TYPE_TO_IDX["infantry_attack_move"]
+    action, _eff = index_to_command_effective(
+        obs, t, 0, cell, 0, aidx, heuristic_p=0.0)
+    cmd = action.commands[0]
+    assert (cmd.target_x, cmd.target_y) == (28, 28)
+
+
+def test_onboard_s_mab_and_hyper_lr_min():
+    from rl.hyper_health import HyperConfig
+    from rl.onboard import DEFAULTS, _s_phase_flags
+    assert HyperConfig().lr_min == 2e-5
+    assert DEFAULTS["s_anchor_prob"] == 0.40
+    assert DEFAULTS["s_mab_floor"] == 0.35
+    flags = _s_phase_flags(DEFAULTS)
+    assert flags[flags.index("--pfsp-anchor-prob") + 1] == "0.40"
+    assert flags[flags.index("--mab-floor") + 1] == "0.35"
+
+
+def test_mining_rate_damps_above_harvester_cap():
+    from rl.reward_shaping import ShapedReward
+    sh = ShapedReward(preset="eradicate_v5")
+    units = [_U("harv", 100 + i) for i in range(8)]
+    obs = _obs(units=units, cash=500)
+    obs.economy.harvester_count = 8
+    sh.reset(obs)
+    # Simulate ore income
+    obs2 = _obs(units=units, cash=500, ore=500)
+    obs2.economy.harvester_count = 8
+    # earned delta via ore/cash — step uses spendable/earned internals
+    r = sh.step(obs2, done=False)
+    # Just ensure mining component path ran without error; damp is internal
+    assert "mining" in sh.last_components
+

@@ -37,7 +37,7 @@ class HyperConfig:
     entropy_low: float = 1.0
     clip_high: float = 0.3
 
-    lr_min: float = 5e-6  # 1e-6 froze recovery after timeout grad spikes
+    lr_min: float = 2e-5  # 5e-6 petrified S after Easy MAB death spiral
     lr_max: float = 3e-4
     lr_down_factor: float = 0.7
     lr_up_factor: float = 1.2

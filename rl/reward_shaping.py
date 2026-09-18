@@ -590,7 +590,13 @@ class ShapedReward:
             earned = int(earned)
             if self._prev_earned is not None:
                 delta = max(0, earned - self._prev_earned)
-                r_mining += self.w_mining_rate * delta / self.mining_rate_scale
+                # Saturate mining_rate once fleet > harvester_cap (else 30+
+                # harvs farm infinite dense reward without fighting).
+                scale_harv = 1.0
+                if n_harv > self.harvester_cap > 0:
+                    scale_harv = float(self.harvester_cap) / float(n_harv)
+                r_mining += (self.w_mining_rate * delta / self.mining_rate_scale
+                             * scale_harv)
                 # Bono primer camión entregado (salto cuántico)
                 if not self._first_ore_paid and earned > 0:
                     self._first_ore_paid = True

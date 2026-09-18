@@ -186,6 +186,8 @@ _NON_COMBAT_TAGS = ("harv", "mcv")
 # Save for War Factory: mask cheap infantry TRAIN once cash can bank $2000.
 WEAP_SAVE_CASH = 1200
 WEAP_COST = 2000
+# Soft OpenRA-like fleet cap (mining_rate had no saturation → 30+ harvs).
+HARVESTER_TRAIN_CAP = 4
 CHEAP_TRAIN_ROLES = frozenset({
     "infantry_basic", "infantry_antiinf",
     # IDENTITY cheap infantry (soviets e2 etc.) must mask while saving for weap.
@@ -219,7 +221,13 @@ def weap_in_flight(obs) -> bool:
 
 
 def should_save_for_weap(obs) -> bool:
-    """Bank cash for weap: barracks up, weap legal, no factory yet."""
+    """Bank cash for weap: barracks up, weap legal, no factory yet.
+
+    Do not freeze the barracks while the garrison is thin — Easy's early
+    tank push arrives before $2000 banks if e1 is masked the whole time.
+    """
+    if n_combat_total(obs) < 6:
+        return False
     if owns_weap(obs) or weap_in_flight(obs):
         return False
     if not owns_proc(obs):
@@ -1467,6 +1475,18 @@ class ActionIndex:
             if not bool(self.train_slot_mask.any()):
                 m[TYPE_TO_IDX["train"]] = False
                 self.type_mask = torch.from_numpy(m)
+        # Cap harvester TRAIN (reward mining_rate has no fleet ceiling).
+        n_harvs = n_harvester_total(obs)
+        if n_harvs >= HARVESTER_TRAIN_CAP:
+            for slot, role in enumerate(self.train_items):
+                if slot >= n_vocab:
+                    break
+                if role in ("harvester", "harv"):
+                    self.train_slot_mask[slot] = False
+                    self.item_mask[slot] = False
+            if not bool(self.train_slot_mask.any()):
+                m[TYPE_TO_IDX["train"]] = False
+                self.type_mask = torch.from_numpy(m)
         # Low-power: e1/pbox cannot steal the $300 plant. PLACE stays on.
         if power_in_deficit(obs) and owns_proc(obs):
             for slot, role in enumerate(self.train_items):
@@ -1726,16 +1746,25 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
         else:
             cx, cy = remap_move_cell(obs, aidx, cx, cy, actor_id)
         if t_name in ("army_attack_move", "infantry_attack_move",
-                      "vehicle_attack_move"):
+                      "vehicle_attack_move", "attack_move"):
             # Lake/choke staging is always-on safety (like remap). Binary
             # heuristic_p=0 left armies stuck on the west shore.
-            cx, cy = stage_army_attack_cell(obs, aidx, cx, cy)
-            from rl.war_objective import reject_feet_push_cell
-            cx, cy = reject_feet_push_cell(obs, aidx, cx, cy)
-            # P1.4: vanguard-yank guard anneals; feet-reject does not.
-            hp = 1.0 if heuristic_p is None else float(heuristic_p)
-            if hp >= 1.0 or (hp > 0.0 and random.random() < hp):
-                cx, cy = guard_army_push_cell(obs, aidx, cx, cy)
+            if t_name != "attack_move":
+                cx, cy = stage_army_attack_cell(obs, aidx, cx, cy)
+                from rl.war_objective import reject_feet_push_cell
+                cx, cy = reject_feet_push_cell(obs, aidx, cx, cy)
+                # P1.4: vanguard-yank guard anneals; feet-reject does not.
+                hp = 1.0 if heuristic_p is None else float(heuristic_p)
+                if hp >= 1.0 or (hp > 0.0 and random.random() < hp):
+                    cx, cy = guard_army_push_cell(obs, aidx, cx, cy)
+            # Yard autism: attack clicks in own base with no raid → war dest.
+            from rl.auto_support import _near_own_base, home_raid_targets
+            if (_near_own_base(obs, (int(cx), int(cy)), radius=PACK_HOME_RADIUS)
+                    and not home_raid_targets(obs)):
+                from rl.war_objective import war_objective
+                obj = war_objective(obs, aidx)
+                if obj is not None:
+                    cx, cy = int(obj[0]), int(obj[1])
     eff_cell_flat = int(cy) * aidx.w + int(cx)
     if t_name in ("train", "build", "place_building", "cancel_production"):
         # PLACE/cancel dejan item_type concreto (proc/gun/tent); aidx.items
