@@ -388,10 +388,9 @@ async def amain(args):
     net = AlphaLiteNet()
     net.use_ring_goal = bool(getattr(args, "ring_goal", True))
     print(f"[ring] use_ring_goal={net.use_ring_goal}", flush=True)
-    set_attack_cell_override(
-        getattr(args, "attack_cell_override", "off"))
-    print(f"[1A] attack_cell_override="
-          f"{getattr(args, "attack_cell_override", "off")}", flush=True)
+    _aco = getattr(args, "attack_cell_override", "off")
+    set_attack_cell_override(_aco)
+    print(f"[1A] attack_cell_override={_aco}", flush=True)
 
     if getattr(args, "xf_topk", 0):
         net.xf_topk = int(args.xf_topk)
