@@ -109,10 +109,10 @@ class BotPFSP:
         return max(_EPS, 1.0 - self.winrate(bot))
 
     def mab_probs(self) -> dict[str, float]:
-        """Softmax P(bot) ∝ exp((1-WR)/τ), then mix with a floor.
+        """Softmax P(bot) proportional to exp(-(WR-0.5)^2 / tau) + floor.
 
-        Volume concentrates on the 30–60% winrate zone (zone of proximal
-        development). Crushed bots (WR>85%) decay toward `mab_floor`.
+        Peaks near 50% WR (zone of proximal development). The old
+        (1-WR)/tau form overweighted unbeatable rivals (WR~0).
         """
         bots = []
         for b in [self.anchor, *self.pool]:
@@ -120,11 +120,11 @@ class BotPFSP:
                 bots.append(b)
         if not bots:
             return {self.anchor: 1.0}
+        tau = max(float(self.mab_tau), 1e-6)
         logits = []
         for b in bots:
             wr = self.winrate(b)
-            zpd = 1.5 if 0.30 <= wr <= 0.60 else 1.0
-            logits.append(((1.0 - wr) / self.mab_tau) * zpd)
+            logits.append(-((wr - 0.5) ** 2) / tau)
         m = max(logits)
         exps = [math.exp(x - m) for x in logits]
         s = sum(exps) or 1.0

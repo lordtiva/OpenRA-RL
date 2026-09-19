@@ -494,6 +494,7 @@ class ShapedReward:
                 r_margin = self.w_margin * math.tanh(margin / self.margin_scale)
                 self.last_components["margin"] += r_margin
                 r += r_margin
+            # TODO(ppo-debt): non-Markov wipe — see ppo-debt.md (1D)
             if self.timeout_wipe:
                 # Cancel positive shaping so incomplete cannot beat a failed push.
                 wipe = -max(0.0, float(self._episode_return)) - float(

@@ -225,6 +225,7 @@ TRAIN_ARGS = [
     "--shaper-preset", "eradicate_v6",
     "--auto-support",
     "--no-war-nudge",
+    "--attack-cell-override", "off",
     # Scratch / Capa 1: BC activo las primeras --bc-warmup iters (lambda 1->0),
     # despues queda SIL. bc-start-iter=1 (no uses 0: train.py trata 0 como
     # unset y en un resume reiniciaria el warmup al start_iter actual).

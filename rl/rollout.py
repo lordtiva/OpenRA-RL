@@ -554,7 +554,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                    if _push_lm is not None
                                    and _push_lu is not None else {}),
                             },
-                            "reward": 0.0,
+                            "reward": 0.0,  # TODO(ppo-debt): K=2 push credit — ppo-debt.md (1C)
                             "value_pred": push_value,
                             "h_in": h_in_push.detach().cpu(),
                             "delta_t": 0.0,  # filled at append: push carries block Δt

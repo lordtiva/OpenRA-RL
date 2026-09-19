@@ -187,7 +187,42 @@ _NON_COMBAT_TAGS = ("harv", "mcv")
 WEAP_SAVE_CASH = 1200
 WEAP_COST = 2000
 # Soft OpenRA-like fleet cap (mining_rate had no saturation → 30+ harvs).
-HARVESTER_TRAIN_CAP = 4
+HARVESTER_TRAIN_CAP = 4  # legacy constant; v6 does not mask train by cap
+
+# Measurement: attack-macro redirects to war_objective (ring A/B contrast).
+ATTACK_CELL_OVERRIDE = "off"  # "off" | "war_objective"
+
+def set_attack_cell_override(mode: str) -> None:
+    """Train: off (pi keeps cell). Eval/demo: war_objective."""
+    global ATTACK_CELL_OVERRIDE
+    m = str(mode or "off").strip().lower()
+    if m not in ("off", "war_objective"):
+        raise ValueError(
+            f"attack_cell_override must be off|war_objective, got {mode!r}")
+    ATTACK_CELL_OVERRIDE = m
+
+SPATIAL_CORR_STATS = {
+    "n_attack_macro": 0,
+    "n_redirected": 0,
+    "n_raid_kept": 0,
+}
+
+
+def reset_spatial_corr_stats() -> None:
+    for k in SPATIAL_CORR_STATS:
+        SPATIAL_CORR_STATS[k] = 0
+
+
+def spatial_corr_snapshot() -> dict:
+    n = int(SPATIAL_CORR_STATS.get("n_attack_macro") or 0)
+    r = int(SPATIAL_CORR_STATS.get("n_redirected") or 0)
+    return {
+        "n_attack_macro": n,
+        "n_redirected": r,
+        "n_raid_kept": int(SPATIAL_CORR_STATS.get("n_raid_kept") or 0),
+        "redirect_rate": float(r / n) if n else 0.0,
+    }
+
 CHEAP_TRAIN_ROLES = frozenset({
     "infantry_basic", "infantry_antiinf",
     # IDENTITY cheap infantry (soviets e2 etc.) must mask while saving for weap.
@@ -1717,14 +1752,20 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
                 hp = 1.0 if heuristic_p is None else float(heuristic_p)
                 if hp >= 1.0 or (hp > 0.0 and random.random() < hp):
                     cx, cy = guard_army_push_cell(obs, aidx, cx, cy)
-            # v6: attack macro = advance war front (not blind cell clicks).
-            # Visible home raids keep the sampled/raid cell; else war_objective.
+            # Safety remaps above stay on. Optional front snap (default off
+            # in train so pi/Ring own the cell — audit 1A).
             from rl.auto_support import home_raid_targets
-            if not home_raid_targets(obs):
+            SPATIAL_CORR_STATS["n_attack_macro"] += 1
+            if home_raid_targets(obs):
+                SPATIAL_CORR_STATS["n_raid_kept"] += 1
+            elif ATTACK_CELL_OVERRIDE == "war_objective":
                 from rl.war_objective import war_objective
                 obj = war_objective(obs, aidx)
                 if obj is not None:
-                    cx, cy = int(obj[0]), int(obj[1])
+                    nx, ny = int(obj[0]), int(obj[1])
+                    if (nx, ny) != (int(cx), int(cy)):
+                        SPATIAL_CORR_STATS["n_redirected"] += 1
+                    cx, cy = nx, ny
     eff_cell_flat = int(cy) * aidx.w + int(cx)
     if t_name in ("train", "build", "place_building", "cancel_production"):
         # PLACE/cancel dejan item_type concreto (proc/gun/tent); aidx.items

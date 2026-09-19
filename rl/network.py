@@ -408,6 +408,69 @@ def build_type_masks(obs) -> torch.Tensor:
     return torch.from_numpy(m)
 
 
+
+class RingGoalBias(nn.Module):
+    """Central-complex-inspired goal bump → cell logit bias (differentiable).
+
+    Uses scalar mental-base cues (has_base, rel_dx, rel_dy @ indices 25..27)
+    plus a ring read-out from the GRU hidden. Not a post-hoc Python rewrite:
+    bias is added inside _logits_cell so π sees the front direction.
+    """
+
+    def __init__(self, n_ring: int = 16, hidden_dim: int = HIDDEN_DIM):
+        super().__init__()
+        self.n_ring = int(n_ring)
+        self.goal_in = nn.Linear(3, n_ring)
+        self.h_in = nn.Linear(hidden_dim, n_ring)
+        # Circulant Mexican-hat recurrent prior (fixed).
+        ang = torch.arange(n_ring, dtype=torch.float32) * (2.0 * math.pi / n_ring)
+        d = (ang.unsqueeze(0) - ang.unsqueeze(1) + math.pi) % (2 * math.pi) - math.pi
+        rec = torch.exp(-0.5 * (d / 0.6) ** 2) - 0.2 * torch.exp(
+            -0.5 * (d / 1.4) ** 2)
+        rec = rec - rec.mean(dim=1, keepdim=True)
+        self.register_buffer("rec", rec)
+        self.scale = nn.Parameter(torch.tensor(0.5))
+        self.last_stats = {}
+
+    def forward(self, hidden, scalars, hw):
+        """Return bias [B,H,W] and update last_stats for metrics."""
+        B = hidden.size(0)
+        H, W = int(hw[0]), int(hw[1])
+        if scalars is None or scalars.size(-1) < 28:
+            zeros = hidden.new_zeros(B, H, W)
+            self.last_stats = {"ring_bias_mean": 0.0, "ring_bias_peak": 0.0,
+                               "ring_has_goal": 0.0}
+            return zeros
+        goal = scalars[:, 25:28]  # has, dx, dy
+        ring = torch.tanh(self.goal_in(goal) + self.h_in(hidden))
+        ring = torch.softmax(ring + torch.matmul(ring, self.rec), dim=-1)
+        # Preferred angle from ring bump + goal atan2.
+        idx = torch.arange(self.n_ring, device=hidden.device, dtype=hidden.dtype)
+        bump_ang = (idx * (2.0 * math.pi / self.n_ring)).view(1, -1)
+        # Soft angle of ring mass
+        ring_ang = torch.atan2(
+            (ring * torch.sin(bump_ang)).sum(-1),
+            (ring * torch.cos(bump_ang)).sum(-1),
+        )
+        goal_ang = torch.atan2(goal[:, 2], goal[:, 1] + 1e-6)
+        has = goal[:, 0].clamp(0.0, 1.0)
+        ang = has * goal_ang + (1.0 - has) * ring_ang
+        # Cell bearings from map center
+        ys = torch.linspace(-1.0, 1.0, H, device=hidden.device)
+        xs = torch.linspace(-1.0, 1.0, W, device=hidden.device)
+        yy, xx = torch.meshgrid(ys, xs, indexing="ij")
+        cell_ang = torch.atan2(yy, xx + 1e-6)  # [H,W]
+        align = torch.cos(cell_ang.view(1, H, W) - ang.view(B, 1, 1))
+        bias = self.scale * has.view(B, 1, 1) * align
+        self.last_stats = {
+            "ring_bias_mean": float(bias.detach().mean().item()),
+            "ring_bias_peak": float(bias.detach().abs().amax().item()),
+            "ring_has_goal": float(has.detach().mean().item()),
+            "ring_scale": float(self.scale.detach().item()),
+        }
+        return bias
+
+
 class ResBlock(nn.Module):
     def __init__(self, ch):
         super().__init__()
@@ -465,7 +528,8 @@ class AlphaLiteNet(nn.Module):
         self.unit_xf = nn.TransformerEncoder(
             xf_layer, num_layers=XF_LAYERS, enable_nested_tensor=False)
         self.unit_xf_out = nn.Linear(XF_DIM, 128)
-        self.unit_xf_scale = nn.Parameter(torch.zeros(1))
+        # Non-zero so unit_xf gets gradients from step 0 (zeros starved XF).
+        self.unit_xf_scale = nn.Parameter(torch.tensor([0.1]))
         # Soft-load LN after top-k MHA out_proj (identity init: weight=1, bias=0).
         # Missing keys on resume → fresh identity LN (strict=False).
         self.topk_mha_ln = nn.LayerNorm(XF_DIM)
@@ -556,6 +620,9 @@ class AlphaLiteNet(nn.Module):
         self.value_head = nn.Sequential(
             nn.Linear(HIDDEN_DIM, 256), nn.ReLU(), nn.Linear(256, 1),
         )
+        # A: ring goal bias on cell logits (toggle via net.use_ring_goal).
+        self.ring_goal = RingGoalBias(n_ring=16, hidden_dim=HIDDEN_DIM)
+        self.use_ring_goal = True
 
     def _coord_conv(self, spatial):
         """CoordConv on the 9 engine channels; extra maps go through spatial_extra."""
@@ -975,7 +1042,7 @@ class AlphaLiteNet(nn.Module):
 
     def _logits_cell(self, fmap, chosen_type, cell_mask, hidden,
                      tokens, unit_feats, unit_valid, unit_slot,
-                     role_ids=None, unit_own_mask=None):
+                     role_ids=None, unit_own_mask=None, scalars=None):
         """Logits crudos [B, H*W] de la cabeza de celda.
 
         fmap U-Net + scatter de unidades + emb tipo + GRU + slot (Capa 2).
@@ -995,6 +1062,8 @@ class AlphaLiteNet(nn.Module):
 
         logits_map = self.cell_head(
             torch.cat([fmap, scatter, emb_map, hd, unit_map], dim=1)).squeeze(1)
+        if getattr(self, "use_ring_goal", False) and hasattr(self, "ring_goal"):
+            logits_map = logits_map + self.ring_goal(hidden, scalars, (H, W))
         topk = int(getattr(self, "qsa_topk", 0) or 0)
         if topk > 0:
             logits_map = self._apply_map_qsa(
@@ -1053,11 +1122,12 @@ class AlphaLiteNet(nn.Module):
 
     def dist_cell(self, fmap, chosen_type, cell_mask, hidden,
                   tokens, unit_feats, unit_valid, unit_slot,
-                  role_ids=None, unit_own_mask=None):
+                  role_ids=None, unit_own_mask=None, scalars=None):
         logits = self._logits_cell(
             fmap, chosen_type, cell_mask, hidden,
             tokens, unit_feats, unit_valid, unit_slot,
-            role_ids=role_ids, unit_own_mask=unit_own_mask)
+            role_ids=role_ids, unit_own_mask=unit_own_mask,
+            scalars=scalars)
         return self._categorical(logits)
 
     def _scores_item(self, hidden, chosen_type, item_indices, item_mask):
@@ -1135,7 +1205,8 @@ class AlphaLiteNet(nn.Module):
         lc = self._logits_cell(
             fmap, t_idx, batch["cell_mask"], new_hidden,
             tokens, feats, valid, u_idx,
-            role_ids=role_ids, unit_own_mask=own)
+            role_ids=role_ids, unit_own_mask=own,
+            scalars=batch.get("scalars"))
         dist_c = self._categorical(lc)
         c_idx = lc.argmax(dim=-1) if greedy else \
             self._categorical(lc / temperature).sample()
@@ -1276,7 +1347,8 @@ class AlphaLiteNet(nn.Module):
         dist_c = self.dist_cell(
             fmap, t_idx, batch["cell_mask"], new_hidden,
             tokens, feats, valid, actions["unit_slot"],
-            role_ids=role_ids, unit_own_mask=own)
+            role_ids=role_ids, unit_own_mask=own,
+            scalars=batch.get("scalars"))
 
         has_items = batch["item_mask"].any(dim=-1)
         safe_item_mask = self._item_cat_mask(batch, t_idx).clone()
@@ -1358,7 +1430,8 @@ class AlphaLiteNet(nn.Module):
             dist_c = self.dist_cell(
                 fmap_f, t_idx, batch["cell_mask"], h_f,
                 tok_f, feats_f, valid, u_idx,
-                role_ids=role_ids, unit_own_mask=own)
+                role_ids=role_ids, unit_own_mask=own,
+                scalars=batch.get("scalars"))
             has_items = batch["item_mask"].any(dim=-1)
             safe_item = self._item_cat_mask(batch, t_idx).clone()
             safe_item[~has_items] = True

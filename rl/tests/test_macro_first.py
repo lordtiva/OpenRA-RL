@@ -159,7 +159,7 @@ def test_eradicate_v5_pbrs_pays_weap_tier():
     assert r > 0.0
 
 
-def test_mab_crushed_bot_hits_floor():
+def test_mab_zpd_gaussian_peaks_near_half():
     import tempfile
     from pathlib import Path
     with tempfile.TemporaryDirectory() as td:
@@ -168,13 +168,20 @@ def test_mab_crushed_bot_hits_floor():
             pool=["beginner", "easy", "medium"],
             mab=True, mab_tau=0.25, mab_floor=0.05,
             rng=__import__("random").Random(0))
+        # beginner solved (~100% WR), easy ZPD (~50%), medium crushed (~0%)
         for _ in range(40):
             league.record("beginner", "win")
         for _ in range(10):
+            league.record("easy", "win")
+        for _ in range(10):
             league.record("easy", "lose")
+        for _ in range(20):
+            league.record("medium", "lose")
         dist = league.mab_probs()
         assert dist["beginner"] >= 0.05
+        assert dist["medium"] >= 0.05
         assert dist["easy"] > dist["beginner"]
+        assert dist["easy"] > dist["medium"]
         samples = [league.sample() for _ in range(200)]
         assert "easy" in samples
 
@@ -238,6 +245,10 @@ def test_harvester_train_not_capped_v6():
 
 
 def test_yard_attack_move_redirects_to_war_objective(monkeypatch):
+    from rl.action_adapter import set_attack_cell_override
+    set_attack_cell_override("war_objective")
+    monkeypatch.setattr(
+        "rl.action_adapter.ATTACK_CELL_OVERRIDE", "war_objective")
     from rl.action_adapter import (
         TYPE_TO_IDX, index_to_command_effective, PACK_HOME_RADIUS)
     # army_attack_move stays masked until PACK_ARMY; infantry path is live.

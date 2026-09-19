@@ -29,6 +29,36 @@ el_power
 
 Preset: --shaper-preset eradicate_v6 (train/onboard default).
 
+
+
+## Neuro-inspired A+B (ring + Kenyon novelty)
+
+Optional defaults **on** (--ring-goal, --sil-novelty; disable with --no-*).
+
+### B — Kenyon k-WTA novelty (
+l/state_hash.py)
+EliteBuffer / TeacherWinBuffer sample with novelty fingerprints instead of pure
+even-pick. Metrics in metrics.jsonl:
+- sil_diversity / elite_diversity: 
+_unique_hash, unique_ratio, mean_pairwise_hamming
+
+Contrast: same run with --no-sil-novelty and compare those fields + drought rate.
+
+### A — RingGoalBias (
+etwork.RingGoalBias)
+Differentiable cell-logit bias from mental-base scalars (25–27) + GRU hidden.
+Inside _logits_cell (in π), not a Python rewrite. Metrics:
+- 
+ing: 
+ing_bias_mean, 
+ing_bias_peak, 
+ing_has_goal, 
+ing_scale
+- spatial_corr: 
+edirect_rate of attack→war_objective (should fall as ring learns)
+
+Contrast: --no-ring-goal and watch spatial_corr.redirect_rate + wr.
+
 ## Idea en una frase
 
 El alumno **nunca** aprende spam `e1` como política base. El teacher es siempre

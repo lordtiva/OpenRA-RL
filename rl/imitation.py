@@ -23,6 +23,7 @@ from rl.action_adapter import (
 from rl.network import ACTION_TYPES
 from rl.roles import role_of
 from openra_env.models import ActionType, CommandModel
+from rl.state_hash import novelty_pick, diversity_stats, get_hasher
 
 # Eco / producción primero en el opening. En attack (leftover o n_combat>=8)
 # pick_bc_commands clona TAMBIÉN un push: sin eso SFT es miller (TRAIN) y el
@@ -276,6 +277,13 @@ def sample_type_name(s: dict) -> str:
     return "no_op"
 
 
+
+def _pick_steps(group: list, cap: int, *, novelty: bool = False) -> list:
+    """Even-pick (baseline) or Kenyon novelty-pick (SIL/BC diversity)."""
+    if novelty:
+        return novelty_pick(group, cap)
+    return _even_pick(group, cap)
+
 def _even_pick(group: list, cap: int) -> list:
     if cap <= 0 or not group:
         return []
@@ -422,10 +430,13 @@ class EliteBuffer:
     """Winning episodes for SIL, even-pick per win (not the tail of 1–2 longs)."""
 
     def __init__(self, cap_steps: int = 2000,
-                 prefer_ticks: int = SIL_PREFER_TICKS):
+                 prefer_ticks: int = SIL_PREFER_TICKS,
+                 use_novelty: bool = True):
         self.cap = int(cap_steps)
         self.prefer_ticks = int(prefer_ticks)
+        self.use_novelty = bool(use_novelty)
         self._episodes: list[dict] = []
+        self.last_sample_stats: dict = {}
 
     def __len__(self) -> int:
         return self._n_steps()
@@ -457,7 +468,8 @@ class EliteBuffer:
         while self._episodes and self._n_steps() > self.cap:
             if len(self._episodes) == 1:
                 ep = self._episodes[0]
-                ep["steps"] = _even_pick(ep["steps"], self.cap)
+                ep["steps"] = _pick_steps(
+                    ep["steps"], self.cap, novelty=self.use_novelty)
                 break
             long_i = next(
                 (i for i, e in enumerate(self._episodes)
@@ -534,8 +546,15 @@ class EliteBuffer:
         out = []
         for i, e in enumerate(pool):
             q = base + (1 if i < extra else 0)
-            out.extend(_even_pick(e["steps"], q))
+            out.extend(_pick_steps(
+                e["steps"], q, novelty=self.use_novelty))
+        self.last_sample_stats = diversity_stats(out)
+        self.last_sample_stats["novelty"] = bool(self.use_novelty)
         return out
+
+    def diversity_report(self) -> dict:
+        """Full-buffer diversity (for metrics / A/B vs even-pick)."""
+        return diversity_stats(self.snapshot())
 
 class TeacherWinBuffer:
     """Persistent ring of teacher win episodes for BC/SFT (across iters).
@@ -553,9 +572,12 @@ class TeacherWinBuffer:
                  keep_incomplete: bool = False,
                  incomplete_min_ticks: int = 15000,
                  schema: str | None = None,
-                 ep_cap: int | None = None):
+                 ep_cap: int | None = None,
+                 use_novelty: bool = True):
         self.cap = int(cap_steps)
         self.prefer_ticks = int(prefer_ticks)
+        self.use_novelty = bool(use_novelty)
+        self.last_sample_stats: dict = {}
         self.ep_cap = int(BC_WIN_EP_CAP if ep_cap is None else ep_cap)
         self.path = Path(path) if path else None
         self.keep_incomplete = bool(keep_incomplete)
@@ -630,7 +652,9 @@ class TeacherWinBuffer:
         while self._episodes and self._n_steps() > self.cap:
             if len(self._episodes) == 1:
                 ep = self._episodes[0]
-                ep["steps"] = _even_pick(ep["steps"], self.cap)
+                ep["steps"] = _pick_steps(
+                    ep["steps"], self.cap,
+                    novelty=getattr(self, "use_novelty", False))
                 break
             long_i = next(
                 (i for i, e in enumerate(self._episodes)

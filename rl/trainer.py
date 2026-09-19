@@ -24,7 +24,7 @@ import torch.nn.functional as F
 
 # Dest-credit puede guardar lp_old ~ -1e9 (celda tapada) y lp_new finito.
 # ratio=exp(Δ) → inf; con adv<0 PPO no clippea y pi_loss=inf (iter 923 Run 17).
-_LOG_RATIO_CLAMP = 2.0
+_LOG_RATIO_CLAMP = 2.0  # TODO(ppo-debt): see rl/docs/design/ppo-debt.md (1B)
 # SIL lp.clamp(-20) deja nll≈20 cuando la acción sigue ilegal. No clonar eso.
 _SIL_NLL_SKIP = 18.0
 
@@ -284,18 +284,21 @@ class PPOTrainer:
         self.scaler = _make_scaler(self.device, init_scale=_AMP_RESET_INIT_SCALE)
 
     def _opt_step(self, loss) -> float:
-        """AMP scale + clip. Devuelve grad_norm (0 si skip)."""
+        """AMP scale + clip. Devuelve grad_norm (0 si non-finite).
+
+        Always call scaler.step after unscale: skipping step and only
+        update() breaks GradScaler inf detection / scale backoff (audit 2B).
+        step() itself no-ops the optimizer when grads are non-finite.
+        """
         self.scaler.scale(loss).backward()
         self.scaler.unscale_(self.opt)
         gn = torch.nn.utils.clip_grad_norm_(
             self.net.parameters(), self.max_grad_norm).item()
-        if not math.isfinite(gn):
-            self.net.zero_grad(set_to_none=True)
-            self.scaler.update()
-            self._maybe_reset_scaler()
-            return 0.0
         self.scaler.step(self.opt)
         self.scaler.update()
+        if not math.isfinite(gn):
+            self._maybe_reset_scaler()
+            return 0.0
         return gn
 
     def update(self, samples: list, epochs: int = 2, batch_size: int = 32):
@@ -405,6 +408,7 @@ class PPOTrainer:
                         ratio_u * adv,
                         torch.clamp(ratio_u, 1 - self.clip_eps,
                                     1 + self.clip_eps) * adv)
+                    # TODO(ppo-debt): half-weight macro — ppo-debt.md (2C)
                     pi_t = -0.5 * (surr_m + surr_u)
                 else:
                     surr1 = ratio * adv
@@ -576,6 +580,15 @@ def load_checkpoint(path: str, net, opt=None, vocab=None, reset_opt=False,
             net, adapt_capa2c_state_dict(
                 net, adapt_capa2_state_dict(net, raw))))
     incompat = net.load_state_dict(adapted, strict=False)
+    # 2A: old ckpts trained with dead XF (scale?0). Keep fresh 0.1 init
+    # when the loaded scale is still near-zero so resume actually enables XF.
+    if hasattr(net, "unit_xf_scale"):
+        with torch.no_grad():
+            s = float(net.unit_xf_scale.detach().abs().item())
+            if s < 1e-3:
+                net.unit_xf_scale.fill_(0.1)
+                print("[ckpt] unit_xf_scale?0 ? bump to 0.1 (2A XF gate)",
+                      flush=True)
     n_miss = len(incompat.missing_keys)
     n_unex = len(incompat.unexpected_keys)
     # cell_head puede ser Conv2d (legacy) o Sequential (arch v1.1); no asumir .weight

@@ -43,6 +43,10 @@ from rl.collect_timeout import close_env_now, is_collect_timeout, note_collect_t
 from rl.metrics_lock import metrics_lock
 from rl.trainer import PPOTrainer, load_checkpoint, save_checkpoint
 from rl.hyper_health import HyperHealthMonitor, resolve_auto_hyper
+from rl.action_adapter import (
+    reset_spatial_corr_stats, spatial_corr_snapshot,
+    set_attack_cell_override,
+)
 from rl.best_ckpt import batch_is_dead, batch_is_wipe, maybe_update_best
 from rl.pfsp import BotPFSP, parse_pool
 from rl.imitation import (
@@ -382,6 +386,13 @@ async def amain(args):
         os.replace(args.metrics, args.metrics + f".old_{stamp}")
 
     net = AlphaLiteNet()
+    net.use_ring_goal = bool(getattr(args, "ring_goal", True))
+    print(f"[ring] use_ring_goal={net.use_ring_goal}", flush=True)
+    set_attack_cell_override(
+        getattr(args, "attack_cell_override", "off"))
+    print(f"[1A] attack_cell_override="
+          f"{getattr(args, "attack_cell_override", "off")}", flush=True)
+
     if getattr(args, "xf_topk", 0):
         net.xf_topk = int(args.xf_topk)
         print(f"entity XF top-k={net.xf_topk}", flush=True)
@@ -445,6 +456,7 @@ async def amain(args):
         print('[hyper] OFF (phase A)', flush=True)
 
     infer_net = AlphaLiteNet().to(device)
+    infer_net.use_ring_goal = bool(getattr(args, "ring_goal", True))
     infer_net.load_state_dict(net.state_dict())
     infer_net.eval()
 
@@ -919,7 +931,10 @@ async def amain(args):
     recent_results = []  # resultados recientes para winrate rodante (20)
     ema_collect = ema_update = None
     t_start = time.time()
-    elite = EliteBuffer(cap_steps=2000) if args.sil else None
+    elite = (EliteBuffer(
+        cap_steps=2000,
+        use_novelty=bool(getattr(args, "sil_novelty", True)))
+        if args.sil else None)
     elite_path = os.path.join(args.ckpt_dir, "elite.pt")
     if elite is not None:
         n_elite = elite.load(elite_path)
@@ -943,6 +958,7 @@ async def amain(args):
             keep_incomplete=bool(getattr(args, "bc_keep_incomplete", False)),
             schema=tape_schema_for_mode(_teacher_mode(args)),
             ep_cap=win_ep_cap,
+            use_novelty=bool(getattr(args, "sil_novelty", True)),
         )
         print(f"  [bc] TeacherWinBuffer cap={win_cap} ep_cap={win_ep_cap} "
               f"prefer_ticks={win_prefer} dir={win_dir} "
@@ -1058,6 +1074,7 @@ async def amain(args):
     bc_epochs = max(1, int(getattr(args, "bc_epochs", 1) or 1))
     collect_it[0] = first_it
     for it in range(first_it, last_it + 1):
+        reset_spatial_corr_stats()
 
         args._heuristic_p_cur = compute_heuristic_p(args, it)
         collect_it[0] = it
@@ -1452,6 +1469,17 @@ async def amain(args):
                     **({"sil_n": stats.get("sil_n")}
                        if stats.get("sil_n") is not None else {}),
                     **({"elite_n": len(elite)} if elite is not None else {}),
+                    **({"sil_diversity": dict(elite.last_sample_stats)}
+                       if elite is not None and getattr(elite, "last_sample_stats", None)
+                       else {}),
+                    **({"elite_diversity": elite.diversity_report()}
+                       if elite is not None else {}),
+                    "spatial_corr": spatial_corr_snapshot(),
+                    **({"ring": dict(getattr(getattr(trainer.net, "ring_goal", None),
+                                              "last_stats", {}) or {})}
+                       if getattr(trainer, "net", None) is not None else {}),
+                    "ring_goal": bool(getattr(args, "ring_goal", True)),
+                    "sil_novelty": bool(getattr(args, "sil_novelty", True)),
                     "winrate": round(wins / total, 3) if total else 0.0,
                     "winrate_rolling20": round(rolling, 3),
                     "iter_winrate": round(
@@ -1733,6 +1761,19 @@ def main():
                          "0 = no mide. Fase A usa 4.")
     ap.add_argument("--sil", action="store_true",
                     help="Capa 1: self-imitation de episodios win/raze>0.")
+    ap.add_argument("--sil-novelty", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="Kenyon k-WTA novelty pick in Elite/Teacher buffers "
+                         "(default on). --no-sil-novelty = classic even-pick.")
+    ap.add_argument("--ring-goal", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="RingGoalBias on cell logits from mental-base scalars "
+                         "(default on). --no-ring-goal disables.")
+    ap.add_argument("--attack-cell-override", choices=("off", "war_objective"),
+                    default="off",
+                    help="If war_objective, force attack cells to front "
+                         "(demo). Default off: pi keeps sampled cell "
+                         "(train; audit 1A).")
     ap.add_argument("--bc-warmup", type=int, default=80,
                     help="Iters para bajar lambda_bc de --bc-lambda-start "
                          "a --bc-lambda-end. Ignorado en --bc-only.")
