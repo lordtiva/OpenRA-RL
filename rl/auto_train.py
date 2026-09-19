@@ -222,7 +222,7 @@ TRAIN_ARGS = [
     "--pfsp-rl",
     "--pfsp-pool", "rl",
     "--pfsp-anchor-prob", "0.5",
-    "--shaper-preset", "eradicate_v5",
+    "--shaper-preset", "eradicate_v6",
     "--auto-support",
     "--no-war-nudge",
     # Scratch / Capa 1: BC activo las primeras --bc-warmup iters (lambda 1->0),

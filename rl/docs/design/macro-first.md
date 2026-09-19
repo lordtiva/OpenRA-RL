@@ -9,6 +9,26 @@ Operación / VRAM: [`../start/operacion.md`](../start/operacion.md).
 
 ---
 
+
+
+## eradicate_v6 (fixed Beginner→Hard+ MDP)
+
+Default shaper as of 2026-09-18. One reward + one action meaning for all rivals
+(PFSP only picks the bot — no per-difficulty harvester caps or weap cash-saves).
+
+- **Timeout wipe:** on incomplete/truncated, terminal = -max(0, episode_return) - 2
+  so turtle+mining cannot outscore a failed push.
+- **No mining_rate farm:** w_mining_rate=0; keep small first_ore/refinery bootstrap.
+- **Army-ratio delta:** dense Δ own/(own+ene) via orce_estimate.aoa_features 
+el_power
+  (0.5 under fog with no visible enemy — no free points).
+- **Attack macro = war front:** *_attack_move resolves to war_objective unless a
+  visible home raid exists (adapter, not a scripted war_nudge).
+- **Crutches off:** should_save_for_weap always false; no train-harvester hard cap mask.
+  Forever APM (repair/power/sell/harvest-idle/stance/deploy) stays in auto_support.
+
+Preset: --shaper-preset eradicate_v6 (train/onboard default).
+
 ## Idea en una frase
 
 El alumno **nunca** aprende spam `e1` como política base. El teacher es siempre

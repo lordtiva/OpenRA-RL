@@ -109,22 +109,16 @@ def test_adapter_exposes_1tnk_and_2tnk():
     assert "e3" in aidx.train_items
 
 
-def test_weap_save_skips_thin_garrison():
-    obs = _obs(cash=1500, ore=0)  # default: 1 e1
-    assert should_save_for_weap(obs) is False
-
-
-def test_weap_save_masks_cheap_infantry():
+def test_weap_save_disabled_v6():
     units = [_U("harv", 1)] + [_U("e1", 10 + i) for i in range(6)]
     obs = _obs(cash=1500, ore=0, units=units)
-    assert should_save_for_weap(obs) is True
-    assert 1500 >= WEAP_SAVE_CASH
+    assert should_save_for_weap(obs) is False
     v = Vocab()
     v.seed_roles()
     aidx = ActionIndex(obs, v)
     if "infantry_basic" in aidx.train_items:
         slot = aidx.train_items.index("infantry_basic")
-        assert bool(aidx.train_slot_mask[slot]) is False
+        assert bool(aidx.train_slot_mask[slot]) is True
 
 
 def test_auto_support_builds_weap_at_2500():
@@ -226,7 +220,7 @@ def test_net_accepts_9ch_and_20ch():
     out20 = net.act(_batch(20), h)
     assert out20["log_prob"].shape == (B,)
 
-def test_harvester_train_cap_masks_at_four():
+def test_harvester_train_not_capped_v6():
     from rl.action_adapter import HARVESTER_TRAIN_CAP
     units = [_U("harv", 100 + i) for i in range(HARVESTER_TRAIN_CAP)] + [
         _U("e1", 200)]
@@ -240,7 +234,7 @@ def test_harvester_train_cap_masks_at_four():
     aidx = ActionIndex(obs, v)
     assert "harvester" in aidx.train_items
     slot = aidx.train_items.index("harvester")
-    assert bool(aidx.train_slot_mask[slot]) is False
+    assert bool(aidx.train_slot_mask[slot]) is True
 
 
 def test_yard_attack_move_redirects_to_war_objective(monkeypatch):
@@ -294,4 +288,60 @@ def test_mining_rate_damps_above_harvester_cap():
     r = sh.step(obs2, done=False)
     # Just ensure mining component path ran without error; damp is internal
     assert "mining" in sh.last_components
+
+def test_eradicate_v6_timeout_wipes_positive_return():
+    from rl.reward_shaping import ShapedReward
+    sh = ShapedReward(preset="eradicate_v6")
+    obs = _obs(cash=500)
+    sh.reset(obs)
+    # Simulate dense positive shaping without going through full econ
+    sh._episode_return = 19.0
+    sh.last_components["mining"] = 19.0
+    r = sh.finalize(truncated=True, result="incomplete")
+    assert r <= -2.0
+    assert sh.last_components["timeout_wipe"] < 0
+    # Net episode including prior +19 must not stay positive
+    assert sh._episode_return <= 0.0
+
+
+def test_eradicate_v6_win_keeps_terminal():
+    from rl.reward_shaping import ShapedReward
+    sh = ShapedReward(preset="eradicate_v6")
+    obs = _obs(cash=500)
+    sh.reset(obs)
+    sh._episode_return = 5.0
+    sh._last_mil = obs.military
+    r = sh.finalize(truncated=False, result="win")
+    assert r >= sh.w_win - 0.1
+
+
+def test_eradicate_v6_army_ratio_delta():
+    from rl.reward_shaping import ShapedReward
+    sh = ShapedReward(preset="eradicate_v6")
+    obs = _obs(units=[_U("e1", 1), _U("harv", 2)])
+    sh.reset(obs)
+    # Inject visible enemies weaker than us via monkeypatch on aoa
+    import rl.force_estimate as fe
+    calls = {"n": 0}
+    def fake_aoa(obs):
+        calls["n"] += 1
+        # first call in reset already happened; step sees rising ratio
+        return {"rel_power": 0.4 if calls["n"] == 1 else 0.8}
+    # reset already set prev; force prev then step
+    sh._prev_army_ratio = 0.4
+    import unittest.mock as m
+    with m.patch.object(fe, "aoa_features", side_effect=lambda o: {"rel_power": 0.8}):
+        r = sh._army_ratio_delta(obs)
+    assert r > 0.0
+    assert sh.last_components["army_ratio"] > 0.0
+
+
+def test_default_preset_is_v6():
+    from rl.reward_shaping import PRESETS
+    assert "eradicate_v6" in PRESETS
+    import argparse
+    # train default
+    from pathlib import Path
+    src = Path("rl/train.py").read_text(encoding="utf-8")
+    assert 'default="eradicate_v6"' in src or "default='eradicate_v6'" in src
 

@@ -16,15 +16,16 @@ import math
 
 
 PRESETS = ("legacy", "eradicate", "eradicate_v2", "eradicate_v3",
-           "eradicate_v4", "eradicate_v5")
+           "eradicate_v4", "eradicate_v5", "eradicate_v6")
 
 # Production buildings: razing these hurts the rival's tech ladder.
 _PROD_BUILDINGS = frozenset({
     "fact", "afac", "proc", "weap", "tent", "barr", "kenn",
     "hpad", "afld", "syrd", "dome", "atek", "stek",
 })
-_DENSE_PRESETS = ("eradicate_v2", "eradicate_v3", "eradicate_v4", "eradicate_v5")
-_ECON_PRESETS = ("eradicate_v3", "eradicate_v4", "eradicate_v5")
+_DENSE_PRESETS = ("eradicate_v2", "eradicate_v3", "eradicate_v4", "eradicate_v5",
+                 "eradicate_v6")
+_ECON_PRESETS = ("eradicate_v3", "eradicate_v4", "eradicate_v5", "eradicate_v6")
 
 
 def tech_tier_level(obs) -> int:
@@ -168,6 +169,30 @@ def _preset_kwargs(preset: str) -> dict:
             w_tier=0.5, tier_gamma=0.99,
             w_raze_prod=2.0,
         )
+    if preset == "eradicate_v6":
+        # Fixed Beginner	o Hard+ MDP: wipe incomplete so turtle cannot +EV,
+        # no mining_rate farm, army-ratio delta regulates eco vs army.
+        return dict(
+            w_kills=0.15, w_deaths=0.15, combat_scale=1000.0,
+            w_assets=0.0, w_building=0.0, w_new_type=0.0,
+            w_refinery=1.0, w_harvester=0.15, harvester_cap=8,
+            w_raze=2.0, raze_cap=0, raze_value_scale=2000.0,
+            w_defense_loss=0.25, defense_value_scale=2000.0, w_defense_first=3.0,
+            w_hold_zero=0.06, w_spread=0.002, spread_scale=1000.0, w_produce=0.0,
+            w_cancel=0.15, w_refinery_early=2.0, refinery_target_tick=6000,
+            w_first_ore=1.5,
+            w_garrison=0.005, w_naked_base=0.005,
+            w_mining_rate=0.0, mining_rate_scale=1000.0, w_harvester_idle=0.01,
+            w_margin=1.0, margin_scale=3000.0, margin_on_truncate=False,
+            w_win=8.0, w_lose=2.5, w_timeout=2.0,
+            w_no_econ_lose=4.0,
+            w_force_edge=0.5,
+            w_exchange=0.0, exchange_eps=1.0,
+            w_tier=0.5, tier_gamma=0.99,
+            w_raze_prod=2.0,
+            w_army_ratio=1.0,
+            timeout_wipe=True, timeout_wipe_fail=2.0,
+        )
     raise ValueError(f"preset desconocido: {preset!r} (validos: {PRESETS})")
 
 
@@ -221,6 +246,9 @@ class ShapedReward:
         self.w_tier = cfg.get("w_tier", 0.0)
         self.tier_gamma = cfg.get("tier_gamma", 0.99)
         self.w_raze_prod = cfg.get("w_raze_prod", 1.0)
+        self.w_army_ratio = float(cfg.get("w_army_ratio", 0.0) or 0.0)
+        self.timeout_wipe = bool(cfg.get("timeout_wipe", False))
+        self.timeout_wipe_fail = float(cfg.get("timeout_wipe_fail", 2.0) or 2.0)
         self._first_ore_paid = False
         self._prev_tier = 0
         self._prev_ene_prod = 0
@@ -248,6 +276,8 @@ class ShapedReward:
         self._prev_diff = None
         self._defense_first_paid = False
         self._prev_earned = None
+        self._episode_return = 0.0
+        self._prev_army_ratio = 0.5
         self.last_components = {
             "combat": 0.0, "assets": 0.0,
             "buildings": 0.0, "new_types": 0.0, "margin": 0.0,
@@ -259,6 +289,8 @@ class ShapedReward:
             "force_edge": 0.0,
             "exchange": 0.0,
             "tier": 0.0,
+            "army_ratio": 0.0,
+            "timeout_wipe": 0.0,
         }
 
     def reset(self, obs):
@@ -289,6 +321,8 @@ class ShapedReward:
         self._first_ore_paid = False
         self._prev_tier = tech_tier_level(obs)
         self._prev_ene_prod = _n_enemy_prod(obs)
+        self._episode_return = 0.0
+        self._prev_army_ratio = self._army_ratio(obs)
 
     def step(self, obs, done: bool, gs=None, action_type=None, closing=False) -> float:
         """Reward conformado por el delta de estado desde el paso anterior.
@@ -383,6 +417,9 @@ class ShapedReward:
             r += r_tier
             self.last_components["tier"] += r_tier
 
+        r_army = self._army_ratio_delta(obs)
+        r += r_army
+
         r_force = self._force_edge(obs)
         r += r_force
 
@@ -417,6 +454,7 @@ class ShapedReward:
         ene_n = _enemy_n_buildings(obs)
         if ene_n is not None:
             self._prev_enemy_n_buildings = ene_n
+        self._episode_return += float(r)
         return r
 
     def finalize(self, truncated: bool, result: str = "") -> float:
@@ -438,12 +476,16 @@ class ShapedReward:
             self.last_components["win"] += r_win
             self.last_components["margin"] += r_margin
             self._margin_paid = True
-            return r_win + r_margin
+            out = r_win + r_margin
+            self._episode_return += float(out)
+            return out
         if res == "lose":
             self.last_components["margin"] += -self.w_lose
             extra = self._apply_no_econ_lose()
             self._margin_paid = True
-            return -self.w_lose + extra
+            out = -self.w_lose + extra
+            self._episode_return += float(out)
+            return out
         if truncated:
             r = 0.0
             if self.margin_on_truncate and self._last_mil is not None:
@@ -452,10 +494,17 @@ class ShapedReward:
                 r_margin = self.w_margin * math.tanh(margin / self.margin_scale)
                 self.last_components["margin"] += r_margin
                 r += r_margin
-            if self.w_timeout:
+            if self.timeout_wipe:
+                # Cancel positive shaping so incomplete cannot beat a failed push.
+                wipe = -max(0.0, float(self._episode_return)) - float(
+                    self.timeout_wipe_fail)
+                self.last_components["timeout_wipe"] += wipe
+                r += wipe
+            elif self.w_timeout:
                 self.last_components["timeout"] += -self.w_timeout
                 r -= self.w_timeout
             self._margin_paid = True
+            self._episode_return += float(r)
             return r
         return 0.0
 
@@ -637,6 +686,22 @@ class ShapedReward:
 
         return r_mining + r_defense_posture + r_produce + r_cancel
 
+
+
+    def _army_ratio(self, obs) -> float:
+        """own/(own+ene) combat power; 0.5 under fog with no visible enemy."""
+        from rl.force_estimate import aoa_features
+        return float(aoa_features(obs).get("rel_power", 0.5))
+
+    def _army_ratio_delta(self, obs) -> float:
+        if self.w_army_ratio <= 0:
+            return 0.0
+        cur = self._army_ratio(obs)
+        prev = float(getattr(self, "_prev_army_ratio", cur))
+        d = float(self.w_army_ratio) * (cur - prev)
+        self._prev_army_ratio = cur
+        self.last_components["army_ratio"] += d
+        return d
 
     def _force_edge(self, obs) -> float:
         """Reward chico si Strong (cost ratio > 1.1) y combate lejos de base.

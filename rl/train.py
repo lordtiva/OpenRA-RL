@@ -1676,8 +1676,8 @@ def main():
                          "FastAdvance must fail ~100s; episode length is many "
                          "advances (no max_steps*3 scaling).")
     ap.add_argument("--shaper-preset", choices=SHAPER_PRESETS,
-                    default="eradicate_v5",
-                    help="Régimen de reward (default eradicate_v5 = macro-first: "
+                    default="eradicate_v6",
+                    help="Régimen de reward (default eradicate_v6 = macro-first: "
                          "cost-exchange + PBRS tech tier). legacy = SimCity.")
     ap.add_argument("--auto-support", action="store_true",
                     help="Pilar B: autonomía de soporte (repair hp<35%% + power_down) — "

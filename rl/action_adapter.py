@@ -221,28 +221,11 @@ def weap_in_flight(obs) -> bool:
 
 
 def should_save_for_weap(obs) -> bool:
-    """Bank cash for weap: barracks up, weap legal, no factory yet.
+    """Deprecated crutch (v6): never mask train — learn weap via reward.
 
-    Do not freeze the barracks while the garrison is thin — Easy's early
-    tank push arrives before $2000 banks if e1 is masked the whole time.
+    Kept as a no-op so scalars/metrics that still call it stay safe.
     """
-    if n_combat_total(obs) < 6:
-        return False
-    if owns_weap(obs) or weap_in_flight(obs):
-        return False
-    if not owns_proc(obs):
-        return False
-    has_barracks = False
-    for b in getattr(obs, "buildings", None) or []:
-        if str(getattr(b, "type", "") or "").lower() in ("tent", "barr"):
-            has_barracks = True
-            break
-    if not has_barracks:
-        return False
-    avail = {str(x).lower() for x in (getattr(obs, "available_production", None) or [])}
-    if "weap" not in avail:
-        return False
-    return spendable_resources(obs) >= WEAP_SAVE_CASH
+    return False
 
 
 def economy_ready_for_combat(obs) -> bool:
@@ -1464,29 +1447,6 @@ class ActionIndex:
             if not bool(self.train_slot_mask.any()):
                 m[TYPE_TO_IDX["train"]] = False
                 self.type_mask = torch.from_numpy(m)
-        # Save for weap: cheap e1 spam vacuums cash before $2000 banks.
-        if should_save_for_weap(obs):
-            for slot, role in enumerate(self.train_items):
-                if slot >= n_vocab:
-                    break
-                if role in CHEAP_TRAIN_ROLES:
-                    self.train_slot_mask[slot] = False
-                    self.item_mask[slot] = False
-            if not bool(self.train_slot_mask.any()):
-                m[TYPE_TO_IDX["train"]] = False
-                self.type_mask = torch.from_numpy(m)
-        # Cap harvester TRAIN (reward mining_rate has no fleet ceiling).
-        n_harvs = n_harvester_total(obs)
-        if n_harvs >= HARVESTER_TRAIN_CAP:
-            for slot, role in enumerate(self.train_items):
-                if slot >= n_vocab:
-                    break
-                if role in ("harvester", "harv"):
-                    self.train_slot_mask[slot] = False
-                    self.item_mask[slot] = False
-            if not bool(self.train_slot_mask.any()):
-                m[TYPE_TO_IDX["train"]] = False
-                self.type_mask = torch.from_numpy(m)
         # Low-power: e1/pbox cannot steal the $300 plant. PLACE stays on.
         if power_in_deficit(obs) and owns_proc(obs):
             for slot, role in enumerate(self.train_items):
@@ -1757,10 +1717,10 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
                 hp = 1.0 if heuristic_p is None else float(heuristic_p)
                 if hp >= 1.0 or (hp > 0.0 and random.random() < hp):
                     cx, cy = guard_army_push_cell(obs, aidx, cx, cy)
-            # Yard autism: attack clicks in own base with no raid → war dest.
-            from rl.auto_support import _near_own_base, home_raid_targets
-            if (_near_own_base(obs, (int(cx), int(cy)), radius=PACK_HOME_RADIUS)
-                    and not home_raid_targets(obs)):
+            # v6: attack macro = advance war front (not blind cell clicks).
+            # Visible home raids keep the sampled/raid cell; else war_objective.
+            from rl.auto_support import home_raid_targets
+            if not home_raid_targets(obs):
                 from rl.war_objective import war_objective
                 obj = war_objective(obs, aidx)
                 if obj is not None:
