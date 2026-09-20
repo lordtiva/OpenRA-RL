@@ -182,6 +182,11 @@ GROUP_MACRO_TYPES = (
 # attack_move per-unit stays on (raid peel).
 PACK_ARMY = 12
 PACK_HOME_RADIUS = 18
+# Opening vs easy rush (~tick 6k–9k): weap and 2nd proc stay illegal until
+# a real barracks stands AND a seed army exists. Harv TRAIN is not capped —
+# extra harvs come from weap, which this gate holds back.
+ANTI_RUSH_COMBAT = 4
+_BARRACKS_STANDING = ("tent", "barr")
 _NON_COMBAT_TAGS = ("harv", "mcv")
 # Save for War Factory: mask cheap infantry TRAIN once cash can bank $2000.
 WEAP_SAVE_CASH = 1200
@@ -390,6 +395,31 @@ def n_combat_total(obs) -> int:
         if _is_combat_unit(u):
             n += 1
     return int(n)
+
+
+def owns_barracks(obs) -> bool:
+    """True if tent/barr is standing (kennel is not an infantry barracks)."""
+    for b in getattr(obs, "buildings", None) or []:
+        if str(getattr(b, "type", "") or "").lower() in _BARRACKS_STANDING:
+            return True
+    return False
+
+
+def n_proc_count(obs) -> int:
+    """Standing + queued refineries (first proc is the eco bootstrap)."""
+    n = 0
+    for b in getattr(obs, "buildings", None) or []:
+        if str(getattr(b, "type", "") or "").lower() == "proc":
+            n += 1
+    for p in getattr(obs, "production", None) or []:
+        if str(getattr(p, "item", "") or "").lower() == "proc":
+            n += 1
+    return int(n)
+
+
+def anti_rush_unlocked(obs) -> bool:
+    """Weap + 2nd proc become legal once barracks stands and ≥4 combat exist."""
+    return owns_barracks(obs) and n_combat_total(obs) >= ANTI_RUSH_COMBAT
 
 
 _INFANTRY_TYPE_PREFIXES = ("e1", "e2", "e3", "e4", "e6", "e7", "dog", "spy",
@@ -1504,6 +1534,20 @@ class ActionIndex:
                 if not bool(self.build_slot_mask.any()):
                     m[TYPE_TO_IDX["build"]] = False
             self.type_mask = torch.from_numpy(m)
+        # Anti-rush: no weap / 2nd proc until barracks + 4 combat.
+        # The net must sample tent then rifles; support does not BUILD them.
+        if not anti_rush_unlocked(obs):
+            n_proc = n_proc_count(obs)
+            for slot, role in enumerate(self.build_items):
+                bslot = n_train + slot
+                if bslot >= n_vocab:
+                    break
+                if role == "warf" or (role == "refinery" and n_proc >= 1):
+                    self.build_slot_mask[bslot] = False
+                    self.item_mask[bslot] = False
+            if not bool(self.build_slot_mask.any()):
+                m[TYPE_TO_IDX["build"]] = False
+            self.type_mask = torch.from_numpy(m)
         # Pack-12: group push with a real army anywhere (Run 44 field remate).
         if n_combat_total(obs) < PACK_ARMY:
             m[TYPE_TO_IDX["army_attack_move"]] = False
@@ -1630,7 +1674,7 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
             else:
                 t_name = "no_op"
         # Defensa: sin proc no se entrena NADA (ni harv). Con proc pero sin
-        # harv, los rifles se tiran a no_op (el support se encarga del harv).
+        # harv, los rifles se tiran a no_op.
         if t_name == "train" and not owns_proc(obs):
             t_name = "no_op"
         elif t_name == "train" and not economy_ready_for_combat(obs):
@@ -1648,6 +1692,13 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
             elif "power" in build_set:
                 item_type = "power"
             else:
+                t_name = "no_op"
+        if t_name == "build" and not anti_rush_unlocked(obs):
+            concrete = str(aidx.rol_a_concreto.get(item_type, item_type) or "").lower()
+            if item_type == "warf" or concrete == "weap":
+                t_name = "no_op"
+            elif ((item_type == "refinery" or concrete == "proc")
+                  and n_proc_count(obs) >= 1):
                 t_name = "no_op"
     elif t_name == "place_building":
         from rl.roles import concretos_de

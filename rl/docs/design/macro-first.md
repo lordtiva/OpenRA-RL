@@ -24,8 +24,12 @@ el_power
   (0.5 under fog with no visible enemy — no free points).
 - **Attack macro = war front:** *_attack_move resolves to war_objective unless a
   visible home raid exists (adapter, not a scripted war_nudge).
-- **Crutches off:** should_save_for_weap always false; no train-harvester hard cap mask.
-  Forever APM (repair/power/sell/harvest-idle/stance/deploy) stays in auto_support.
+- **Crutches off:** should_save_for_weap always false; no train-harvester hard cap
+  (extra harvs come from weap). **Anti-rush mask:** `BUILD weap` and 2nd `proc`
+  stay illegal until tent/barr stands **and** `n_combat >= 4`. The net must
+  sample barracks then rifles.
+- **auto_support APM only:** repair, power_down, harvest-idle (no cell). No
+  BUILD/PLACE/TRAIN/deploy/nudge/scout.
 
 Preset: --shaper-preset eradicate_v6 (train/onboard default).
 
@@ -75,7 +79,7 @@ Semántica continua:
 | Etapa | Fases | Qué hace |
 |-------|-------|----------|
 | 1 Bootstrap macro | **A → B** | Teacher **expand** desde A. A = `--bc-only`. B = PPO+SIL+BC con λ_bc → **0.05**. Sin wipe de tapes al promover. |
-| 2 Escalera suave | **S → C → D** | MAB / PFSP sobre bots scripted. Promote a C **sin** wipe elite/tapes ni `--reset-opt` (ya expand). |
+| 2 Escalera suave | **S → C → D** | MAB / PFSP sobre bots scripted. Promote a C **sin** wipe elite/tapes; primer launch C **`--reset-opt --hyper-pause`** (Adam no hereda el piso 1e-5 de B/S). |
 | 3 Liga | **E** | PFSP-RL + hist checkpoints + anclas hard/medium. |
 
 `teacher_mode_for_phase(*)` → siempre `"expand"`.

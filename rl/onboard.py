@@ -355,8 +355,16 @@ def finish_c_sft(cfg: dict, last_iter: int) -> None:
 
 
 def c_launch_extras(cfg: dict | None) -> list[str]:
-    """Promote never resets Adam. Collapse restore in auto_train still can."""
-    return []
+    """First C PPO launch: fresh Adam + hyper-pause. Later resumes skip."""
+    cfg = cfg or {}
+    if str(cfg.get("phase") or "") != "C":
+        return []
+    if not cfg.get("c_sft_done"):
+        return []
+    if cfg.get("c_reset_opt_done"):
+        return []
+    n = int(cfg.get("c_hyper_pause_iters") or DEFAULTS.get("c_hyper_pause_iters") or 25)
+    return ["--reset-opt", "--hyper-pause", "--hyper-pause-iters", str(max(1, n))]
 
 
 def phase_flags(phase: str, cfg: dict) -> list[str]:
@@ -803,7 +811,7 @@ ows. Ambiguous history: if
                 cfg["b_bc_start_iter"] = prev_started or 1
         if nxt == "C":
             cfg["c_sft_done"] = True
-            cfg["c_reset_opt_done"] = True
+            cfg["c_reset_opt_done"] = False
         elif nxt in EXPAND_PHASES or nxt == "done":
             cfg["c_reset_opt_done"] = True
             cfg["c_sft_done"] = True

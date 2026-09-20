@@ -30,7 +30,7 @@ from openra_env.models import ActionType, CommandModel, OpenRAAction
 from rl.action_adapter import (ActionIndex, Vocab, apply_passability,
                                index_to_command_effective,
                                filter_army_push_hysteresis,
-                               drain_item_slot_fallback)
+                               drain_item_slot_fallback, n_combat_total)
 from rl.imitation import (
     command_to_indices, pick_bc_command, pick_bc_commands,
     student_combat_ready,
@@ -319,6 +319,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
     atype = "no_op"  # ultimo tipo efectivo; NO_OP en shell / pre-lock
     last_activity_tick = int(getattr(obs, "tick", 0) or 0)
     _idle_kills = _idle_deaths = _idle_earned = 0
+    combat_at_6k = None
 
     for step in range(max_steps):
         # Decidir SIEMPRE cada k_skip (o cada iteracion en modo macro).
@@ -743,6 +744,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                 continue  # sin obs nueva: reintentar decisión sobre la última
         consec_errors = 0
         obs = result.observation
+        if combat_at_6k is None and int(getattr(obs, "tick", 0) or 0) >= 6000:
+            combat_at_6k = n_combat_total(obs)
         if opponent_net is not None:
             peer_obs = peer_obs_from_metadata(obs) or peer_obs
         # Reward CONFORMADO del lado del agente: se ACUMULA en la muestra
@@ -808,6 +811,8 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                         iter=heartbeat_iter, worker=heartbeat_worker,
                         step=int(step))
                     obs = result.observation
+                    if combat_at_6k is None and int(getattr(obs, "tick", 0) or 0) >= 6000:
+                        combat_at_6k = n_combat_total(obs)
                     done = bool(result.done)
                     last_gs = getattr(race, "_last_gs", None)
                     r_close = shaper.step(obs, done=done, gs=last_gs, action_type=atype, closing=True)
@@ -1001,6 +1006,9 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
         # Conteo espectador de edificios de cada bando al cierre
         # (el rival baja cuando raseas su base)
         "n_buildings": {"own": own_n_buildings, "enemy": ene_n_buildings},
+        "combat_at_6k": int(
+            combat_at_6k if combat_at_6k is not None else n_combat_total(obs)),
+        "alive_at_15k": bool(int(getattr(obs, "tick", 0) or 0) >= 15000),
     }
     return traj, outcome
 

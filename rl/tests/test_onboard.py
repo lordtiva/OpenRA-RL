@@ -150,12 +150,12 @@ check("C default is PPO not SFT", "--bc-only" not in fc_sft and "--sil" in fc_sf
 check("C teacher-mode expand",
       fc_sft[fc_sft.index("--bc-teacher-mode") + 1] == "expand")
 check("C MAB on", "--mab" in fc_sft and "--pfsp" in fc_sft)
-check("C no reset-opt in flags", "--reset-opt" not in fc_sft)
+check("C phase_flags never carry reset-opt", "--reset-opt" not in fc_sft)
 cfg_ppo = dict(cfg)
 cfg_ppo["c_sft_done"] = True
 cfg_ppo["phase_started_iter"] = 60
 fc = phase_flags("C", cfg_ppo)
-check("C easy sin reset-opt", fc[fc.index("--bot-type") + 1] == "easy"
+check("C easy sin reset-opt in phase_flags", fc[fc.index("--bot-type") + 1] == "easy"
       and "--reset-opt" not in fc)
 check("C PPO lr 1e-4", fc[fc.index("--lr") + 1] == "1.0e-4")
 check("C adv-mode global", fc[fc.index("--adv-mode") + 1] == "global")
@@ -184,7 +184,8 @@ check("teacher_mode always expand",
 cfg["c_reset_opt_done"] = True
 cfg["c_sft_done"] = True
 fc2 = phase_flags("C", cfg)
-check("C nunca reset-opt", "--reset-opt" not in fc2)
+check("C phase_flags still omit reset-opt after consumed",
+      "--reset-opt" not in fc2)
 cfg_c_start = dict(cfg)
 cfg_c_start["c_sft_done"] = True
 cfg_c_start["phase_started_iter"] = 132
@@ -434,8 +435,9 @@ ex_ppo = c_launch_extras({
     "phase": "C", "c_sft_done": True, "c_reset_opt_done": False,
     "c_hyper_pause_iters": 25,
 })
-check("C PPO extras empty (no Adam reset)",
-      "--reset-opt" not in ex_ppo)
+check("C PPO extras reset-opt + hyper-pause 25",
+      "--reset-opt" in ex_ppo and "--hyper-pause" in ex_ppo
+      and ex_ppo[ex_ppo.index("--hyper-pause-iters") + 1] == "25")
 check("C extras empty after reset consumed",
       c_launch_extras({"phase": "C", "c_sft_done": True,
                        "c_reset_opt_done": True}) == [])

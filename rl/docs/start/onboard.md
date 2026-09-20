@@ -14,6 +14,8 @@ Comando: `.\.venv\Scripts\python.exe rl\auto_train.py --scratch --onboard` (desp
 
 **2026-09-06 — mental base v3:** beacon GPS sigue apagado (`beacon=None` en encode/push). El teacher recuerda un **mental enemy-base** (centroide del cluster denser de edificios enemigos vistos) y empuja ahí cuando no hay leftover visible. Escalares: `has_enemy_base_belief`, rel dx/dy, conf (`SCALAR_DIM=33`, Net2Net pad). Phase A `a_max_steps` **1800**; early fog scout con ≥3 combate. Regenerar `teacher_wins/` (schema `eco_and_combat_scout_v1` / `--scratch --onboard`). **K=2 eco+push** same macro-tick.
 
+**2026-09-20 — anti-rush + APM-only support:** `BUILD weap` y 2ª `proc` ilegales hasta cuartel en pie y ≥4 combate (`ANTI_RUSH_COMBAT`). `auto_support` solo repair / power_down / harvest-idle. Primer launch C: `--reset-opt --hyper-pause-iters 25`. Métricas `combat_at_6k` / `alive_at_15k` (y `easy_*` si el batch mezcla). Si el run ya está en C con `c_reset_opt_done: true`, ponerlo `false` y relanzar `--onboard` para que Adam vuelva a 1e-4.
+
 **Army push (runtime adapter, 2026-09-07):** pipeline en `index_to_command_effective` + hysteresis en live/rollout. Live/eval lo toma al **reiniciar el proceso** (sin `--scratch`).
 
 1. `stage_army_attack_cell`: always-on safety (like remap). Vanguard = units closer to dest than centroid (no `x>35` GPS). Flank N/S **solo** si el midline es agua.
@@ -42,7 +44,7 @@ El camino más corto que **viaja con el git** (sin pesos) es la currícula **mac
 1. **A** — SFT (`--bc-only`) con `ScriptedTeacher` **expand** vs `beginner`
 2. **B** — PPO + SIL + BC expand, λ_bc → 0.05, vs `beginner`
 3. **S** — bridge PFSP-RL / MAB (ancla `beginner`) — suaviza el cliff hacia easy
-4. **C** — PPO + expand BC vs `easy` (**sin** wipe de elite/tapes ni reset-opt de doctrina)
+4. **C** — PPO + expand BC vs `easy` (sin wipe de elite/tapes; **sí** `--reset-opt` en el primer launch)
 5. **D** — vs `medium`
 6. **E** — liga PFSP-RL vs `hard` (OpenRA `normal`) + hist hasta wr20 ~50%
 
@@ -376,7 +378,7 @@ Si el seed que querés es `iter0140.pt` y no el `best@24`: `--onboard-rewind 140
 
 ### Fase C — expand SFT, luego PPO + expand BC vs easy
 
-Al promover S→C (o rewind desde C a un ckpt de S) se copia `best.pt` → `best_S.pt`, se wipea `elite.pt` (SIL de rifles no entra), y se wipea `teacher_wins/` **salvo** que ya haya cintas expand. Primer launch C: `--reset-opt`.
+Al promover S→C (o rewind desde C a un ckpt de S) se copia `best.pt` → `best_S.pt`. **Se conservan** `elite.pt` y `teacher_wins/` expand. Primer launch C: `--reset-opt --hyper-pause-iters 25 --lr 1e-4` (`c_launch_extras`). La máscara anti-rush aplica en todas las fases (adapter), no solo C.
 
 1. **Expand SFT** (`c_sft_iters=15`): `--bc-only` vs easy, teacher expand, sin mix/SIL/HyperHealth. Criterio: N iters, no wr20.
 2. **PPO**: `--reset-opt --hyper-pause-iters 25 --lr 1e-4`. `λ_bc` **reinicia** en `phase_started_iter` 0.50→0.20 (`c_bc_lambda_start` / `c_bc_lambda_end`). Mix beginner→easy 0.50→1.0 en **100** iters. wr20 / best / promote **solo vs easy**.

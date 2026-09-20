@@ -1421,6 +1421,27 @@ async def amain(args):
                 anchor_outs = [o for o in outcomes if o.get("bot_type") == wr_anchor]
             else:
                 anchor_outs = list(outcomes)
+            rush_metrics = {}
+            if outcomes:
+                rush_metrics = {
+                    "combat_at_6k": [o.get("combat_at_6k") for o in outcomes],
+                    "alive_at_15k": [bool(o.get("alive_at_15k")) for o in outcomes],
+                    "combat_at_6k_mean": round(
+                        sum(int(o.get("combat_at_6k") or 0) for o in outcomes)
+                        / len(outcomes), 2),
+                    "alive_at_15k_rate": round(
+                        sum(1 for o in outcomes if o.get("alive_at_15k"))
+                        / len(outcomes), 3),
+                }
+                easy_outs = [o for o in outcomes
+                             if str(o.get("bot_type") or "") == "easy"]
+                if easy_outs:
+                    rush_metrics["easy_combat_at_6k_mean"] = round(
+                        sum(int(o.get("combat_at_6k") or 0) for o in easy_outs)
+                        / len(easy_outs), 2)
+                    rush_metrics["easy_alive_at_15k_rate"] = round(
+                        sum(1 for o in easy_outs if o.get("alive_at_15k"))
+                        / len(easy_outs), 3)
             mix_p = None
             if mixing:
                 start_it = mix_start_iter or it
@@ -1506,6 +1527,7 @@ async def amain(args):
                     **({"economy_race": race_mean} if race_mean else {}),
                     **({"action_hist": hist_total} if hist_total else {}),
                     **({"n_buildings": nb_mean} if nb_mean else {}),
+                    **rush_metrics,
                     **({"critic_v_mean": round(
                             sum(sum(vc) for vc in vcs)
                             / sum(len(vc) for vc in vcs), 3)}

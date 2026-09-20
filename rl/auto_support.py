@@ -1,45 +1,13 @@
-"""Autonomía de soporte — capa de confort APM (Pilar B, full-stack Run3).
+"""Autonomía de soporte — APM mínimo (no estrategia).
 
-Resuelve el cuello de botella 1 decisión / 80 ticks sin robar ancho de banda
-a la red. El agente decide ESTRATEGIA (qué entrenar, dónde atacar); esta capa
-resuelve micro-mantenimiento obvio en paralelo, igual que BuildingRepairBotModule
-y PowerDownBotModule del bot hard.
+Una decisión cada ~50 ticks no cubre repair/power/harvest-idle. Esta capa
+inyecta esos tres comandos DESPUÉS de index_to_command_effective(); no
+entran al buffer de PPO.
 
-Diseño:
-- Se inyecta en rollout.py DESPUÉS de index_to_command_effective(), extendiendo
-  action.commands con comandos extra. El log_prob de PPO solo cubre el comando
-  estratégico — el soporte es gratis y no entra en el buffer.
-- Flag --auto-support (default False en Run2, True en Run3/v4). Sin flag, 0 impacto.
-- Reparación: si cash>500 y edificio hp<35% y no está ya reparándose, emite 1
-  repair por bloque (máx 2 para no spamear). Es el umbral del hard.
-- Cosecha: idle SIN celda (engine al ore más cercano). Hasta 2 idle/bloque.
-  Retarget con celda SOLO si está minando migajas junto a casa. Spread con
-  celda (Run 31) wr20→0 — no reabrir. Easy nace con 2 harvs; nosotros
-  TRAIN hasta MIN_HARVESTERS=2 si hay cola Vehicle.
-- Energía: si power_drained > power_provided, apaga dome/tsla/mslo (prioridad baja).
-- Asalto FULL / hunt / recall / rally-al-beacon / crédito de dest: APAGADOS
-  (corte 950). Era estrategia spawn-asimétrica (siempre (95,11)).
-  Re-activar: SUPPORT_ASSAULT=True (no este corte).
-- Nudge de guerra (SUPPORT_WAR_NUDGE): raid → attack_move solo idle en
-  casa (no army_attack_move: visor 1099 ping-pong x=8↔70). Push: ≥12 idle
-  en casa + contacto visible → army_attack_move al más lejano / prod, no
-  al tent de la puerta. Sin beacon, sin crédito de dest.
-- Scout de niebla (SUPPORT_FOG_SCOUT): sin contacto visible y con pack en
-  casa, manda 2 exploradores (3 si army≥20) a sectores distintos de niebla
-  / rumbos desde el ancla. Multi-mapa via Ch3/Ch4; nunca beacon. Al
-  revelar, el nudge dispara el pack.
-- Remate leftovers (SUPPORT_REMNANT): APAGADO (Run 34). Sweep remap a
-  agua/beacon, AM cada idle/bloque, wr 33%→17%. No reabrir en este corte.
-- Remate tardío (SUPPORT_LATE_REMNANT): tick≥25k, sin edificios enemigos
-  a la vista (o wealth espectador <6k). Fan-out a niebla/bordes, no beacon.
-  Independiente de war_nudge (onboard lleva --no-war-nudge).
-- Stance AttackAnything al nacer (Capa 0): Defend no caza; el scripted sí.
-  Solo combate (no harv/mcv). Micro, no “andá al NE”.
-- Auto-tent (Capa 0, corte 987): con proc en pie y sin tent/barr, BUILD/PLACE
-  el cuartel (como auto-proc). Sin eso latest 985 TRAIN-eaba sbag y moría
-  a los 10k sin un rifle.
-
-No genera reward — evita defense_loss/hold_zero ya existentes.
+No BUILD/PLACE/TRAIN, no deploy, no war nudge, no fog scout, no remate.
+Eso lo muestrea la red (máscara anti-rush en action_adapter). Helpers de
+dest (war_nudge_cell, fog_scout_destinations, …) siguen en el módulo para
+tests y para apply_dest_credit, pero support_commands no los emite.
 """
 
 from openra_env.models import ActionType, CommandModel
@@ -52,19 +20,17 @@ _NON_COMBAT = ("harv", "mcv")
 # War script (pack/hunt/rally/dest-credit). Off: the policy owns targeting.
 # Eco/micro above stays. Flip True only for a controlled ablation.
 SUPPORT_ASSAULT = False
-# Cheap war nudge vs easy. Visible contact only — never beacon.
-# Independent of SUPPORT_ASSAULT (that flag stays False).
-SUPPORT_WAR_NUDGE = True
+# War/fog/remnant stay off: the net owns targeting and scouting.
+SUPPORT_WAR_NUDGE = False
 # Leftover sweep+commit. Off: Run 34 wr 33%→17% (agua/beacon + AM spam).
 SUPPORT_REMNANT = False
-# Late leftover hunt: fog-empty after the rush window. Not the Run 34 remnant.
-SUPPORT_LATE_REMNANT = True
+# Late leftover hunt. Off: APM-only support; the net must close leftovers.
+SUPPORT_LATE_REMNANT = False
 REMNANT_MIN_TICK = 25000
 REMNANT_ENEMY_WEALTH = 6000
 REMNANT_SWEEP_N = 4
-# Fog scout: open shroud with 2–3 idle rifles when nudge has no contact.
-# Map-agnostic (spatial Ch3/Ch4 or angle fallback). Never beacon.
-SUPPORT_FOG_SCOUT = True
+# Fog scout helpers remain; support_commands does not emit them.
+SUPPORT_FOG_SCOUT = False
 FOG_SCOUT_N_BASE = 2          # until we have a bigger home army
 FOG_SCOUT_N_MORE = 3          # once home combat >= FOG_SCOUT_ARMY_FOR_MORE
 FOG_SCOUT_ARMY_FOR_MORE = 20  # "2 hasta tener más army"
@@ -977,198 +943,31 @@ def _emit_fog_scouts(obs, combat, idles_home, aidx, out):
 
 def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None, war_nudge=None):
 
-    """Lista de CommandModel de soporte para esta observación.
+    """APM only: harvest-idle (no cell), repair, power_down.
 
-    Llamar con la obs que ve la red ANTES de ejecutar el step. Devuelve [] si
-    no hay nada que hacer. No toca el estado del shaper ni el buffer de PPO.
-    war_nudge=None usa SUPPORT_WAR_NUDGE; False apaga raid/push/fog-scout.
-    El remate tardío (tick≥25k, niebla vacía) sigue activo.
+    last_push / aidx / war_nudge are ignored (kept so call sites stay stable).
     """
-    use_nudge = SUPPORT_WAR_NUDGE if war_nudge is None else bool(war_nudge)
+    _ = (last_push, aidx, war_nudge)
     out = []
     eco = getattr(obs, "economy", None)
     blds = getattr(obs, "buildings", []) or []
     units = getattr(obs, "units", []) or []
     cash = int(getattr(eco, "cash", 0) or 0) if eco else 0
 
-    # 0a) Auto-deploy MCV — without a conyard, auto-proc cannot fire and the
-    #     policy collapses to deploy-once-then-no_op (Run 8). Gratis for PPO.
-    has_fact = any(str(getattr(b, "type", "")).lower() in ("fact", "afac")
-                   for b in blds)
-    if not has_fact:
-        for u in units:
-            if "mcv" in str(getattr(u, "type", "")).lower():
-                out.append(CommandModel(
-                    action=ActionType.DEPLOY, actor_id=int(u.actor_id)))
-                break
+    # Idle harvs → HARVEST without a cell (engine picks nearest ore).
+    n_h = 0
+    for u in units:
+        if n_h >= _ORE_IDLE_ORDERS:
+            break
+        if not _is_harv_type(getattr(u, "type", "")):
+            continue
+        if not bool(getattr(u, "is_idle", False)):
+            continue
+        out.append(CommandModel(
+            action=ActionType.HARVEST, actor_id=int(u.actor_id)))
+        n_h += 1
 
-    # 0) Auto-harvest. Idle → sin celda (ore más cercano). Hasta 2/bloque
-    #    (Run 30 despertaba 1; el segundo esperaba 50 ticks). Retarget con
-    #    celda solo si está minando migajas. No forzar parche (Run 31).
-    has_proc = any(getattr(b, "type", "") == "proc" for b in blds)
-    if has_proc:
-        arr = _spatial_chw(obs)
-        home = _best_ore_near(arr, _proc_xy(blds))
-        n_h = 0
-        for u in units:
-            if n_h >= _ORE_IDLE_ORDERS:
-                break
-            if not _is_harv_type(getattr(u, "type", "")):
-                continue
-            idle = bool(getattr(u, "is_idle", False))
-            local = _harv_local_ore(u, arr)
-            stale = False
-            if (not idle) and home is not None and local > 0.0:
-                _bx, _by, bden = home
-                stale = bden > 0.0 and local < _ORE_STALE_FRAC * bden
-            if idle:
-                out.append(CommandModel(
-                    action=ActionType.HARVEST, actor_id=int(u.actor_id)))
-                n_h += 1
-                continue
-            if stale:
-                bx, by, _ = home
-                out.append(CommandModel(
-                    action=ActionType.HARVEST, actor_id=int(u.actor_id),
-                    target_x=int(bx), target_y=int(by)))
-                n_h += 1
-                continue
-
-    # 0b) Auto-proc + auto-harv + auto-tent — push eco then the first barracks.
-    #     Missing proc: BUILD if it is in available_production (do not deadlock
-    #     BUILD/PLACE of proc — those stay unmasked even when we cannot build yet).
-    #     Proc ready in the queue: PLACE near the conyard. Has proc, <2 harvs:
-    #     TRAIN harv (easy nace con 2). Has proc, no tent/barr: BUILD/PLACE
-    #     the faction barracks (visor 985: sin cuartel, TRAIN sbag, lose 10k).
-    #     Fast 2-proc: Proc 1 -> Barracks -> Proc 2 (hasta MAX_SUPPORT_PROCS=2).
-    #     Financiado con el saldo remanente (~$2.200) de los $5.000 iniciales.
-    avail = set(getattr(obs, "available_production", []) or [])
-    prod = list(getattr(obs, "production", []) or [])
-    proc_queued = any(str(getattr(p, "item", "")).lower() == "proc" for p in prod)
-    proc_ready = any(
-        str(getattr(p, "item", "")).lower() == "proc"
-        and float(getattr(p, "progress", 0) or 0) >= 1.0
-        for p in prod
-    )
-    if not has_fact:
-        pass  # wait for the deploy above; BUILD proc needs a conyard
-    else:
-        n_procs = sum(1 for b in blds if str(getattr(b, "type", "")).lower() == "proc")
-        has_barracks = any(
-            str(getattr(b, "type", "")).lower() in _BARRACKS_ITEMS for b in blds)
-        barr_ready = next(
-            (str(getattr(p, "item", "")).lower()
-             for p in prod
-             if str(getattr(p, "item", "")).lower() in _BARRACKS_ITEMS
-             and float(getattr(p, "progress", 0) or 0) >= 1.0),
-            None,
-        )
-        barr_queued = any(
-            str(getattr(p, "item", "")).lower() in _BARRACKS_ITEMS for p in prod)
-        barr_item = next((n for n in _BARRACKS_ITEMS if n in avail), None)
-
-        weap_ready = next(
-            (str(getattr(p, "item", "")).lower()
-             for p in prod
-             if str(getattr(p, "item", "")).lower() in _WEAP_ITEMS
-             and float(getattr(p, "progress", 0) or 0) >= 1.0),
-            None,
-        )
-        dome_ready = next(
-            (str(getattr(p, "item", "")).lower()
-             for p in prod
-             if str(getattr(p, "item", "")).lower() in _DOME_ITEMS
-             and float(getattr(p, "progress", 0) or 0) >= 1.0),
-            None,
-        )
-        if proc_ready:
-            ax, ay = _place_near_base(obs)
-            out.append(CommandModel(
-                action=ActionType.PLACE_BUILDING, item_type="proc",
-                target_x=ax, target_y=ay))
-        elif barr_ready:
-            ax, ay = _place_near_base(obs)
-            out.append(CommandModel(
-                action=ActionType.PLACE_BUILDING, item_type=barr_ready,
-                target_x=ax, target_y=ay))
-        elif weap_ready:
-            ax, ay = _place_near_base(obs)
-            out.append(CommandModel(
-                action=ActionType.PLACE_BUILDING, item_type=weap_ready,
-                target_x=ax, target_y=ay))
-        elif dome_ready:
-            ax, ay = _place_near_base(obs)
-            out.append(CommandModel(
-                action=ActionType.PLACE_BUILDING, item_type=dome_ready,
-                target_x=ax, target_y=ay))
-
-        # Cola de vehículos / entrenamiento: reponer cosechadora si hay fábrica de armas
-        n_harv = _n_harvesters(units, prod)
-        if n_procs > 0 and n_harv < MIN_HARVESTERS and "harv" in avail and cash >= HARV_COST:
-            out.append(CommandModel(action=ActionType.TRAIN, item_type="harv"))
-
-        # Cola de edificios: Proc 1 -> Cuartel -> Proc 2 (hasta MAX_SUPPORT_PROCS=2)
-        if n_procs == 0:
-            if (not proc_queued) and "proc" in avail and cash >= 2000:
-                out.append(CommandModel(action=ActionType.BUILD, item_type="proc"))
-        elif not has_barracks:
-            if (not barr_queued) and barr_item and cash >= TENT_COST:
-                out.append(CommandModel(
-                    action=ActionType.BUILD, item_type=barr_item))
-        elif (n_procs < MAX_SUPPORT_PROCS
-              and (not proc_queued)
-              and "proc" in avail
-              and cash >= 2000):
-            # Fast 2-proc: 2da refinería = 2da cosechadora gratis + doble muelle
-            out.append(CommandModel(action=ActionType.BUILD, item_type="proc"))
-        else:
-            # After barracks + 2 procs: assist weap then radar (doc 1.md).
-            # Policy still decides BUILD; we only PLACE a ready weap/dome
-            # and queue weap when cash >= 2500 so the opening is not stuck
-            # on infantry forever.
-            has_weap = any(
-                str(getattr(b, "type", "")).lower() == "weap" for b in blds)
-            has_dome = any(
-                str(getattr(b, "type", "")).lower() == "dome" for b in blds)
-            weap_ready = next(
-                (str(getattr(p, "item", "")).lower()
-                 for p in prod
-                 if str(getattr(p, "item", "")).lower() in _WEAP_ITEMS
-                 and float(getattr(p, "progress", 0) or 0) >= 1.0),
-                None,
-            )
-            dome_ready = next(
-                (str(getattr(p, "item", "")).lower()
-                 for p in prod
-                 if str(getattr(p, "item", "")).lower() in _DOME_ITEMS
-                 and float(getattr(p, "progress", 0) or 0) >= 1.0),
-                None,
-            )
-            weap_queued = any(
-                str(getattr(p, "item", "")).lower() in _WEAP_ITEMS for p in prod)
-            dome_queued = any(
-                str(getattr(p, "item", "")).lower() in _DOME_ITEMS for p in prod)
-            if weap_ready:
-                ax, ay = _place_near_base(obs)
-                out.append(CommandModel(
-                    action=ActionType.PLACE_BUILDING, item_type=weap_ready,
-                    target_x=ax, target_y=ay))
-            elif dome_ready:
-                ax, ay = _place_near_base(obs)
-                out.append(CommandModel(
-                    action=ActionType.PLACE_BUILDING, item_type=dome_ready,
-                    target_x=ax, target_y=ay))
-            elif (has_barracks and n_procs >= 1
-                  and (not has_weap) and (not weap_queued)
-                  and "weap" in avail
-                  and cash >= SUPPORT_WEAP_CASH):
-                out.append(CommandModel(action=ActionType.BUILD, item_type="weap"))
-            elif (has_weap and (not has_dome) and (not dome_queued)
-                  and "dome" in avail
-                  and cash >= SUPPORT_WEAP_CASH):
-                out.append(CommandModel(action=ActionType.BUILD, item_type="dome"))
-
-    # 1) Auto-repair — umbral hard (35%)
+    # Repair: cash>500 and hp<35%, max 2 per block (hard-bot threshold).
     if cash > 500:
         repairs = 0
         for b in blds:
@@ -1176,147 +975,19 @@ def support_commands(obs, last_push=None, max_repairs: int = 2, aidx=None, war_n
                 break
             hp = float(getattr(b, "hp_percent", 1.0) or 1.0)
             if hp < 0.35 and not bool(getattr(b, "is_repairing", False)):
-                out.append(CommandModel(action=ActionType.REPAIR, actor_id=int(b.actor_id)))
+                out.append(CommandModel(
+                    action=ActionType.REPAIR, actor_id=int(b.actor_id)))
                 repairs += 1
 
-    # 1b) Sell wrecks (not fact/proc). APM tonto; no cabe en la política.
-    for b in blds:
-        t = str(getattr(b, "type", "")).lower()
-        if t in _NO_SELL:
-            continue
-        hp = float(getattr(b, "hp_percent", 1.0) or 1.0)
-        if hp < SELL_HP:
-            out.append(CommandModel(action=ActionType.SELL, actor_id=int(b.actor_id)))
-            break
-
-    # 2) Auto-power_down — solo si balance negativo
+    # Power down one low-priority building on brownout.
     if eco is not None:
         provided = int(getattr(eco, "power_provided", 0) or 0)
         drained = int(getattr(eco, "power_drained", 0) or 0)
         if drained > provided:
             for b in blds:
                 if b.type in _POWER_DOWN_TYPES and bool(getattr(b, "is_powered", True)):
-                    out.append(CommandModel(action=ActionType.POWER_DOWN, actor_id=int(b.actor_id)))
-                    break  # uno por bloque
-
-    combat = _combat_units(units)
-
-    # 3) War nudge — visible contact only. No beacon, no dest-credit.
-    #    Raid: AttackMove idle-at-home only (group army_attack_move yanks
-    #    the field army back to the door — visor 1099 ping-pong).
-    #    Push: ≥12 idle at home, army_attack_move to farthest/prod contact.
-    if use_nudge and not SUPPORT_ASSAULT and combat:
-        raw_dest, is_raid = war_nudge_cell(obs)
-        idles_home = [
-            u for u in combat
-            if bool(getattr(u, "is_idle", False)) and _near_own_base(obs, _xy(u))
-        ]
-        if raw_dest is not None:
-            dest = _snap_passable(obs, raw_dest, aidx)
-            if dest is None:
-                dest = raw_dest
-            if is_raid:
-                n_peel = 0
-                for u in idles_home:
-                    if n_peel >= RAID_HOME_ORDERS:
-                        break
-                    try:
-                        aid = int(getattr(u, "actor_id", 0) or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    if aid <= 0:
-                        continue
                     out.append(CommandModel(
-                        action=ActionType.ATTACK_MOVE,
-                        actor_id=aid,
-                        target_x=int(dest[0]), target_y=int(dest[1])))
-                    n_peel += 1
-            elif len(idles_home) >= MIN_ARMY_FOR_ASSAULT:
-                out.append(CommandModel(
-                    action=ActionType.ARMY_ATTACK_MOVE,
-                    target_x=int(dest[0]), target_y=int(dest[1])))
-        elif (has_proc
-              and len(idles_home) >= MIN_ARMY_FOR_ASSAULT
-              and not remnant_hunt_needed(obs)):
-            # Niebla vacía: 2–3 scouts abren mapa; al revelar, el nudge empuja.
-            # Late remnant takes over after 25k (edge sweep, not 2 home scouts).
-            _emit_fog_scouts(obs, combat, idles_home, aidx, out)
-
-    # 3a) Late remnant: fog leftover after the rush. Independent of war_nudge
-    #     (onboard --no-war-nudge still closes 53k incompletes).
-    if combat:
-        _emit_late_remnant(obs, combat, aidx, out)
-
-    # 3b-4) Asalto FULL / hunt / recall / rally-al-dest: off. Ablation only.
-    if SUPPORT_ASSAULT:
-        has_harv = _has_harvester(obs, eco, units, prod)
-        raw_dest = _push_cell(obs, last_push)
-        waypoint = _is_beacon_or_hunt(obs, raw_dest)
-        dest = _snap_passable(obs, raw_dest, aidx)
-        defending = bool(home_raid_targets(obs))
-        n_home = _n_combat_near_own_base(obs, combat)
-        n_at_dest = 0
-        if dest is not None:
-            n_at_dest = _n_combat_at(combat, dest, ARRIVED_CELLS)
-        obj = dest
-        n_at_beacon = (_n_combat_at(combat, obj, ARRIVED_CELLS)
-                       if obj is not None else 0)
-        assault = (has_proc and has_harv and dest is not None
-                   and n_home >= MIN_ARMY_FOR_ASSAULT)
-        if dest is not None and (has_proc or defending):
-            px, py = dest
-            idles = [u for u in combat if bool(getattr(u, "is_idle", False))]
-            idles_home = [u for u in idles if _near_own_base(obs, _xy(u))]
-            recall = bool(defending and combat and n_at_dest < MIN_PILE_FOR_HUNT)
-            reassault = bool(
-                assault
-                and not defending
-                and n_at_dest < MIN_ARMY_FOR_ASSAULT
-                and n_home >= MIN_ARMY_FOR_ASSAULT
-                and waypoint
-            )
-            pack_idle = assault and len(idles_home) >= MIN_ARMY_FOR_ASSAULT
-            sweep = (not defending and has_proc and has_harv
-                     and n_at_beacon >= MIN_PILE_FOR_HUNT
-                     and len(idles) >= MIN_PILE_FOR_HUNT)
-            if recall or reassault or pack_idle or sweep:
-                out.append(CommandModel(
-                    action=ActionType.ARMY_ATTACK_MOVE, target_x=px, target_y=py))
-        if has_proc:
-            pack_committed = bool(
-                defending
-                or n_home >= MIN_ARMY_FOR_ASSAULT
-                or n_at_dest >= MIN_PILE_FOR_HUNT
-                or n_at_beacon >= MIN_PILE_FOR_HUNT
-            )
-            if dest is not None and pack_committed:
-                rx_t, ry_t = dest
-            else:
-                rx_t, ry_t = _staging_cell(obs, dest, aidx)
-            for b in blds:
-                if str(getattr(b, "type", "")).lower() not in _RALLY_BUILDINGS:
-                    continue
-                rx = int(getattr(b, "rally_x", -1) if getattr(b, "rally_x", -1) is not None else -1)
-                ry = int(getattr(b, "rally_y", -1) if getattr(b, "rally_y", -1) is not None else -1)
-                if rx == int(rx_t) and ry == int(ry_t):
-                    continue
-                out.append(CommandModel(
-                    action=ActionType.SET_RALLY_POINT,
-                    actor_id=int(b.actor_id),
-                    target_x=int(rx_t),
-                    target_y=int(ry_t),
-                ))
-                break
-
-    # 5) Stance AttackAnything al nacer (Defend no caza).
-    for u in combat:
-        st = int(getattr(u, "stance", STANCE_ATTACK_ANYTHING) or 0)
-        if st != STANCE_ATTACK_ANYTHING:
-            out.append(CommandModel(
-                action=ActionType.SET_STANCE,
-                actor_id=int(u.actor_id),
-                target_x=STANCE_ATTACK_ANYTHING,
-            ))
-            break
+                        action=ActionType.POWER_DOWN, actor_id=int(b.actor_id)))
+                    break
 
     return out

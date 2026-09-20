@@ -804,10 +804,10 @@ def try_promote(last_iter: int) -> str | None:
         # First C launch passes --reset-opt via promote relaunch; mark after
         # launch in _after_onboard_launch. Do not pre-set True here for C.
         if nxt == "C":
-            # Macro-first: A/B already used expand teacher. Keep elite SIL
-            # and teacher_wins — no wipe, no Adam reset.
+            # Keep elite SIL and teacher_wins. Fresh Adam so C is not
+            # stuck at the B/S LR floor (c_launch_extras --reset-opt).
             _onboard["c_sft_done"] = True
-            _onboard["c_reset_opt_done"] = True
+            _onboard["c_reset_opt_done"] = False
         else:
             _onboard["c_reset_opt_done"] = True
             _onboard["c_sft_done"] = True

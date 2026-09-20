@@ -121,12 +121,11 @@ def test_weap_save_disabled_v6():
         assert bool(aidx.train_slot_mask[slot]) is True
 
 
-def test_auto_support_builds_weap_at_2500():
+def test_auto_support_does_not_build_weap():
     obs = _obs(cash=SUPPORT_WEAP_CASH,
                bldgs=("fact", "proc", "proc", "powr", "tent"))
     cmds = support_commands(obs, war_nudge=False)
-    assert any(c.action == ActionType.BUILD and c.item_type == "weap"
-               for c in cmds)
+    assert not any(c.action == ActionType.BUILD for c in cmds)
 
 
 def test_teacher_default_expand_no_hardcoded_mines():
