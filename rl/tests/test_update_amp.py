@@ -16,7 +16,7 @@ from rl.network import (
     AlphaLiteNet,
 )
 from rl.obs_encoding import SCALAR_DIM, UNIT_FEAT_DIM
-from rl.trainer import PPOTrainer, prefetch_steps
+from rl.trainer import PPOTrainer, prefetch_steps, _prefetch_mb
 
 ok = True
 
@@ -140,15 +140,33 @@ elite.add_episode([step], {"result": "win", "ticks": 1000})
 copied = prefetch_steps(list(elite._episodes[0]["steps"]), "cpu", inplace=False)
 check("prefetch copy no comparte dict", copied[0] is not elite._episodes[0]["steps"][0])
 check("elite h_in sigue CPU", elite._episodes[0]["steps"][0]["h_in"].device.type == "cpu")
+burn_src = _dummy_step()
+burn_src["_burn"] = True
+burn_src["_k2_push"] = True
+burn_copy = prefetch_steps([burn_src], "cpu", inplace=False)[0]
+check("prefetch copia _burn", burn_copy.get("_burn") is True)
+check("prefetch copia _k2_push", burn_copy.get("_k2_push") is True)
+check("prefetch _burn no alias", burn_copy is not burn_src)
+mb_cpu = [[_dummy_step(ep=0), _dummy_step(ep=0)]]
+mb_gpu = _prefetch_mb(mb_cpu, "cpu")
+check("prefetch_mb copia el segmento", mb_gpu[0][0] is not mb_cpu[0][0])
+check("prefetch_mb copia batch dict",
+      mb_gpu[0][0]["batch"] is not mb_cpu[0][0]["batch"])
 
 tr = PPOTrainer(AlphaLiteNet(), lr=1e-4, device="cpu")
-st = tr.update(
-    [_dummy_step(ep=0, kind="no_op"), _dummy_step(ep=0, kind="train"),
-     _dummy_step(ep=1, kind="move")],
-    epochs=1, batch_size=64)
+roll = [_dummy_step(ep=0, kind="no_op"), _dummy_step(ep=0, kind="train"),
+        _dummy_step(ep=1, kind="move")]
+spatial0 = roll[0]["batch"]["spatial"]
+st = tr.update(roll, epochs=1, batch_size=64)
 check("ppo batched update finito", math.isfinite(st.get("pi_loss", 0)))
 check("ppo batched n samples", st.get("n") == 3)
 check("ppo reporta amp_skip_frac", st.get("amp_skip_frac") is not None)
+check("update deja rollout en CPU/original",
+      roll[0]["batch"]["spatial"] is spatial0)
+sil_nll = tr.imitation_update(roll, coef=0.5, epochs=1, batch_size=64)
+check("sil minibatch nll finito", math.isfinite(sil_nll))
+check("sil no mueve rollout original",
+      roll[0]["batch"]["spatial"] is spatial0)
 tr8 = PPOTrainer(AlphaLiteNet(), lr=1e-4, device="cpu", amp_init_scale=8)
 check("amp_init_scale no crashea en cpu", tr8.scaler is not None)
 tr_off = PPOTrainer(AlphaLiteNet(), lr=1e-4, device="cpu", use_amp=False)

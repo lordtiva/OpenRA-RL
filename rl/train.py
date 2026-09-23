@@ -592,7 +592,7 @@ async def amain(args):
         )
         if pfsp.mab:
             print(
-                f"MAB bots ON: softmax (1-WR)/τ={pfsp.mab_tau} floor="
+                f"MAB bots ON: ZPD gaussian -(WR-0.5)^2/τ={pfsp.mab_tau} floor="
                 f"{pfsp.mab_floor} pool={pfsp.pool} anchor={pfsp.anchor}. "
                 f"North-star wr / best.pt solo cuentan vs {pfsp.anchor}.",
                 flush=True,
@@ -1689,7 +1689,7 @@ def main():
                     help="Cada N iters copia latest.pt -> prev20.pt.")
     ap.add_argument("--mab", action="store_true",
                     help="Softmax bandit over --pfsp-pool instead of 50/50 "
-                         "anchor coin. P(bot) ∝ exp((1-WR)/τ).")
+                         "anchor coin. P(bot) ∝ exp(-(WR-0.5)^2/τ).")
     ap.add_argument("--mab-tau", type=float, default=0.25,
                     help="MAB temperature (smaller → greedier on hard bots).")
     ap.add_argument("--mab-floor", type=float, default=0.05,

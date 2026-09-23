@@ -534,7 +534,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                 # peer split preserved
                                 _peer_lm, _peer_lu = _lm, _lu
                         # value under post-micro hidden (h_push)
-                        push_value = float(out2["value"].detach().cpu().item())                             if "value" in out2 else out_value
+                        push_value = float(out2["value"].detach().cpu().item()) if "value" in out2 else out_value
                         # Stash for traj append with pending_bc_extra below.
                         if psampled != peffective:
                             _push_lm, _push_lu = _peer_lm, _peer_lu
@@ -555,7 +555,7 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                                    if _push_lm is not None
                                    and _push_lu is not None else {}),
                             },
-                            "reward": 0.0,  # TODO(ppo-debt): K=2 push credit — ppo-debt.md (1C)
+                            "reward": 0.0,  # filled 50/50 with eco at r_frame/r_close (1C)
                             "value_pred": push_value,
                             "h_in": h_in_push.detach().cpu(),
                             "delta_t": 0.0,  # filled at append: push carries block Δt
@@ -757,7 +757,13 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
         done = result.done
         episode_reward += r_frame
         if pending_sample is not None:
-            pending_sample["reward"] = pending_sample.get("reward", 0.0) + r_frame
+            if pending_bc_extra:
+                half = 0.5 * r_frame
+                pending_sample["reward"] = pending_sample.get("reward", 0.0) + half
+                pending_bc_extra[-1]["reward"] = (
+                    pending_bc_extra[-1].get("reward", 0.0) + half)
+            else:
+                pending_sample["reward"] = pending_sample.get("reward", 0.0) + r_frame
 
         # ── MODO MACRO (v4): completar el bloque con avance acelerado ──
         # Tras step(comandos) (+2 ticks), avanzar macro_ticks-2 más vía el
@@ -818,8 +824,15 @@ async def collect_one_episode(env: OpenRAEnv, net, vocab: Vocab, device: str,
                     r_close = shaper.step(obs, done=done, gs=last_gs, action_type=atype, closing=True)
                     episode_reward += r_close
                     if pending_sample is not None:
-                        pending_sample["reward"] = \
-                            pending_sample.get("reward", 0.0) + r_close
+                        if pending_bc_extra:
+                            half = 0.5 * r_close
+                            pending_sample["reward"] = (
+                                pending_sample.get("reward", 0.0) + half)
+                            pending_bc_extra[-1]["reward"] = (
+                                pending_bc_extra[-1].get("reward", 0.0) + half)
+                        else:
+                            pending_sample["reward"] = (
+                                pending_sample.get("reward", 0.0) + r_close)
                     # Muestra de cierre del bloque: obs completa con military.
                     # El enemigo sigue siendo niebla aquí (solo visible), así
                     # que la riqueza rival viene de la última ráfaga exacta.

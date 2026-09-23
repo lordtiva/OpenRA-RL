@@ -690,9 +690,19 @@ class ShapedReward:
 
 
     def _army_ratio(self, obs) -> float:
-        """own/(own+ene) combat power; 0.5 under fog with no visible enemy."""
+        """own/(own+ene) combat power; hold-last under fog (no visible enemy).
+
+        aoa_features returns rel_power=0.5 with n_ene==0. Using that raw in
+        the delta reward made clear-contact (0.8?0.5) look like a loss and
+        scout-appear (0.5?0.9) like a free gain ? fog artifact, not army.
+        Hold the last contacted ratio so fog enter/leave pays 0 delta.
+        """
         from rl.force_estimate import aoa_features
-        return float(aoa_features(obs).get("rel_power", 0.5))
+        feats = aoa_features(obs)
+        n_ene = int(feats.get("n_ene", 0) or 0)
+        if n_ene <= 0:
+            return float(getattr(self, "_prev_army_ratio", 0.5))
+        return float(feats.get("rel_power", 0.5))
 
     def _army_ratio_delta(self, obs) -> float:
         if self.w_army_ratio <= 0:

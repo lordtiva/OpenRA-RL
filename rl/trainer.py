@@ -106,8 +106,17 @@ def prefetch_steps(steps: list, device: str, inplace: bool = False) -> list:
                 ns[k] = torch.tensor(float(v), device=device, dtype=torch.float32)
         if not inplace:
             ns["_ep"] = s.get("_ep")
+            if s.get("_burn"):
+                ns["_burn"] = True
+            if s.get("_k2_push"):
+                ns["_k2_push"] = True
         out.append(ns)
     return steps if inplace else out
+
+
+def _prefetch_mb(mb: list, device: str) -> list:
+    """Copy one BPTT minibatch to device. Rollout/elite stay on CPU."""
+    return [prefetch_steps(seg, device, inplace=False) for seg in mb]
 
 
 def _split_segments(samples: list, bptt_len: int,
@@ -297,6 +306,7 @@ class PPOTrainer:
         self.scaler.step(self.opt)
         self.scaler.update()
         if not math.isfinite(gn):
+            self.net.zero_grad(set_to_none=True)
             self._maybe_reset_scaler()
             return 0.0
         return gn
@@ -304,12 +314,13 @@ class PPOTrainer:
     def update(self, samples: list, epochs: int = 2, batch_size: int = 32):
         """PPO recurrente con BPTT truncado por segmentos.
 
-        Prefetch a GPU una vez + BPTT batcheado (B segmentos en encode) + AMP.
+        Prefetch por minibatch (rollout en CPU) + BPTT batcheado + AMP.
         El shuffle sigue siendo a nivel de segmento.
         """
         if not samples:
             return {}
-        prefetch_steps(samples, self.device, inplace=True)
+        # Keep the rollout on CPU. Full-prefetch of 3–7k spatial maps (~1MB
+        # each) was the 8GB peak during collect∥update overlap.
         segs = _split_segments(samples, self.bptt_len, self.burn_in_len)
         if not segs:
             return {}
@@ -362,10 +373,11 @@ class PPOTrainer:
             np.random.shuffle(seg_idx)
             for start in range(0, len(segs), segs_per_batch):
                 mb = [segs[i] for i in seg_idx[start:start + segs_per_batch]]
+                gpu_mb = _prefetch_mb(mb, self.device)
                 self._mb_seen += 1
                 self.net.zero_grad(set_to_none=True)
                 with self._autocast_ctx():
-                    ev = self._eval_mb(mb)
+                    ev = self._eval_mb(gpu_mb)
                 lp_new, entropy, value, valid = ev[0], ev[1], ev[2], ev[3]
                 lp_m = ev[4].float() if len(ev) > 4 else None
                 lp_u = ev[5].float() if len(ev) > 5 else None
@@ -373,7 +385,7 @@ class PPOTrainer:
                 entropy = entropy.float()
                 value = value.float()
                 T = lp_new.size(1)
-                padded = _pad_targets(mb, T, self.device)
+                padded = _pad_targets(gpu_mb, T, self.device)
                 lp_old, adv, ret, v_old = padded[0], padded[1], padded[2], padded[3]
                 lp_old_m = padded[4] if len(padded) > 4 else None
                 lp_old_u = padded[5] if len(padded) > 5 else None
@@ -408,8 +420,15 @@ class PPOTrainer:
                         ratio_u * adv,
                         torch.clamp(ratio_u, 1 - self.clip_eps,
                                     1 + self.clip_eps) * adv)
-                    # TODO(ppo-debt): half-weight macro — ppo-debt.md (2C)
-                    pi_t = -0.5 * (surr_m + surr_u)
+                    # 2C: if micro logp is identically ~0 (train/build/no_op),
+                    # averaging 0.5*(surr_m+surr_u) halves the type/item
+                    # gradient. Use full surr_m on those steps.
+                    micro_live = lp_old_u.abs() > 1e-8
+                    pi_t = torch.where(
+                        micro_live,
+                        -0.5 * (surr_m + surr_u),
+                        -surr_m,
+                    )
                 else:
                     surr1 = ratio * adv
                     surr2 = torch.clamp(ratio, 1 - self.clip_eps,
@@ -461,9 +480,9 @@ class PPOTrainer:
         """NLL de acciones élite / maestro (BC y SIL). No usa advantages."""
         if not samples or coef <= 0.0:
             return 0.0
-        # Copia a GPU; el EliteBuffer se queda en CPU.
-        gpu_steps = prefetch_steps(samples, self.device, inplace=False)
-        segs = _split_segments(gpu_steps, self.bptt_len, self.burn_in_len)
+        # Elite/teacher stay on CPU; each SIL/BC minibatch is copied in
+        # _sil_epochs (same peak-VRAM reason as PPO).
+        segs = _split_segments(samples, self.bptt_len, self.burn_in_len)
         if not segs:
             return 0.0
         segs_per_batch = max(1, int(round(batch_size / max(1, self.bptt_len + self.burn_in_len))))
@@ -485,9 +504,10 @@ class PPOTrainer:
             np.random.shuffle(idx)
             for start in range(0, len(segs), segs_per_batch):
                 mb = [segs[i] for i in idx[start:start + segs_per_batch]]
+                gpu_mb = _prefetch_mb(mb, self.device)
                 self.net.zero_grad(set_to_none=True)
                 with self._autocast_ctx():
-                    ev = self._eval_mb(mb)
+                    ev = self._eval_mb(gpu_mb)
                     lp, valid = ev[0], ev[3]
                 lp = lp.float()
                 finite = ((~valid) | torch.isfinite(lp))

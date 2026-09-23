@@ -210,6 +210,7 @@ SPATIAL_CORR_STATS = {
     "n_attack_macro": 0,
     "n_redirected": 0,
     "n_raid_kept": 0,
+    "n_safety_remap": 0,
 }
 
 
@@ -221,11 +222,14 @@ def reset_spatial_corr_stats() -> None:
 def spatial_corr_snapshot() -> dict:
     n = int(SPATIAL_CORR_STATS.get("n_attack_macro") or 0)
     r = int(SPATIAL_CORR_STATS.get("n_redirected") or 0)
+    s = int(SPATIAL_CORR_STATS.get("n_safety_remap") or 0)
     return {
         "n_attack_macro": n,
         "n_redirected": r,
         "n_raid_kept": int(SPATIAL_CORR_STATS.get("n_raid_kept") or 0),
+        "n_safety_remap": s,
         "redirect_rate": float(r / n) if n else 0.0,
+        "safety_remap_rate": float(s / n) if n else 0.0,
     }
 
 CHEAP_TRAIN_ROLES = frozenset({
@@ -1785,6 +1789,7 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
     # Remap illegal move cells BEFORE computing the issued cell_flat.
     # TRAIN/BUILD/PLACE ignore this (place keeps the sampled cell).
     if t_name in MOVE_CELL_TYPES:
+        cx_samp, cy_samp = int(cx), int(cy)
         if t_name in ("harvesters_move", "harvest"):
             # Do not use remap_move_cell: its war_objective fallback is the
             # leftover/beacon snap that marched ore trucks with the army.
@@ -1807,6 +1812,8 @@ def index_to_command_effective(obs, chosen_type: int, unit_slot: int,
             # in train so pi/Ring own the cell — audit 1A).
             from rl.auto_support import home_raid_targets
             SPATIAL_CORR_STATS["n_attack_macro"] += 1
+            if (int(cx), int(cy)) != (cx_samp, cy_samp):
+                SPATIAL_CORR_STATS["n_safety_remap"] += 1
             if home_raid_targets(obs):
                 SPATIAL_CORR_STATS["n_raid_kept"] += 1
             elif ATTACK_CELL_OVERRIDE == "war_objective":

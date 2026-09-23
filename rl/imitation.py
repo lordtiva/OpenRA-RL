@@ -673,7 +673,7 @@ class TeacherWinBuffer:
         return out
 
     def sample(self, max_steps: int = 512) -> list:
-        """Even-pick across kept episodes. Prefer ticks < prefer_ticks."""
+        """Novelty-pick (or even-pick) across kept episodes. Prefer short wins."""
         if max_steps <= 0 or not self._episodes:
             return []
         eps = [e for e in self._episodes if e.get("steps")]
@@ -692,7 +692,11 @@ class TeacherWinBuffer:
         out = []
         for i, e in enumerate(pool):
             q = base + (1 if i < extra else 0)
-            out.extend(_even_pick(e["steps"], q))
+            out.extend(_pick_steps(
+                e["steps"], q, novelty=getattr(self, "use_novelty", False)))
+        self.last_sample_stats = diversity_stats(out)
+        self.last_sample_stats["novelty"] = bool(
+            getattr(self, "use_novelty", False))
         return out
 
     def save(self, path: str | os.PathLike | None = None) -> None:

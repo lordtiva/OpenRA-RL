@@ -31,3 +31,12 @@ ratio=1. Use full surr_m when the action has no micro head.
 - **2A** unit_xf_scale init 0.1; load_checkpoint bumps ?0 ? 0.1 so old ckpts enable XF.
 - **2B** GradScaler always step then update.
 - **3B** MAB Gaussian around WR=0.5.
+
+## Applied 2026-09-23 (audit pack)
+- **F1** army_ratio hold-last under fog (`n_ene==0`).
+- **1C** K=2 dense reward 50/50 eco/push (`r_frame`/`r_close`); terminal still on `traj[-1]` (push).
+- **2C** full `surr_m` when `|lp_old_micro|≈0` (train/build/no_op); keep `-0.5(surr_m+surr_u)` when micro live.
+- **F2** TeacherWinBuffer.sample uses Kenyon novelty + last_sample_stats.
+- **F3** `safety_remap_rate` (stage/remap/guard) vs `redirect_rate` (war_objective override).
+- **F4** MAB banner/help match ZPD gaussian.
+- Still open: **1B** log-ratio clamp, **1D** timeout_wipe non-Markov.

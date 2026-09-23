@@ -340,7 +340,9 @@ def test_eradicate_v6_army_ratio_delta():
     # reset already set prev; force prev then step
     sh._prev_army_ratio = 0.4
     import unittest.mock as m
-    with m.patch.object(fe, "aoa_features", side_effect=lambda o: {"rel_power": 0.8}):
+    with m.patch.object(
+            fe, "aoa_features",
+            side_effect=lambda o: {"rel_power": 0.8, "n_ene": 1}):
         r = sh._army_ratio_delta(obs)
     assert r > 0.0
     assert sh.last_components["army_ratio"] > 0.0
@@ -355,3 +357,56 @@ def test_default_preset_is_v6():
     src = Path("rl/train.py").read_text(encoding="utf-8")
     assert 'default="eradicate_v6"' in src or "default='eradicate_v6'" in src
 
+
+def test_army_ratio_fog_clear_no_penalty():
+    """Clearing visible enemies must not charge army_ratio (hold-last)."""
+    from rl.reward_shaping import ShapedReward
+    import rl.force_estimate as fe
+    import unittest.mock as m
+    sh = ShapedReward(preset="eradicate_v6")
+    obs = _obs(units=[_U("e1", 1)])
+    sh.reset(obs)
+    sh._prev_army_ratio = 0.8
+    with m.patch.object(
+            fe, "aoa_features",
+            return_value={"rel_power": 0.5, "n_ene": 0}):
+        r = sh._army_ratio_delta(obs)
+    assert abs(r) < 1e-9
+    assert abs(sh._prev_army_ratio - 0.8) < 1e-9
+
+
+def test_army_ratio_contact_updates():
+    from rl.reward_shaping import ShapedReward
+    import rl.force_estimate as fe
+    import unittest.mock as m
+    sh = ShapedReward(preset="eradicate_v6")
+    obs = _obs(units=[_U("e1", 1)])
+    sh.reset(obs)
+    sh._prev_army_ratio = 0.4
+    with m.patch.object(
+            fe, "aoa_features",
+            return_value={"rel_power": 0.8, "n_ene": 2}):
+        r = sh._army_ratio_delta(obs)
+    assert r > 0.0
+    assert abs(sh._prev_army_ratio - 0.8) < 1e-9
+
+
+def test_teacher_win_buffer_sample_sets_novelty_stats():
+    from rl.imitation import TeacherWinBuffer
+    buf = TeacherWinBuffer(cap_steps=64, use_novelty=True)
+    # minimal fake steps
+    steps = [{"action": {"type": i % 3}} for i in range(20)]
+    buf._episodes = [{"id": 1, "steps": steps, "ticks": 5000, "result": "win"}]
+    out = buf.sample(max_steps=8)
+    assert len(out) == 8
+    assert buf.last_sample_stats.get("novelty") is True
+
+
+def test_spatial_corr_has_safety_remap_rate():
+    from rl.action_adapter import (
+        reset_spatial_corr_stats, spatial_corr_snapshot, SPATIAL_CORR_STATS)
+    reset_spatial_corr_stats()
+    SPATIAL_CORR_STATS["n_attack_macro"] = 10
+    SPATIAL_CORR_STATS["n_safety_remap"] = 4
+    snap = spatial_corr_snapshot()
+    assert abs(snap["safety_remap_rate"] - 0.4) < 1e-9
