@@ -33,7 +33,7 @@ def play_one(bridge: Bridge, match: MatchConfig, seed: int, decision_ticks: int)
         commands = deploy_mcv_commands(step.obs)
         while not (step.done or step.truncated):
             t_rpc = time.perf_counter()
-            step = session.step(commands, decision_ticks)
+            step = session.step([], decision_ticks, commands)
             rpc_s += time.perf_counter() - t_rpc
             decisions += 1
             commands = []
@@ -105,15 +105,16 @@ def main() -> None:
     ap.add_argument("--games", type=int, default=8, help="games per decision interval")
     ap.add_argument("--map", default=MatchConfig.map_name)
     ap.add_argument("--bot", default=MatchConfig.bot)
+    ap.add_argument("--brain", default="builtin", help="agent commander brain (builtin plays a full game)")
     ap.add_argument("--max-ticks", type=int, default=MatchConfig.max_ticks)
     ap.add_argument("--seed-base", type=int, default=1000)
     ap.add_argument("--out", default="", help="append one JSON line per config to this file")
     args = ap.parse_args()
 
     bridges = [Bridge(a.strip()) for a in args.daemons.split(",") if a.strip()]
-    match = MatchConfig(map_name=args.map, bot=args.bot, max_ticks=args.max_ticks)
+    match = MatchConfig(map_name=args.map, bot=args.bot, max_ticks=args.max_ticks, brain=args.brain)
     print(f"bench: {len(bridges)} daemon(s) x {args.sessions} sessions, map={match.map_name}, "
-          f"bot={match.bot}, max_ticks={match.max_ticks}", flush=True)
+          f"bot={match.bot}, brain={match.brain}, max_ticks={match.max_ticks}", flush=True)
     for dt in (int(x) for x in args.decision_ticks.split(",")):
         row = run_config(bridges, args.sessions, match, dt, args.games, args.seed_base)
         print(json.dumps(row), flush=True)

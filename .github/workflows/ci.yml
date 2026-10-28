@@ -28,4 +28,4 @@ jobs:
         run: pytest
 
       - name: Lint
-        run: ruff check ra_env tests scripts
+        run: ruff check ra_env ra_rl tests scripts

@@ -29,7 +29,7 @@ class FakeBridge:
     def destroy_session(self, session_id: str) -> None:
         self.destroyed.append(session_id)
 
-    def fast_advance(self, session_id: str, ticks: int, commands=None) -> pb.GameObservation:
+    def fast_advance(self, session_id: str, ticks: int, decisions=None, commands=None) -> pb.GameObservation:
         if self.poison_at is not None and self.tick + ticks >= self.poison_at:
             raise SessionPoisoned(session_id)
         self.advanced.append(ticks)
@@ -117,3 +117,27 @@ def test_first_divergence():
     assert first_divergence(["a", "b"], ["a", "b"]) == -1
     assert first_divergence(["a", "b"], ["a", "x"]) == 1
     assert first_divergence(["a", "b"], ["a"]) == 1
+
+
+def test_step_passes_decisions_and_returns_pending_and_teacher():
+    class DecisionBridge(FakeBridge):
+        def fast_advance(self, session_id, ticks, decisions=None, commands=None):
+            self.sent = list(decisions or [])
+            o = super().fast_advance(session_id, ticks)
+            o.pending_decisions.add(id=7, kind=pb.DECIDE_BUILD, queue="Building", options=["powr"])
+            o.teacher_decisions.add().decision.choice = "tent"
+            return o
+
+    bridge = DecisionBridge()
+    s = GameSession(bridge, MatchConfig(brain="builtin"))
+    s.reset(seed=1)
+    step = s.step([pb.Decision(request_id=3, choice="proc")], 50)
+    assert [d.choice for d in bridge.sent] == ["proc"]
+    assert [r.id for r in step.pending] == [7]
+    assert [t.decision.choice for t in step.teacher] == ["tent"]
+    assert bridge.created[0]["agent_brain"] == "builtin"
+
+
+def test_unknown_brain_rejected():
+    with pytest.raises(ValueError):
+        GameSession(FakeBridge(), MatchConfig(brain="nope"))

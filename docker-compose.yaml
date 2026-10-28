@@ -17,7 +17,7 @@ x-daemon: &daemon
     resources:
       limits:
         cpus: "1.5"
-        memory: 1G
+        memory: 2G
   restart: unless-stopped
 
 services:

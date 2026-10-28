@@ -14,6 +14,7 @@ criterios de v3: [`docs/v3-plan.md`](docs/v3-plan.md).
 | `OpenRA/` | Motor C# con el bridge gRPC multi-sesión (`RLSessionManager`, `ExternalBotBridge`) |
 | `proto/rl_bridge.proto` | Contrato agente ↔ motor (copia idéntica a la del submódulo) |
 | `ra_env/` | Cliente Python lock-step: `Bridge`, `GameSession`, benchmark, determinismo |
+| `ra_rl/` | Políticas del commander (`builtin`, `scripted`) y evaluación estándar (`python -m ra_rl.eval`) |
 | `tests/` | Unit tests; `-m daemon` corre contra un daemon real |
 | `Dockerfile`, `docker-compose.yaml` | Imagen solo C#; 2 daemons en `:9999` y `:10000` |
 
@@ -26,6 +27,17 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
 .\.venv\Scripts\python.exe -m pytest              # unit
 .\.venv\Scripts\python.exe -m pytest -m daemon    # contra el daemon
+```
+
+## El agente
+
+El slot del agente es un **commander**: corre los módulos del bot `normal` de
+OpenRA y solo toma decisiones estratégicas (qué construir, qué entrenar, a dónde
+va el ejército). Contrato: [`docs/v3-commander.md`](docs/v3-commander.md).
+
+```powershell
+# evaluación estándar: 100 partidas, semillas fijas, una partida por daemon
+.\.venv\Scripts\python.exe -m ra_rl.eval --policy scripted --bot hard --games 100
 ```
 
 ## Herramientas

@@ -27,7 +27,7 @@ def trace(bridge: Bridge, match: MatchConfig, seed: int, decision_ticks: int) ->
         out = [(step.tick, obs_digest(step.obs, include_tick=False))]
         commands = deploy_mcv_commands(step.obs)
         while not (step.done or step.truncated):
-            step = session.step(commands, decision_ticks)
+            step = session.step([], decision_ticks, commands)
             out.append((step.tick, obs_digest(step.obs, include_tick=False)))
             commands = []
         return out
@@ -60,11 +60,12 @@ def main() -> int:
     ap.add_argument("--decision-ticks", type=int, default=100)
     ap.add_argument("--map", default=MatchConfig.map_name)
     ap.add_argument("--bot", default=MatchConfig.bot)
+    ap.add_argument("--brain", default="builtin")
     ap.add_argument("--concurrent", action="store_true", help="run the three games at once on one daemon")
     args = ap.parse_args()
 
     bridge = Bridge(args.daemon)
-    match = MatchConfig(map_name=args.map, bot=args.bot, max_ticks=args.ticks)
+    match = MatchConfig(map_name=args.map, bot=args.bot, max_ticks=args.ticks, brain=args.brain)
     seeds = [args.seed, args.seed, args.seed + 1]
     play = lambda s: trace(bridge, match, s, args.decision_ticks)
     if args.concurrent:

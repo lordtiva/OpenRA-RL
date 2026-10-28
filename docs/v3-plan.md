@@ -55,3 +55,12 @@ Este documento es la fuente de verdad de v3.
 - Herramientas: `python -m ra_env.bench`, `python -m ra_env.determinism`.
 
 Resultados medidos: ver [`v3-phase0-results.md`](v3-phase0-results.md).
+
+### Fase 1 ✅
+
+- Commander en el motor: el `rl-agent` corre los módulos del bot `normal`; el
+  agente decide BUILD / TRAIN / ARMY. Contrato: [`v3-commander.md`](v3-commander.md).
+- Paridad del ejecutor (`builtin` vs `hard`): 51%. Política a mano vs `hard`: 72%.
+- `python -m ra_rl.eval` es el protocolo de evaluación oficial.
+
+Resultados y bugs del motor corregidos: [`v3-phase1-results.md`](v3-phase1-results.md).

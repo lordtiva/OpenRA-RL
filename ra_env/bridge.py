@@ -40,10 +40,10 @@ class Bridge:
         self._stub = pb_grpc.RLBridgeStub(self._channel)
 
     def create_session(self, map_name: str, bots: str, seed: int = 0,
-                       player_faction: str = "", enemy_faction: str = "") -> str:
+                       player_faction: str = "", enemy_faction: str = "", agent_brain: str = "") -> str:
         req = pb.CreateSessionRequest(
             map_name=map_name, bots=bots, seed=seed,
-            player_faction=player_faction, enemy_faction=enemy_faction,
+            player_faction=player_faction, enemy_faction=enemy_faction, agent_brain=agent_brain,
         )
         return self._stub.CreateSession(req, timeout=60.0, wait_for_ready=True).session_id
 
@@ -70,9 +70,11 @@ class Bridge:
             time.sleep(0.25)
         return False
 
-    def fast_advance(self, session_id: str, ticks: int,
+    def fast_advance(self, session_id: str, ticks: int, decisions: list[pb.Decision] | None = None,
                      commands: list[pb.Command] | None = None) -> pb.GameObservation:
         req = pb.FastAdvanceRequest(ticks=ticks, session_id=session_id)
+        if decisions:
+            req.decisions.extend(decisions)
         if commands:
             req.commands.extend(commands)
         try:
