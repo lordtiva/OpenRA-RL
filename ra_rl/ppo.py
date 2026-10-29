@@ -50,6 +50,20 @@ PROD_KEYS = ("g", "queue", "mask", "action", "old_lp", "adv", "ret")
 ARMY_KEYS = ("g", "cand", "mask", "action", "old_lp", "adv", "ret")
 
 
+def pack(d: dict[str, list], keys: tuple[str, ...]) -> dict[str, np.ndarray]:
+    res = {}
+    for k in keys:
+        if not d[k]:
+            res[k] = np.zeros((0,), dtype=np.float32)
+        elif k in ("g", "cand", "adv", "ret", "old_lp"):
+            res[k] = np.asarray(d[k], dtype=np.float32)
+        elif k in ("queue", "action"):
+            res[k] = np.asarray(d[k], dtype=np.int64)
+        elif k == "mask":
+            res[k] = np.asarray(d[k], dtype=bool)
+    return res
+
+
 @dataclass
 class Transition:
     is_army: bool
@@ -243,19 +257,6 @@ def collect_rollouts(addresses: list[str], net: CommanderNet, games: int, seed_b
         list(pool.map(worker, addresses))
 
     # Convert to numpy arrays
-    def pack(d: dict[str, list], keys: tuple[str, ...]) -> dict[str, np.ndarray]:
-        res = {}
-        for k in keys:
-            if not d[k]:
-                res[k] = np.zeros((0,), dtype=np.float32)
-            elif k in ("g", "cand", "adv", "ret", "old_lp"):
-                res[k] = np.asarray(d[k], dtype=np.float32)
-            elif k in ("queue", "action"):
-                res[k] = np.asarray(d[k], dtype=np.int64)
-            elif k == "mask":
-                res[k] = np.asarray(d[k], dtype=bool)
-        return res
-
     packed_prod = pack(all_prod, PROD_KEYS)
     packed_army = pack(all_army, ARMY_KEYS)
 

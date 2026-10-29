@@ -56,6 +56,12 @@ Refuerzo (Fase 3): PPO desde el checkpoint de imitación.
 .\.venv\Scripts\python.exe -m ra_rl.ppo --init runs/phase2/bc_s2/model.pt --out runs/phase3/ppo_v1 --games-per-iter 48 --iterations 100
 ```
 
+Liga y Curriculum Multi-Bot (Fase 4): entrenamiento contra la liga de oponentes con piso anti-colapso.
+
+```powershell
+.\.venv\Scripts\python.exe -m ra_rl.league --init runs/phase3/ppo_v1/checkpoint_best.pt --out runs/phase4/league_v1 --games-per-iter 48 --iterations 100
+```
+
 ## Herramientas
 
 ```powershell
