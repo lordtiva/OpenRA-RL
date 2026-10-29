@@ -50,6 +50,12 @@ Imitación (Fase 2): grabar decisiones de un maestro, entrenar, evaluar la red.
 .\.venv\Scripts\python.exe -m ra_rl.eval --policy net:runs/bc_builtin/model.pt --bot easy
 ```
 
+Refuerzo (Fase 3): PPO desde el checkpoint de imitación.
+
+```powershell
+.\.venv\Scripts\python.exe -m ra_rl.ppo --init runs/phase2/bc_s2/model.pt --out runs/phase3/ppo_v1 --games-per-iter 48 --iterations 100
+```
+
 ## Herramientas
 
 ```powershell

@@ -36,14 +36,17 @@ class NetPolicy:
 
     brain = "external"
 
-    def __init__(self, path: str, sample: bool = False):
+    def __init__(self, path, sample: bool = False):
         import torch
 
         from ra_rl.model import CommanderNet
 
         torch.set_num_threads(1)  # one game per thread; tiny batches
         self.torch = torch
-        self.net = CommanderNet.load(path)
+        if isinstance(path, CommanderNet):
+            self.net = path
+        else:
+            self.net = CommanderNet.load(str(path))
         self.sample = sample
         self.reset(0)
 

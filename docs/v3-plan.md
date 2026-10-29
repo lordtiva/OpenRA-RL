@@ -77,3 +77,12 @@ Resultados y bugs del motor corregidos: [`v3-phase1-results.md`](v3-phase1-resul
 - Regla nueva: se ajusta y se elige en semillas que no son las oficiales.
 
 Resultados: [`v3-phase2-results.md`](v3-phase2-results.md).
+
+### Fase 3 ✅
+
+- PPO sobre la arquitectura Commander (`ra_rl/ppo.py`) inicializado desde el checkpoint `bc_s2`.
+- `CommanderNet` extendido con cabeza de valor escalar $V(s)$.
+- GAE por partida a nivel decisión ($\gamma = 0.997, \lambda = 0.95$).
+- Rollout paralelo en 6 daemons headless, reciclado periódico de memoria y telemetría en TensorBoard.
+- **Resultado récord**: **73.0% vs `hard`** (IC 95%: 63.6–80.7%, 73 victorias, 24 derrotas, 3 truncadas en 100 partidas de evaluación oficial) alcanzado en la **iteración 60** ([`checkpoint_best.pt`](file:///c:/Users/lordc/Desktop/OpenRA-RL/runs/phase3/ppo_v1/checkpoint_best.pt)). Supera tanto al maestro `scripted` (63.5%) como al baseline de imitación `bc_s2` (66.5%).
+- Análisis detallado: [`docs/v3-phase3-results.md`](docs/v3-phase3-results.md).

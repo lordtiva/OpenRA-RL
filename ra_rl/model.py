@@ -29,6 +29,11 @@ class CommanderNet(nn.Module):
         self.cand_score = nn.Sequential(nn.Linear(hidden + cand_hidden, cand_hidden), nn.ReLU(),
                                         nn.Linear(cand_hidden, 1))
         self.army_fixed = nn.Linear(hidden, 2)  # hold, keep
+        self.value_head = nn.Sequential(nn.ReLU(), nn.Linear(hidden, 1))
+
+    def value(self, g: torch.Tensor) -> torch.Tensor:
+        h = self.trunk(g)
+        return self.value_head(h).squeeze(-1)
 
     def item_logits(self, g: torch.Tensor, queue: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         h = self.trunk(g) + self.queue_emb(queue)
@@ -52,5 +57,8 @@ class CommanderNet(nn.Module):
         if cfg.get("feature_version") != FEATURE_VERSION:
             raise ValueError(f"{path}: features v{cfg.get('feature_version')}, code is v{FEATURE_VERSION}")
         net = cls(hidden=cfg["hidden"], cand_hidden=cfg["cand_hidden"])
-        net.load_state_dict(ckpt["state"])
+        missing, unexpected = net.load_state_dict(ckpt["state"], strict=False)
+        non_value_missing = [k for k in missing if not k.startswith("value_head.")]
+        if non_value_missing or unexpected:
+            raise RuntimeError(f"Error loading {path}: missing {non_value_missing}, unexpected {unexpected}")
         return net.to(device).eval()
