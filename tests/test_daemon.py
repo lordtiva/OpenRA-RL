@@ -51,10 +51,16 @@ def test_builtin_brain_reports_teacher_decisions(bridge):
         while not (step.done or step.truncated):
             step = s.step([], 500)
             assert not step.pending
+            for t in step.teacher:
+                assert 0 <= step.tick - t.request.tick <= 2  # paired with the state it was taken in
+                if t.request.kind != pb.DECIDE_ARMY:
+                    # production starts on the next step, as for an external agent
+                    assert not any(p.queue_type == t.request.queue for p in step.obs.production) or not t.decision.choice
             teacher += step.teacher
         kinds = {t.request.kind for t in teacher}
         assert {pb.DECIDE_BUILD, pb.DECIDE_TRAIN, pb.DECIDE_ARMY} <= kinds
         assert any(t.decision.choice == "powr" for t in teacher)
+        assert sum(b.type == "powr" for b in step.obs.buildings) >= 1
     finally:
         s.close()
 

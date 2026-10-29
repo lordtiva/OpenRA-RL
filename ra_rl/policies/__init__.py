@@ -30,9 +30,17 @@ class BuiltinPolicy:
 
 
 def make_policy(name: str) -> Policy:
+    """builtin | scripted | random | net:<model.pt> | net-sample:<model.pt>"""
     if name == "builtin":
         return BuiltinPolicy()
     if name == "scripted":
         from ra_rl.policies.scripted import ScriptedPolicy
         return ScriptedPolicy()
-    raise ValueError(f"unknown policy {name!r}; expected builtin | scripted")
+    if name == "random":
+        from ra_rl.policies.net import RandomPolicy
+        return RandomPolicy()
+    kind, _, path = name.partition(":")
+    if kind in ("net", "net-sample") and path:
+        from ra_rl.policies.net import NetPolicy
+        return NetPolicy(path, sample=kind == "net-sample")
+    raise ValueError(f"unknown policy {name!r}; expected builtin | scripted | random | net:<path> | net-sample:<path>")

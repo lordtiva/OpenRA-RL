@@ -96,6 +96,27 @@ class ScriptedPolicy:
                     out.append(pb.Decision(request_id=req.id, target_index=index))
         return out
 
+    def army_state(self) -> tuple:
+        return self.attacking, self.peak, self.target, self.aim_age, set(self.skipped)
+
+    def sync_army(self, before: tuple, req: pb.DecisionRequest, index: int | None, obs: pb.GameObservation) -> None:
+        """Another policy executed `index` instead of our answer (noise, DAgger):
+        rewind the army state to `before` and apply what was really ordered."""
+        self.attacking, self.peak, self.target, self.aim_age, self.skipped = before
+        if index is None:
+            if self.attacking:
+                self.aim_age += 1
+            return
+        if index < 0:
+            self.attacking, self.target = False, None
+            return
+        if not self.attacking:
+            self.attacking, self.peak = True, army_value(counts(obs)[1])
+        t = req.targets[index]
+        new = (t.kind, t.cell_x, t.cell_y)
+        self.aim_age = self.aim_age + 1 if new == self.target else 0
+        self.target = new
+
     def power_item(self, options: set[str]) -> str:
         return "apwr" if "apwr" in options else ("powr" if "powr" in options else "")
 

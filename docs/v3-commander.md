@@ -15,10 +15,16 @@ mitad de un experimento.
 | Cerebro | Quién decide | `step()` |
 |---|---|---|
 | `external` (default) | el agente (Python) | vuelve apenas hay decisiones nuevas (`pending`) |
-| `builtin` | las heurísticas del bot `normal` | corre los `ticks` pedidos y reporta lo decidido en `teacher` |
+| `builtin` | las heurísticas del bot `normal` | vuelve apenas deciden algo y lo reporta en `teacher` |
 
 `builtin` sirve como test de paridad del ejecutor y como maestro para imitación
-(Fase 2): sus decisiones vienen en el mismo formato que las del agente.
+(Fase 2): sus decisiones vienen en el mismo formato que las del agente y siguen
+el mismo camino. La elección nativa se responde como si viniera del agente: la
+producción arranca al empezar el siguiente `step()`, así que la observación que
+acompaña a cada decisión del maestro es exactamente la que habría visto un
+agente `external` (la cola todavía libre, sin el ítem ya en producción). Un ítem
+pedido que la cola no ofrece (p. ej. un MCV antes del taller) no arranca nada:
+cuenta como "esperar".
 
 ## Decisiones
 

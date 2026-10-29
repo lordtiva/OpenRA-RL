@@ -4,6 +4,11 @@ Medido el 2026-10-28. Mapa `singles.oramap`, rival `hard` (bot OpenRA `normal`,
 facción `Random`), agente Aliados (`RandomAllies`). 6 daemons deterministas, una
 partida por daemon, semillas 10000–10099, `max_ticks` 54.000 (~36 min de juego).
 Comando: `python -m ra_rl.eval --policy <builtin|scripted> --bot hard --games 100`.
+
+> **Corrección (Fase 2):** la política a mano se ajustó mirando estas mismas
+> semillas. En semillas nuevas (20000–20199, 200 partidas) gana **63,5%**
+> (IC 57–70%), no 72%. Sigue pasando el criterio de ≥ 60%, por poco. Ver
+> [`v3-phase2-results.md`](v3-phase2-results.md).
 Contrato del entorno: [`v3-commander.md`](v3-commander.md).
 
 ## Criterios

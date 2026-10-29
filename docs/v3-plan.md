@@ -64,3 +64,16 @@ Resultados medidos: ver [`v3-phase0-results.md`](v3-phase0-results.md).
 - `python -m ra_rl.eval` es el protocolo de evaluación oficial.
 
 Resultados y bugs del motor corregidos: [`v3-phase1-results.md`](v3-phase1-results.md).
+
+### Fase 2 ✅
+
+- `builtin` responde por el mismo camino que un agente: cada decisión del maestro
+  viene con el estado exacto en que se tomó.
+- Features fijas (`ra_rl/features.py`), red MLP + puntero (`ra_rl/model.py`),
+  grabación (`ra_rl.record`), BC (`ra_rl.bc`), DAgger con el `scripted` como
+  etiquetador.
+- BC(`builtin`) 100% vs `easy`; BC(`scripted`) + 2 rondas de DAgger (`bc_s2`)
+  69% vs `hard` (66,5% en semillas nuevas, a la par del maestro).
+- Regla nueva: se ajusta y se elige en semillas que no son las oficiales.
+
+Resultados: [`v3-phase2-results.md`](v3-phase2-results.md).

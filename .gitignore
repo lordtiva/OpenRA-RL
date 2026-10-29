@@ -19,3 +19,6 @@ ckpts/
 *.pth
 *.onnx
 wandb/
+
+# Recorded imitation data
+data/

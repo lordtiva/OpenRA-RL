@@ -20,6 +20,11 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
 ]
+# Training and network policies. For CUDA wheels:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
+train = [
+    "torch>=2.4",
+]
 
 [build-system]
 requires = ["hatchling"]

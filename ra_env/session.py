@@ -7,8 +7,9 @@ The agent slot is a commander (v3): the normal AI's bot modules execute, and the
 strategic decisions (BUILD / TRAIN / ARMY) come from
   - brain "external": the agent. step() returns as soon as new decisions are
     pending; answer them in the next step() (unanswered = wait).
-  - brain "builtin": the modules' own heuristics. step() runs the full `ticks`
-    and reports what they decided in `teacher` (imitation data).
+  - brain "builtin": the modules' own heuristics. step() returns as soon as they
+    decide something and reports it in `teacher` (imitation data), with the
+    state an external agent would have seen; the choice starts next step.
 """
 
 from dataclasses import dataclass, field

@@ -14,9 +14,9 @@ criterios de v3: [`docs/v3-plan.md`](docs/v3-plan.md).
 | `OpenRA/` | Motor C# con el bridge gRPC multi-sesión (`RLSessionManager`, `ExternalBotBridge`) |
 | `proto/rl_bridge.proto` | Contrato agente ↔ motor (copia idéntica a la del submódulo) |
 | `ra_env/` | Cliente Python lock-step: `Bridge`, `GameSession`, benchmark, determinismo |
-| `ra_rl/` | Políticas del commander (`builtin`, `scripted`) y evaluación estándar (`python -m ra_rl.eval`) |
+| `ra_rl/` | Políticas del commander (`builtin`, `scripted`, `random`, `net`), features, red, imitación (`record`, `bc`) y evaluación estándar (`eval`) |
 | `tests/` | Unit tests; `-m daemon` corre contra un daemon real |
-| `Dockerfile`, `docker-compose.yaml` | Imagen solo C#; 2 daemons en `:9999` y `:10000` |
+| `Dockerfile`, `docker-compose.yaml` | Imagen solo C#; 6 daemons en `:9999`–`:10004` |
 
 ## Arranque
 
@@ -25,6 +25,8 @@ git submodule update --init OpenRA
 docker compose up -d --build
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev]"
+# red y entrenamiento (CUDA): torch desde el índice de PyTorch
+.\.venv\Scripts\python.exe -m pip install torch --index-url https://download.pytorch.org/whl/cu126
 .\.venv\Scripts\python.exe -m pytest              # unit
 .\.venv\Scripts\python.exe -m pytest -m daemon    # contra el daemon
 ```
@@ -38,6 +40,14 @@ va el ejército). Contrato: [`docs/v3-commander.md`](docs/v3-commander.md).
 ```powershell
 # evaluación estándar: 100 partidas, semillas fijas, una partida por daemon
 .\.venv\Scripts\python.exe -m ra_rl.eval --policy scripted --bot hard --games 100
+```
+
+Imitación (Fase 2): grabar decisiones de un maestro, entrenar, evaluar la red.
+
+```powershell
+.\.venv\Scripts\python.exe -m ra_rl.record --teacher builtin --games 1800 --out data/builtin
+.\.venv\Scripts\python.exe -m ra_rl.bc --data data/builtin --out runs/bc_builtin
+.\.venv\Scripts\python.exe -m ra_rl.eval --policy net:runs/bc_builtin/model.pt --bot easy
 ```
 
 ## Herramientas
