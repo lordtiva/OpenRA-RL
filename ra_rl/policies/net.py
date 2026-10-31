@@ -6,6 +6,7 @@ import numpy as np
 
 from ra_env import StepResult, pb
 from ra_rl.features import Features
+from ra_rl.model import NEG
 from ra_rl.vocab import QUEUE_INDEX
 
 
@@ -22,21 +23,24 @@ class RandomPolicy:
         self.feats = Features()
 
     def decide(self, step: StepResult) -> list[pb.Decision]:
+        self.feats.observe(step.obs)
         out = []
         for req in step.pending:
             mask = self.feats.candidates(req)[1] if req.kind == pb.DECIDE_ARMY else self.feats.item_mask(req)
-            d = self.feats.decision(req, self.rng.choice(np.flatnonzero(mask).tolist()))
+            a = self.rng.choice(np.flatnonzero(mask).tolist())
+            d = self.feats.decision(req, a)
+            self.feats.record(req, d)
             if d is not None:
                 out.append(d)
         return out
 
 
 class NetPolicy:
-    """The commander network, greedy (argmax) by default, on CPU."""
+    """The commander network, greedy (argmax) by default or temperature-sampled, on CPU."""
 
     brain = "external"
 
-    def __init__(self, path, sample: bool = False):
+    def __init__(self, path, sample: bool = False, temperature: float | None = None):
         import torch
 
         from ra_rl.model import CommanderNet
@@ -47,7 +51,11 @@ class NetPolicy:
             self.net = path
         else:
             self.net = CommanderNet.load(str(path))
-        self.sample = sample
+        if temperature is None:
+            self.temperature = 1.0 if sample else 0.0
+        else:
+            self.temperature = max(0.0, float(temperature))
+        self.sample = self.temperature > 0.0
         self.reset(0)
 
     def reset(self, seed: int) -> None:
@@ -66,13 +74,15 @@ class NetPolicy:
             for req in step.pending:
                 if req.kind == pb.DECIDE_ARMY:
                     cand, mask = self.feats.candidates(req)
-                    logits = self.net.army_logits(g, torch.from_numpy(cand).unsqueeze(0),
-                                                  torch.from_numpy(mask).unsqueeze(0))
+                    mask_t = torch.from_numpy(mask).unsqueeze(0)
+                    logits = self.net.army_logits(g, torch.from_numpy(cand).unsqueeze(0), mask_t)
                 else:
                     queue = torch.tensor([QUEUE_INDEX.get(req.queue, 0)])
-                    logits = self.net.item_logits(g, queue, torch.from_numpy(self.feats.item_mask(req)).unsqueeze(0))
-                if self.sample:
-                    a = int(torch.multinomial(torch.softmax(logits[0], -1), 1, generator=self.gen))
+                    mask_t = torch.from_numpy(self.feats.item_mask(req)).unsqueeze(0)
+                    logits = self.net.item_logits(g, queue, mask_t)
+                if self.temperature > 0.0:
+                    scaled = (logits[0] / self.temperature).masked_fill(~mask_t[0], NEG)
+                    a = int(torch.multinomial(torch.softmax(scaled, -1), 1, generator=self.gen))
                 else:
                     a = int(logits[0].argmax())
                 out.append(a)

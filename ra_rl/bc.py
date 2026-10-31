@@ -1,7 +1,7 @@
 """Behavior cloning: train the commander network on recorded games.
 
-    python -m ra_rl.bc --data data/builtin --out runs/bc_builtin
-    python -m ra_rl.bc --data data/scripted,data/dagger1 --out runs/bc_dagger1
+    python -m ra_rl.bc --data data/scripted_v2 --out runs/phase2_5/bc_s0
+    python -m ra_rl.bc --data data/scripted_v2,data/dagger1_v2 --out runs/phase2_5/bc_s3
 
 The validation split is by game (every 20th seed), never by row. The checkpoint
 with the lowest validation loss is kept as <out>/model.pt; per-epoch metrics go
@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from ra_rl.features import FEATURE_VERSION, GLOBAL_DIM
 from ra_rl.model import CommanderNet
 
 ARRAYS = ("prod_g", "prod_queue", "prod_mask", "prod_y", "army_g", "army_cand", "army_mask", "army_y")
@@ -27,11 +28,16 @@ def load(dirs: list[str], val_every: int = 20) -> tuple[dict, dict, dict]:
     parts: dict[str, dict[str, list]] = {"train": {k: [] for k in ARRAYS}, "val": {k: [] for k in ARRAYS}}
     stats = {"games": 0, "outcomes": {}}
     for d in dirs:
-        for f in sorted(Path(d).glob("g*.npz")):
+        for f in sorted(Path(d.strip()).glob("g*.npz")):
             if f.name.endswith(".tmp.npz"):
                 continue
             z = np.load(f)
             meta = json.loads(str(z["meta"]))
+            if len(z["prod_g"]) and z["prod_g"].shape[1] != GLOBAL_DIM:
+                raise ValueError(
+                    f"{f}: prod_g dim {z['prod_g'].shape[1]} != GLOBAL_DIM {GLOBAL_DIM} "
+                    f"(expected FEATURE_VERSION={FEATURE_VERSION})"
+                )
             split = "val" if meta["seed"] % val_every == 0 else "train"
             for k in ARRAYS:
                 if len(z[k]):
@@ -120,7 +126,9 @@ def main() -> None:
                       "load_s": round(time.perf_counter() - t0, 1), "device": device}), flush=True)
 
     net = CommanderNet(hidden=args.hidden).to(device)
-    opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    net.reset_critic()
+    actor_params = list(net.actor_parameters())
+    opt = torch.optim.AdamW(actor_params, lr=args.lr, weight_decay=args.weight_decay)
     steps_per_epoch = max(1, n_prod // args.batch)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * steps_per_epoch)
     army_batch = max(1, args.batch * n_army // max(1, n_prod))

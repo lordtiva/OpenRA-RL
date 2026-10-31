@@ -84,5 +84,21 @@ Resultados: [`v3-phase2-results.md`](v3-phase2-results.md).
 - `CommanderNet` extendido con cabeza de valor escalar $V(s)$.
 - GAE por partida a nivel decisión ($\gamma = 0.997, \lambda = 0.95$).
 - Rollout paralelo en 6 daemons headless, reciclado periódico de memoria y telemetría en TensorBoard.
-- **Resultado récord**: **73.0% vs `hard`** (IC 95%: 63.6–80.7%, 73 victorias, 24 derrotas, 3 truncadas en 100 partidas de evaluación oficial) alcanzado en la **iteración 60** ([`checkpoint_best.pt`](file:///c:/Users/lordc/Desktop/OpenRA-RL/runs/phase3/ppo_v1/checkpoint_best.pt)). Supera tanto al maestro `scripted` (63.5%) como al baseline de imitación `bc_s2` (66.5%).
-- Análisis detallado: [`docs/v3-phase3-results.md`](docs/v3-phase3-results.md).
+- **Resultado récord (v1)**: **73.0% vs `hard`** (IC 95%: 63.6–80.7%, 73 victorias, 24 derrotas, 3 truncadas en 100 partidas de evaluación de selección) alcanzado en la **iteración 60** (`runs/phase3/ppo_v1/checkpoint_best.pt`). Supera tanto al maestro `scripted` (63.5%) como al baseline de imitación `bc_s2` (66.5%), pero presentaba colapsos tardíos de `argmax` al compartir tronco Actor–Crítico.
+- Análisis detallado: [`v3-phase3-results.md`](v3-phase3-results.md).
+
+### Fase 2.5 ✅
+
+- Recuperación de features y maestro multi-arquetipo antes de la liga: `FEATURE_VERSION = 2` (`GLOBAL_DIM = 277`), topes de cordura en `item_mask` (`harv`, `mcv`, `tent`/`barr`, `pbox`/`hbox`), memoria persistente de amenaza/defensas y `ScriptedPolicy` reactiva contra `hard`, `brutal` (`rush`) y `turtle`.
+- Grabación multi-bot (`1.800` partidas) + DAgger (`1.200` partidas) → `bc_s3` (`98,35%` acierto val. en producción, `92,35%` en ejército; **71,7%** vs `hard`, **83,3%** vs `brutal`, **86,7%** vs `turtle` en gates de 60 partidas, 0 errores).
+
+### Fase 4 ✅
+
+- PPO SMDP v2 (`ra_rl/ppo.py`) + Liga PFSP multi-bot (`ra_rl/league.py`) desde `bc_s3`:
+  - **Crítico asimétrico desacoplado (CTDE)** $V(g, \text{priv})$ (`PRIV_DIM = 20`) + 6 iteraciones de warmup (`explained_var` sostenida en **+0.90 a +0.94**).
+  - **Agrupamiento SMDP por tick** con descuento continuo $\gamma^{\Delta t / 100}$, **PBRS telescópico exacto** y **ancla KL enmascarada** ($\beta_{\text{KL}} = 0.05$).
+  - **Curriculum PFSP** (`hard`, `brutal`, `turtle`) con normalización estratificada de ventajas por rival y reciclado determinista de daemons (**0 errores** en 5.340 partidas).
+- **Resultado campeón (`runs/phase4/league_v2/checkpoint_best.pt`, iteración 20)**:
+  - **Semillas oficiales reservadas `10000–10099` (100 partidas/bot)**: **80,0% vs `hard`** (IC 95%: 71,1–86,7%), **74,0% vs `brutal`** (IC 95%: 64,6–81,6%), **85,0% vs `turtle`** (IC 95%: 76,7–90,7%, solo 1 derrota en 100 partidas) — media armónica **0,794**.
+  - **Semillas de selección `20000–20049` (50 partidas/bot)**: **84,0% vs `hard`**, **82,0% vs `brutal`**, **84,0% vs `turtle`** — media armónica **0,833**, manteniéndose entre **0,780 y 0,833** durante las 80 iteraciones sin un solo colapso.
+- Resultados y diagnóstico comparativo `league_v1` vs `league_v2`: [`v3-phase4-results.md`](v3-phase4-results.md).

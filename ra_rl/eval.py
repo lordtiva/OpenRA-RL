@@ -1,9 +1,11 @@
 """Standard evaluation: N games with fixed seeds, one session per daemon.
 
-    python -m ra_rl.eval --policy builtin --bot hard --games 100 \
+    python -m ra_rl.eval --policy scripted --bot hard --games 100 \
         --daemons localhost:9999,localhost:10000,localhost:10001,localhost:10002,localhost:10003,localhost:10004
 
 Win rate counts only real wins; truncated games (max ticks) are not wins.
+Daemon containers are automatically recycled every --recycle-every games and
+retried once on transient container OOM / poisoned sessions so evaluations are clean.
 """
 
 import argparse
@@ -15,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import grpc
 
-from ra_env import Bridge, GameSession, MatchConfig
+from ra_env import Bridge, GameSession, MatchConfig, daemons as daemon_ctl
 from ra_rl.policies import make_policy
 
 DEFAULT_DAEMONS = ",".join(f"localhost:{p}" for p in range(9999, 10005))
@@ -59,29 +61,53 @@ def play_game(bridge: Bridge, policy_name: str, match: MatchConfig, seed: int, s
 
 
 def evaluate(daemons: list[str], policy: str, match: MatchConfig, games: int, seed_base: int,
-             step_ticks: int, log=print) -> dict:
-    bridges = [Bridge(a) for a in daemons]
+             step_ticks: int, log=print, recycle_every: int = 50, pre_recycle: bool = False) -> dict:
     lock = threading.Lock()
     next_game = [0]
     results: list[dict] = []
 
-    def worker(bridge: Bridge) -> None:
-        while True:
-            with lock:
-                g = next_game[0]
-                next_game[0] += 1
-            if g >= games:
-                return
-            r = play_game(bridge, policy, match, seed_base + g, step_ticks)
-            with lock:
-                results.append(r)
-                log(json.dumps(r))
+    def worker(addr: str) -> None:
+        if pre_recycle:
+            daemon_ctl.restart(addr)
+        bridge = Bridge(addr)
+        played = 0
+        try:
+            while True:
+                with lock:
+                    g = next_game[0]
+                    next_game[0] += 1
+                if g >= games:
+                    return
+                if recycle_every and played >= recycle_every:
+                    bridge.close()
+                    daemon_ctl.restart(addr)
+                    bridge = Bridge(addr)
+                    played = 0
+
+                seed = seed_base + g
+                r = play_game(bridge, policy, match, seed, step_ticks)
+                played += 1
+
+                if r["outcome"] == "error":
+                    # Recover once from container OOM / SessionPoisoned so eval seeds are not dropped.
+                    bridge.close()
+                    if daemon_ctl.restart(addr):
+                        bridge = Bridge(addr)
+                        played = 0
+                        r = play_game(bridge, policy, match, seed, step_ticks)
+                        played += 1
+                    else:
+                        bridge = Bridge(addr)
+
+                with lock:
+                    results.append(r)
+                    log(json.dumps(r))
+        finally:
+            bridge.close()
 
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=len(bridges)) as pool:
-        list(pool.map(worker, bridges))
-    for b in bridges:
-        b.close()
+    with ThreadPoolExecutor(max_workers=max(1, len(daemons))) as pool:
+        list(pool.map(worker, daemons))
 
     outcomes: dict[str, int] = {}
     for r in results:
@@ -103,7 +129,8 @@ def evaluate(daemons: list[str], policy: str, match: MatchConfig, games: int, se
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--policy", default="scripted", help="builtin | scripted")
+    ap.add_argument("--policy", default="scripted",
+                    help="builtin | scripted | random | net:<path> | net-sample:<path> | net-t0.25:<path>")
     ap.add_argument("--daemons", default=DEFAULT_DAEMONS)
     ap.add_argument("--games", type=int, default=100)
     ap.add_argument("--bot", default="hard")
@@ -111,6 +138,8 @@ def main() -> None:
     ap.add_argument("--max-ticks", type=int, default=54000, help="truncate games after this (~36 min)")
     ap.add_argument("--step-ticks", type=int, default=500, help="max ticks per step")
     ap.add_argument("--seed-base", type=int, default=10000)
+    ap.add_argument("--recycle-every", type=int, default=50, help="restart each daemon every N games (0=never)")
+    ap.add_argument("--pre-recycle", action="store_true", help="restart daemons before starting evaluation")
     ap.add_argument("--out", default="", help="append per-game lines and the summary to this jsonl")
     args = ap.parse_args()
 
@@ -122,7 +151,10 @@ def main() -> None:
 
     match = MatchConfig(map_name=args.map, bot=args.bot, max_ticks=args.max_ticks)
     daemons = [d.strip() for d in args.daemons.split(",") if d.strip()]
-    summary = evaluate(daemons, args.policy, match, args.games, args.seed_base, args.step_ticks, log)
+    summary = evaluate(
+        daemons, args.policy, match, args.games, args.seed_base, args.step_ticks, log,
+        recycle_every=args.recycle_every, pre_recycle=args.pre_recycle,
+    )
     log(json.dumps({"summary": summary}))
 
 

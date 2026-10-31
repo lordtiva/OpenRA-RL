@@ -14,7 +14,8 @@ criterios de v3: [`docs/v3-plan.md`](docs/v3-plan.md).
 | `OpenRA/` | Motor C# con el bridge gRPC multi-sesión (`RLSessionManager`, `ExternalBotBridge`) |
 | `proto/rl_bridge.proto` | Contrato agente ↔ motor (copia idéntica a la del submódulo) |
 | `ra_env/` | Cliente Python lock-step: `Bridge`, `GameSession`, benchmark, determinismo |
-| `ra_rl/` | Políticas del commander (`builtin`, `scripted`, `random`, `net`), features, red, imitación (`record`, `bc`) y evaluación estándar (`eval`) |
+| `ra_rl/` | Políticas del commander (`builtin`, `scripted`, `random`, `net`), features (`v2`), red CTDE, imitación (`record`, `bc`), refuerzo SMDP (`ppo`, `league`) y evaluación estándar (`eval`) |
+| `scripts/` | Pipeline end-to-end (`run_recovery_pipeline.py`), telemetría (`analyze_ppo.py`) y generación de protobuf (`gen_proto.py`) |
 | `tests/` | Unit tests; `-m daemon` corre contra un daemon real |
 | `Dockerfile`, `docker-compose.yaml` | Imagen solo C#; 6 daemons en `:9999`–`:10004` |
 
@@ -42,24 +43,27 @@ va el ejército). Contrato: [`docs/v3-commander.md`](docs/v3-commander.md).
 .\.venv\Scripts\python.exe -m ra_rl.eval --policy scripted --bot hard --games 100
 ```
 
-Imitación (Fase 2): grabar decisiones de un maestro, entrenar, evaluar la red.
+Imitación multi-bot + DAgger (Fase 2.5): grabar decisiones del maestro multi-arquetipo contra `hard`/`brutal`/`turtle`/`rush`, entrenar `CommanderNet` (`FEATURE_VERSION = 2`) y verificar gates.
 
 ```powershell
-.\.venv\Scripts\python.exe -m ra_rl.record --teacher builtin --games 1800 --out data/builtin
-.\.venv\Scripts\python.exe -m ra_rl.bc --data data/builtin --out runs/bc_builtin
-.\.venv\Scripts\python.exe -m ra_rl.eval --policy net:runs/bc_builtin/model.pt --bot easy
+# pipeline completo resumible (Fase 2.5 -> Fase 4 v2 con PFSP):
+.\.venv\Scripts\python.exe scripts/run_recovery_pipeline.py --stage all
+
+# o etapa de imitación + DAgger + gates por separado:
+.\.venv\Scripts\python.exe scripts/run_recovery_pipeline.py --stage phase2_5
 ```
 
-Refuerzo (Fase 3): PPO desde el checkpoint de imitación.
+Refuerzo (Fase 3 v2): PPO SMDP con crítico asimétrico desacoplado (CTDE), PBRS exacto y ancla KL enmascarada.
 
 ```powershell
-.\.venv\Scripts\python.exe -m ra_rl.ppo --init runs/phase2/bc_s2/model.pt --out runs/phase3/ppo_v1 --games-per-iter 48 --iterations 100
+.\.venv\Scripts\python.exe -m ra_rl.ppo --init runs/phase2_5/bc_s3/model.pt --out runs/phase3/ppo_v2 --reset-critic --critic-warmup-iters 6 --kl-coef 0.05 --games-per-iter 48 --iterations 80
 ```
 
-Liga y Curriculum Multi-Bot (Fase 4): entrenamiento contra la liga de oponentes con piso anti-colapso.
+Liga y Curriculum PFSP Multi-Bot (Fase 4 v2): entrenamiento contra `hard`, `brutal` y `turtle` con ventajas estratificadas por rival y media armónica de evaluación.
 
 ```powershell
-.\.venv\Scripts\python.exe -m ra_rl.league --init runs/phase3/ppo_v1/checkpoint_best.pt --out runs/phase4/league_v1 --games-per-iter 48 --iterations 100
+.\.venv\Scripts\python.exe -m ra_rl.league --init runs/phase2_5/bc_s3/model.pt --out runs/phase4/league_v2 --reset-critic --critic-warmup-iters 6 --kl-coef 0.05 --games-per-iter 48 --iterations 80
+.\.venv\Scripts\python.exe scripts/analyze_ppo.py runs/phase4/league_v2/metrics.jsonl
 ```
 
 ## Herramientas

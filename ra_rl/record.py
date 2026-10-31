@@ -3,14 +3,14 @@
     # the engine's own bot logic as teacher (brain builtin)
     python -m ra_rl.record --teacher builtin --games 2000 --out data/builtin
     # the hand-written policy as teacher, executing a random action 15% of the time
-    python -m ra_rl.record --teacher scripted --eps 0.15 --games 2000 --out data/scripted
+    python -m ra_rl.record --teacher scripted --bots hard,brutal,turtle --eps 0.15 --games 2000 --out data/scripted_v2
     # DAgger: the network plays, the scripted policy labels the states it reaches
-    python -m ra_rl.record --teacher scripted --executor net:runs/bc/model.pt --out data/dagger1
+    python -m ra_rl.record --teacher scripted --bots hard,brutal,turtle --executor net:runs/phase2_5/bc_s0/model.pt --out data/dagger1_v2
 
-Opponents cycle through --bots by seed. Seeds 10000-10099 are the evaluation
-seeds and are refused. Existing game files are skipped, so a run can be resumed.
-Daemon memory grows ~2-8 MB per game, so each daemon's container is restarted
-every --recycle-every games (needs the docker CLI).
+Opponents cycle through --bots by seed. Seeds 10000-10099 (eval) and 20000-20199
+(selection) are reserved and refused. Existing game files are skipped, so a run
+can be resumed. Daemon memory grows per game, so each daemon's container is
+restarted every --recycle-every games (needs the docker CLI).
 """
 
 import argparse
@@ -26,12 +26,13 @@ import numpy as np
 
 from ra_env import Bridge, GameSession, MatchConfig, daemons, pb
 from ra_rl.eval import DEFAULT_DAEMONS
-from ra_rl.features import Features
+from ra_rl.features import FEATURE_VERSION, WAIT, Features
 from ra_rl.policies import make_policy
 from ra_rl.policies.scripted import ScriptedPolicy
 from ra_rl.vocab import QUEUE_INDEX
 
 EVAL_SEEDS = range(10000, 10100)
+SELECT_SEEDS = range(20000, 20200)
 
 
 class GameBuffer:
@@ -42,11 +43,16 @@ class GameBuffer:
     def add(self, feats: Features, req: pb.DecisionRequest, y: int) -> None:
         if req.kind == pb.DECIDE_ARMY:
             cand, mask = feats.candidates(req)
-            for k, v in (("g", feats.g), ("cand", cand), ("mask", mask), ("y", y)):
+            if not mask[y]:
+                return
+            for k, v in (("g", feats.g.copy()), ("cand", cand), ("mask", mask), ("y", y)):
                 self.army[k].append(v)
         else:
-            for k, v in (("g", feats.g), ("queue", QUEUE_INDEX.get(req.queue, 0)),
-                         ("mask", feats.item_mask(req)), ("y", y)):
+            mask = feats.item_mask(req)
+            if not mask[y]:
+                y = WAIT
+            for k, v in (("g", feats.g.copy()), ("queue", QUEUE_INDEX.get(req.queue, 0)),
+                         ("mask", mask), ("y", y)):
                 self.prod[k].append(v)
 
     def save(self, path: Path, meta: dict) -> None:
@@ -124,6 +130,7 @@ def record_game(bridge: Bridge, args, seed: int, bot: str) -> dict:
         "seed": seed, "bot": bot, "teacher": args.teacher, "executor": args.executor, "eps": args.eps,
         "eps_army": args.eps_army, "outcome": outcome, "ticks": session.tick,
         "prod_rows": len(buf.prod["y"]), "army_rows": len(buf.army["y"]),
+        "feature_version": FEATURE_VERSION,
         "wall_s": round(time.perf_counter() - t0, 1), "error": error,
     }
     if not error:
@@ -139,7 +146,7 @@ def main() -> None:
     ap.add_argument("--eps-army", type=float, default=0.0, help="chance of a random ARMY action (scripted)")
     ap.add_argument("--games", type=int, default=1000)
     ap.add_argument("--seed-base", type=int, default=1)
-    ap.add_argument("--bots", default="easy,medium,hard", help="opponents, cycled by seed")
+    ap.add_argument("--bots", default="hard,brutal,turtle", help="opponents, cycled by seed")
     ap.add_argument("--daemons", default=DEFAULT_DAEMONS)
     ap.add_argument("--map", default=MatchConfig.map_name)
     ap.add_argument("--max-ticks", type=int, default=54000)
@@ -152,12 +159,15 @@ def main() -> None:
         ap.error("the builtin teacher plays its own games (no --executor / --eps)")
 
     seeds = [args.seed_base + i for i in range(args.games)]
-    if any(s in EVAL_SEEDS or s <= 0 for s in seeds):
-        ap.error(f"seeds must be > 0 and outside the evaluation seeds {EVAL_SEEDS.start}-{EVAL_SEEDS.stop - 1}")
+    if any(s in EVAL_SEEDS or s in SELECT_SEEDS or s <= 0 for s in seeds):
+        ap.error(
+            f"seeds must be > 0 and outside reserved eval ({EVAL_SEEDS.start}-{EVAL_SEEDS.stop - 1}) "
+            f"and selection ({SELECT_SEEDS.start}-{SELECT_SEEDS.stop - 1}) ranges"
+        )
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     todo = [s for s in seeds if not (out / f"g{s:06d}.npz").exists()]
-    bots = args.bots.split(",")
+    bots = [b.strip() for b in args.bots.split(",") if b.strip()]
     print(f"{len(todo)} games to record ({len(seeds) - len(todo)} already there)", flush=True)
 
     lock = threading.Lock()
@@ -173,15 +183,20 @@ def main() -> None:
                         return
                     seed = todo.pop(0)
                 if args.recycle_every and played >= args.recycle_every:
+                    bridge.close()
                     daemons.restart(address)
+                    bridge = Bridge(address)
                     played = 0
-                meta = record_game(bridge, args, seed, bots[seed % len(bots)])
+                bot_name = bots[seed % len(bots)]
+                meta = record_game(bridge, args, seed, bot_name)
                 played += 1
-                if "never became ready" in meta["error"]:
-                    # Out of memory or wedged: restart the daemon and retry the game once.
+                if meta["error"]:
+                    # Out of memory, poisoned session, or wedged: restart the daemon and retry once.
+                    bridge.close()
                     daemons.restart(address)
+                    bridge = Bridge(address)
                     played = 0
-                    meta = record_game(bridge, args, seed, bots[seed % len(bots)])
+                    meta = record_game(bridge, args, seed, bot_name)
                     played += 1
                 with lock:
                     log.write(json.dumps(meta) + "\n")

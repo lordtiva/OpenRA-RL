@@ -4,10 +4,11 @@ from ra_rl.policies import BuiltinPolicy, make_policy
 from ra_rl.policies.scripted import Params, ScriptedPolicy
 
 
-def obs(buildings=(), units=(), power=(100, 0)) -> pb.GameObservation:
+def obs(buildings=(), units=(), power=(100, 0), tick=100) -> pb.GameObservation:
     o = pb.GameObservation(
-        buildings=[pb.RlBuildingInfo(type=t) for t in buildings],
-        units=[pb.RlUnitInfo(type=t) for t in units],
+        tick=tick,
+        buildings=[pb.RlBuildingInfo(type=t, cell_x=10, cell_y=10) for t in buildings],
+        units=[pb.RlUnitInfo(type=t, cell_x=12, cell_y=10) for t in units],
     )
     o.economy.power_provided, o.economy.power_drained = power
     return o
@@ -50,16 +51,23 @@ def test_build_powers_up_before_a_consumer():
     assert d.choice == "powr"
 
 
-def test_defense_waits_for_war_factory():
+def test_defense_waits_for_war_factory_unless_early_rush_with_refinery():
     p = ScriptedPolicy()
     [d] = p.decide(step(obs(buildings=["fact"]), build_req("pbox", queue="Defense")))
     assert d.choice == ""
     [d] = p.decide(step(obs(buildings=["fact", "weap"]), build_req("pbox", queue="Defense")))
     assert d.choice == "pbox"
 
+    # Under early rush with >=1 refinery, emergency pbox unlocks before weap
+    p2 = ScriptedPolicy()
+    rush_obs = obs(buildings=["fact", "powr", "tent", "proc"], tick=2500)
+    rush_obs.visible_enemies.extend([pb.RlUnitInfo(type="e1", cell_x=14, cell_y=10)] * 8)
+    [d] = p2.decide(step(rush_obs, build_req("pbox", queue="Defense")))
+    assert d.choice == "pbox"
 
-def test_train_harvesters_then_tanks_then_artillery():
-    p = ScriptedPolicy(Params(harv_per_proc=2, arty_every=4))
+
+def test_train_harvesters_then_tanks_then_artillery_and_siege_adaptation():
+    p = ScriptedPolicy(Params(harv_per_proc=2, arty_every=4, siege_arty_every=2, siege_def_threshold=3))
     opts = ("harv", "1tnk", "2tnk", "arty")
     [d] = p.decide(step(obs(buildings=["proc"], units=["harv"]), train_req("Vehicle", *opts)))
     assert d.choice == "harv"
@@ -69,6 +77,13 @@ def test_train_harvesters_then_tanks_then_artillery():
     assert d.choice == "arty"
     [d] = p.decide(step(obs(), train_req("Aircraft", "heli")))
     assert d.choice == ""
+
+    # Spotting >=3 static defenses activates siege artillery ratio (1 arty per 2 tanks)
+    turtle_obs = obs(buildings=["proc"], units=["harv"] * 2 + ["2tnk"] * 2)
+    for aid in (10, 11, 12):
+        turtle_obs.visible_enemy_buildings.append(pb.RlBuildingInfo(actor_id=aid, type="tsla"))
+    [d] = p.decide(step(turtle_obs, train_req("Vehicle", *opts)))
+    assert d.choice == "arty"
 
 
 def test_army_attacks_keeps_reinforces_and_recalls():
@@ -113,7 +128,7 @@ def test_army_moves_on_when_target_disappears_and_hunts_unexplored():
     assert d.target_index == 0 and p.target[0] == "unexplored"
 
 
-def test_army_gives_up_on_a_stuck_target():
+def test_army_gives_up_on_a_stuck_target_and_cycles_cleanly():
     p = ScriptedPolicy(Params(attack_value=100, reinforce_value=10**9, max_aim_decisions=2))
     req = army_req("unexplored", "unexplored")  # cells (0,0) and (1,1)
     [d] = p.decide(step(obs(units=["2tnk"]), req))
@@ -121,3 +136,7 @@ def test_army_gives_up_on_a_stuck_target():
     assert p.decide(step(obs(units=["2tnk"]), req)) == []
     [d] = p.decide(step(obs(units=["2tnk"]), req))
     assert d.target_index == 1  # (0,0) never cleared: skip it
+    # If (1,1) also gets skipped, skipped resets cleanly rather than crashing
+    assert p.decide(step(obs(units=["2tnk"]), req)) == []
+    [d] = p.decide(step(obs(units=["2tnk"]), req))
+    assert d.target_index == 0
