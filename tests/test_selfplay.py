@@ -98,3 +98,26 @@ def test_pipeline_resumability_helpers(tmp_path):
     assert get_completed_iterations(metrics_path) == 5
     assert get_completed_iterations(tmp_path / "missing.jsonl") == 0
 
+
+def test_pipeline_progress_monitor():
+    from datetime import datetime
+    from scripts.run_v4_pipeline import (
+        StageProgressMonitor,
+        format_bar,
+        format_clock,
+        format_duration,
+    )
+
+    assert format_duration(75) == "01:15"
+    assert format_duration(3665) == "01:01:05"
+    assert len(format_bar(5, 10, width=10)) == 10
+    assert format_bar(5, 10, width=10) == "█████░░░░░"
+    assert len(format_clock(datetime.now())) == 8
+
+    mon = StageProgressMonitor("Test Task", total=10, unit="items", initial=0)
+    mon.update(current=3, extra="test_info")
+    assert mon.current == 3
+    mon.finish(summary="done")
+    assert mon.current == 10
+
+
