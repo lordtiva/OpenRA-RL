@@ -395,12 +395,15 @@ class ScriptedPolicy:
             ):
                 return pick("mcv")
 
-            if have["proc"] >= 2 and (units["jeep"] + units["ftrk"] < self.p.harass_raiders):
+            tanks = units["2tnk"] + units["1tnk"] + units["3tnk"] + units["4tnk"] + units["ctnk"]
+            if (
+                have["proc"] >= 2
+                and (units["jeep"] + units["ftrk"] < self.p.harass_raiders)
+                and (tanks >= 2 or not any(t in options for t in ("3tnk", "2tnk", "1tnk")))
+            ):
                 for raider in ("ftrk", "jeep"):
                     if raider in options:
                         return pick(raider)
-
-            tanks = units["2tnk"] + units["1tnk"] + units["3tnk"] + units["4tnk"] + units["ctnk"]
             arties = units["arty"] + units["v2rl"]
             siege_mode = len(self.seen_defenses) >= self.p.siege_def_threshold
             arty_ratio = self.p.siege_arty_every if siege_mode else self.p.arty_every
