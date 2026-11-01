@@ -74,3 +74,27 @@ def test_plan_hybrid_jobs_allocates_pools_and_swaps_slots(tmp_path):
     )
     assert len(jobs_no_snap) == 24
     assert all(j.pool != "snapshot" for j in jobs_no_snap)
+
+
+def test_pipeline_resumability_helpers(tmp_path):
+    import json
+    from scripts.run_v4_pipeline import count_npz_files, get_completed_iterations
+
+    # Test count_npz_files
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (data_dir / "g000001.npz").write_text("test")
+    (data_dir / "g000002.npz").write_text("test")
+    (data_dir / "other.txt").write_text("ignored")
+    assert count_npz_files(data_dir) == 2
+    assert count_npz_files(tmp_path / "nonexistent") == 0
+
+    # Test get_completed_iterations
+    metrics_path = tmp_path / "metrics.jsonl"
+    with metrics_path.open("w", encoding="utf-8") as f:
+        f.write(json.dumps({"iteration": 1, "elo": 1250}) + "\n")
+        f.write(json.dumps({"iteration": 2, "elo": 1258}) + "\n")
+        f.write(json.dumps({"iteration": 5, "elo": 1270}) + "\n")
+    assert get_completed_iterations(metrics_path) == 5
+    assert get_completed_iterations(tmp_path / "missing.jsonl") == 0
+

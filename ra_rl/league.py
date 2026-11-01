@@ -284,9 +284,50 @@ def main() -> None:
         "kl_coef": args.kl_coef, "games_per_iter": args.games_per_iter,
     }), flush=True)
 
-    net = CommanderNet.load(args.init, device=device)
-    if args.reset_critic:
-        net.reset_critic()
+    cur_seed = args.seed_base
+    cur_ent = args.ent_coef
+    best_harmonic_score = -1.0
+    ema_wrs: dict[str, float] = {o: 0.5 for o in opponents}
+    it_start = 1
+
+    latest_ckpt = out / "checkpoint_latest.pt"
+    metrics_path = out / "metrics.jsonl"
+    resuming = False
+    if latest_ckpt.exists() and metrics_path.exists():
+        last_it = 0
+        try:
+            for line in metrics_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                it_num = rec.get("iteration", 0)
+                if it_num > last_it:
+                    last_it = it_num
+                    if "ent_coef" in rec:
+                        cur_ent = float(rec["ent_coef"])
+                    if "ema_wrs" in rec:
+                        ema_wrs.update({k: float(v) for k, v in rec["ema_wrs"].items() if k in ema_wrs})
+                if "eval" in rec and "harmonic_score" in rec["eval"]:
+                    best_harmonic_score = max(best_harmonic_score, float(rec["eval"]["harmonic_score"]))
+            if last_it > 0:
+                it_start = last_it + 1
+                resuming = True
+        except Exception as e:
+            print(f"[RESUME WARNING] Failed reading metrics from {metrics_path}: {e}", flush=True)
+
+    if it_start > args.iterations:
+        print(f"[RESUME] Phase 4.2 at {out} already completed {args.iterations} iterations; nothing to do.", flush=True)
+        return
+
+    if resuming:
+        cur_seed = args.seed_base + (it_start - 1) * args.games_per_iter
+        print(f"[RESUME] Resuming Phase 4.2 from {latest_ckpt} at iteration {it_start}/{args.iterations} (cur_seed={cur_seed}, best_harmonic_score={best_harmonic_score:.3f})", flush=True)
+        net = CommanderNet.load(str(latest_ckpt), device=device)
+    else:
+        net = CommanderNet.load(args.init, device=device)
+        if args.reset_critic:
+            net.reset_critic()
+
     ref_net = CommanderNet.load(ref_path, device=device).eval() if args.kl_coef > 0.0 else None
     if ref_net is not None:
         ref_net.requires_grad_(False)
@@ -294,16 +335,12 @@ def main() -> None:
     actor_opt = torch.optim.AdamW(list(net.actor_parameters()), lr=args.lr, weight_decay=args.weight_decay)
     critic_opt = torch.optim.AdamW(list(net.critic_parameters()), lr=args.critic_lr, weight_decay=args.weight_decay)
 
-    cur_seed = args.seed_base
-    cur_ent = args.ent_coef
-    best_harmonic_score = -1.0
-    ema_wrs: dict[str, float] = {o: 0.5 for o in opponents}
-    rng = np.random.default_rng(args.seed_base)
+    rng = np.random.default_rng(cur_seed)
     log = (out / "metrics.jsonl").open("a", encoding="utf-8")
 
     t_start = time.perf_counter()
 
-    for it in range(1, args.iterations + 1):
+    for it in range(it_start, args.iterations + 1):
         t_it = time.perf_counter()
         in_warmup = it <= args.critic_warmup_iters
 

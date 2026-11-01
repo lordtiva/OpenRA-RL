@@ -604,9 +604,55 @@ def main() -> None:
     anchor_spec = policy_spec(Path(ref_path), args.snap_temp)
     writer = SummaryWriter(log_dir=str(out / "tb")) if (args.tb and HAS_TB) else None
 
-    net = CommanderNet.load(args.init, device=device)
-    if args.reset_critic:
-        net.reset_critic()
+    cur_seed = args.seed_base
+    cur_ent = args.ent_coef
+    best_composite = -1.0
+    learner_elo = 1250.0
+    bot_ema_wrs: dict[str, float] = {b: 0.5 for b in bots}
+    it_start = 1
+
+    latest_ckpt = out / "checkpoint_latest.pt"
+    metrics_path = out / "metrics.jsonl"
+    resuming = False
+    if latest_ckpt.exists() and metrics_path.exists():
+        last_it = 0
+        try:
+            for line in metrics_path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                rec = json.loads(line)
+                it_num = rec.get("iteration", 0)
+                if it_num > last_it:
+                    last_it = it_num
+                    if "ent_coef" in rec:
+                        cur_ent = float(rec["ent_coef"])
+                    if "learner_elo" in rec:
+                        learner_elo = float(rec["learner_elo"])
+                    elif "elo" in rec:
+                        learner_elo = float(rec["elo"])
+                    if "bot_ema_wrs" in rec:
+                        bot_ema_wrs.update({k: float(v) for k, v in rec["bot_ema_wrs"].items() if k in bot_ema_wrs})
+                if "eval" in rec and "composite_score" in rec["eval"]:
+                    best_composite = max(best_composite, float(rec["eval"]["composite_score"]))
+            if last_it > 0:
+                it_start = last_it + 1
+                resuming = True
+        except Exception as e:
+            print(f"[RESUME WARNING] Failed reading metrics from {metrics_path}: {e}", flush=True)
+
+    if it_start > args.iterations:
+        print(f"[RESUME] Fase 4.3 at {out} already completed {args.iterations} iterations; nothing to do.", flush=True)
+        return
+
+    if resuming:
+        cur_seed = args.seed_base + (it_start - 1) * args.games_per_iter
+        print(f"[RESUME] Resuming Fase 4.3 from {latest_ckpt} at iteration {it_start}/{args.iterations} (cur_seed={cur_seed}, learner_elo={learner_elo:.1f}, best_composite={best_composite:.3f})", flush=True)
+        net = CommanderNet.load(str(latest_ckpt), device=device)
+    else:
+        net = CommanderNet.load(args.init, device=device)
+        if args.reset_critic:
+            net.reset_critic()
+
     ref_net = CommanderNet.load(ref_path, device=device).eval()
     ref_net.requires_grad_(False)
 
@@ -623,16 +669,10 @@ def main() -> None:
         snap_ema_wrs[sid] = 0.5
         snap_elos[sid] = 1250.0 if sid == "snap_0000_init" else 1250.0
 
-    learner_elo = 1250.0
-    bot_ema_wrs: dict[str, float] = {b: 0.5 for b in bots}
-
     actor_opt = torch.optim.AdamW(list(net.actor_parameters()), lr=args.lr, weight_decay=args.weight_decay)
     critic_opt = torch.optim.AdamW(list(net.critic_parameters()), lr=args.critic_lr, weight_decay=args.weight_decay)
 
-    cur_seed = args.seed_base
-    cur_ent = args.ent_coef
-    best_composite = -1.0
-    rng = np.random.default_rng(args.seed_base)
+    rng = np.random.default_rng(cur_seed)
     log = (out / "metrics.jsonl").open("a", encoding="utf-8")
 
     print(json.dumps({
@@ -645,7 +685,7 @@ def main() -> None:
 
     t_start = time.perf_counter()
 
-    for it in range(1, args.iterations + 1):
+    for it in range(it_start, args.iterations + 1):
         t_it = time.perf_counter()
         in_warmup = it <= args.critic_warmup_iters
         kl_p, kl_a = schedule_kl_coefs(
