@@ -81,7 +81,7 @@ class Params:
     siege_arty_every: int = 2      # 1 artillery/V2 per this many tanks vs fortified turtle
     siege_def_threshold: int = 3
     attack_value: int = 6000       # MAIN push threshold
-    all_in_value: int = 7500       # MAIN fearless assault threshold when overwhelming enemy
+    all_in_value: int = 16000      # MAIN fearless assault threshold when overwhelming enemy (endgame mass)
     siege_step_value: int = 1500
     max_attack_value: int = 9500
     reinforce_value: int = 2000
@@ -451,7 +451,7 @@ class ScriptedPolicy:
         use_all_in = (
             val >= self.p.all_in_value
             and tgt.kind == "enemy_building"
-            and val >= int(2.2 * max(threat, vis_ene, 1000))
+            and val >= int(2.5 * max(threat, vis_ene, 1500))
         )
         return pb.Decision(
             request_id=req.id,
@@ -506,9 +506,9 @@ class ScriptedPolicy:
             self.harass_skipped.add(self.harass_target)
 
         prio = (
-            ("unexplored", "enemy_harvester", "stale", "enemy_spawn", "enemy_building", "enemy_mobile")
+            ("enemy_spawn", "unexplored", "enemy_harvester", "stale", "enemy_building", "enemy_mobile")
             if obs.explored_percent < 45.0
-            else ("enemy_harvester", "unexplored", "stale", "enemy_spawn", "enemy_building", "enemy_mobile")
+            else ("enemy_harvester", "enemy_spawn", "unexplored", "stale", "enemy_building", "enemy_mobile")
         )
         idx = self._pick_by_priority(req, prio, self.harass_skipped)
         if idx is None:
