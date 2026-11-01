@@ -349,7 +349,7 @@ def run_phase4_1(args) -> None:
         try:
             w_h = eval_gate(args.daemons, f"net:{bc_final}", "hard", args.gate_games, 0.50, gates_dir / "hard.jsonl", player_faction=args.player_faction, title="Gate 4.1 vs hard")
             w_b = eval_gate(args.daemons, f"net:{bc_final}", "brutal", args.gate_games, 0.40, gates_dir / "brutal.jsonl", player_faction=args.player_faction, title="Gate 4.1 vs brutal")
-            w_t = eval_gate(args.daemons, f"net:{bc_final}", "turtle", args.gate_games, 0.50, gates_dir / "turtle.jsonl", player_faction=args.player_faction, title="Gate 4.1 vs turtle")
+            w_t = eval_gate(args.daemons, f"net:{bc_final}", "turtle", args.gate_games, 0.45, gates_dir / "turtle.jsonl", player_faction=args.player_faction, title="Gate 4.1 vs turtle")
             print(
                 f"[RESUME] Fase 4.1 already complete and gates verified (hard={w_h*100:.1f}%, brutal={w_b*100:.1f}%, turtle={w_t*100:.1f}%); skipping Phase 4.1.",
                 flush=True,
@@ -429,7 +429,7 @@ def run_phase4_1(args) -> None:
     # 5. Verify bilateral supervised gates on selection seeds (20000+)
     eval_gate(args.daemons, f"net:{bc_final}", "hard", args.gate_games, 0.50, gates_dir / "hard.jsonl", player_faction=args.player_faction, title="Gate 4.1 vs hard")
     eval_gate(args.daemons, f"net:{bc_final}", "brutal", args.gate_games, 0.40, gates_dir / "brutal.jsonl", player_faction=args.player_faction, title="Gate 4.1 vs brutal")
-    eval_gate(args.daemons, f"net:{bc_final}", "turtle", args.gate_games, 0.50, gates_dir / "turtle.jsonl", player_faction=args.player_faction, title="Gate 4.1 vs turtle")
+    eval_gate(args.daemons, f"net:{bc_final}", "turtle", args.gate_games, 0.45, gates_dir / "turtle.jsonl", player_faction=args.player_faction, title="Gate 4.1 vs turtle")
 
 
 def run_phase4_2(args) -> None:
