@@ -31,9 +31,9 @@ BUILD_ORDER = [
     ("proc", 1), ("proc", 2),
     ("powr", 2),
     ("weap", 1),
+    ("fix", 1),                 # unlocks 3tnk (Heavy Tank) for Soviet immediately ($1200)
     ("apwr", 1), ("dome", 1),
     ("proc", 3),
-    ("fix", 1),
     ("afld", 1),               # unlocks free SpyPlane / Paratroopers / Parabombs early ($500)
     ("apwr", 2),
     ("weap", 2),
@@ -71,16 +71,16 @@ class Params:
     rich_bank: int = 3000          # with this much banked, add extra factories
     max_weap: int = 3
     max_tent: int = 2
-    max_infantry: int = 40
-    infantry_bank: int = 0
+    max_infantry: int = 20
+    infantry_bank: int = 600
     rifles_per_rocket: int = 2
-    harv_per_proc: int = 2
-    max_harv: int = 8
+    harv_per_proc: int = 1
+    max_harv: int = 4
     harass_raiders: int = 2        # fast scouts/raiders (jeep / ftrk) once >=2 refineries exist
     arty_every: int = 4            # 1 artillery/V2 per this many tanks (standard)
     siege_arty_every: int = 2      # 1 artillery/V2 per this many tanks vs fortified turtle
     siege_def_threshold: int = 3
-    attack_value: int = 6000       # MAIN push threshold
+    attack_value: int = 5000       # MAIN push threshold
     all_in_value: int = 16000      # MAIN fearless assault threshold when overwhelming enemy (endgame mass)
     siege_step_value: int = 1500
     max_attack_value: int = 9500
@@ -319,11 +319,15 @@ class ScriptedPolicy:
                         if item in options and have[item] < n:
                             return pick(item)
                 return ""
-            for item, n in DEFENSES:
+            for item, n in EARLY_DEFENSES:
                 if item in options and have[item] < n:
                     return pick(item)
             if self.seen_air:
                 for item, n in AA_DEFENSES:
+                    if item in options and have[item] < n:
+                        return pick(item)
+            if bank(obs) >= 2000 or len(self.seen_defenses) >= self.p.siege_def_threshold:
+                for item, n in MID_DEFENSES + LATE_DEFENSES:
                     if item in options and have[item] < n:
                         return pick(item)
             if bank(obs) >= 3500 and (have["atek"] or have["stek"]):
@@ -385,9 +389,8 @@ class ScriptedPolicy:
                 "mcv" in options
                 and (have["fact"] + units["mcv"] < 2)
                 and (
-                    obs.placement_failures >= 3
-                    or have["fact"] == 0
-                    or (bank(obs) >= 4500 and have["weap"] >= 2)
+                    have["fact"] == 0
+                    or (bank(obs) >= 4500 and have["weap"] >= 2 and (units["3tnk"] + units["2tnk"] + units["1tnk"]) >= 6)
                 )
             ):
                 return pick("mcv")
