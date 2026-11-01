@@ -19,6 +19,17 @@ import sys
 import time
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from ra_rl.eval import DEFAULT_DAEMONS
 
 
@@ -44,10 +55,10 @@ def format_clock(dt: datetime) -> str:
 
 def format_bar(current: int, total: int, width: int = 15) -> str:
     if total <= 0:
-        return "░" * width
+        return "-" * width
     pct = min(1.0, max(0.0, current / total))
     filled = int(round(pct * width))
-    return "█" * filled + "░" * (width - filled)
+    return "=" * filled + "-" * (width - filled)
 
 
 class StageProgressMonitor:
