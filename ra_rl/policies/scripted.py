@@ -22,36 +22,38 @@ from collections import Counter
 from dataclasses import dataclass
 
 from ra_env import StepResult, pb
-from ra_rl.vocab import base_type
+from ra_rl.vocab import ALLIED_FACTIONS, SOVIET_FACTIONS, base_type
 
 # Unified Allied + Soviet build order (unavailable faction buildings are skipped automatically).
 BUILD_ORDER = [
     ("powr", 1),
     ("tent", 1), ("barr", 1),
-    ("proc", 1), ("proc", 2),
+    ("proc", 1),
+    ("proc", 2),                 # 2nd Refinery early: double income by tick 2500!
     ("powr", 2),
     ("weap", 1),
-    ("fix", 1),                 # unlocks 3tnk (Heavy Tank) for Soviet immediately ($1200)
-    ("apwr", 1), ("dome", 1),
-    ("proc", 3),
-    ("afld", 1),               # unlocks free SpyPlane / Paratroopers / Parabombs early ($500)
-    ("apwr", 2),
-    ("weap", 2),
-    ("proc", 4),
-    ("hpad", 1),
-    ("atek", 1), ("stek", 1),
-    ("apwr", 3),
-    ("hpad", 2), ("afld", 2),
+    ("powr", 3),                 # 3rd Power Plant: prevents brownouts during tech & defense ramp!
+    ("fix", 1),                  # unlocks 3tnk (Heavy Tank) for Soviet / 2tnk for Allies ($1200)
+    ("proc", 3),                 # 3rd Refinery: 3rd harvester + dock for booming midgame economy!
+    ("weap", 2),                 # 2nd War Factory: double tank production speed!
+    ("dome", 1),                 # radar + unlocks siege units & hpad & afld ($1000)
+    ("afld", 1),                 # unlocks Soviet SpyPlane ($600) early to uncover the fog of war!
+    ("hpad", 1),                 # unlocks Allied Longbow Helicopters ($500)
+    ("hpad", 2),                 # 2nd Helipad for Allied air fleet ($500)
+    ("afld", 2),                 # 2nd Airfield for Soviet air fleet ($500)
+    ("stek", 1), ("atek", 1),
 ]
+TECH_BUILDINGS = frozenset({"dome", "afld", "hpad", "atek", "stek"})
 EARLY_DEFENSES = [("pbox", 2), ("ftur", 2), ("gun", 1)]
-MID_DEFENSES = [("gun", 3), ("tsla", 1)]
-LATE_DEFENSES = [("tsla", 2)]
+MID_DEFENSES = [("gun", 2)]
+LATE_DEFENSES = [("tsla", 1)]
 DEFENSES = EARLY_DEFENSES + MID_DEFENSES + LATE_DEFENSES
 RUSH_DEFENSES = [("pbox", 2), ("ftur", 2), ("gun", 1), ("hbox", 1)]
 AA_DEFENSES = [("agun", 2), ("sam", 2)]
 SUPER_DEFENSES = [("iron", 1), ("pdox", 1)]
 
 STATIC_DEFENSE_TYPES = frozenset({"pbox", "hbox", "gun", "ftur", "tsla", "sam", "agun"})
+GROUND_DEFENSE_TYPES = frozenset({"pbox", "hbox", "gun", "ftur", "tsla"})
 AA_TYPES = frozenset({"sam", "agun", "ftrk", "e3"})
 AIR_TYPES = frozenset({"heli", "hind", "mh60", "yak", "mig"})
 AIR_BUILDING_TYPES = frozenset({"hpad", "afld"})
@@ -62,7 +64,7 @@ COMBAT_COST = {
     "arty": 600, "v2rl": 900, "apc": 800, "ctnk": 1350, "stnk": 1350, "ttnk": 1350,
     "ftrk": 600, "mgg": 1200, "heli": 1200, "hind": 1500, "mh60": 1000, "yak": 1350, "mig": 2000,
 }
-HOME_RADIUS = 20  # cells around the construction yard that count as "home"
+HOME_RADIUS = 28  # cells around the construction yard that count as "home"
 
 
 @dataclass
@@ -72,21 +74,22 @@ class Params:
     max_weap: int = 3
     max_tent: int = 2
     max_infantry: int = 20
-    infantry_bank: int = 600
-    rifles_per_rocket: int = 2
-    harv_per_proc: int = 1
-    max_harv: int = 4
+    infantry_bank: int = 800
+    rifles_per_rocket: int = 1
+    harv_per_proc: int = 2
+    max_harv: int = 6
     harass_raiders: int = 2        # fast scouts/raiders (jeep / ftrk) once >=2 refineries exist
-    arty_every: int = 4            # 1 artillery/V2 per this many tanks (standard)
+    arty_every: int = 3            # 1 artillery/V2 per this many tanks (standard)
     siege_arty_every: int = 2      # 1 artillery/V2 per this many tanks vs fortified turtle
     siege_def_threshold: int = 3
-    attack_value: int = 5000       # MAIN push threshold
+    attack_value: int = 13000      # MAIN push threshold: ~8 tanks + 2 escorts + 12 infantry (deathball)
     all_in_value: int = 16000      # MAIN fearless assault threshold when overwhelming enemy (endgame mass)
-    siege_step_value: int = 1500
-    max_attack_value: int = 9500
-    reinforce_value: int = 2000
+    siege_step_value: int = 0
+    max_attack_value: int = 12000
+    reinforce_value: int = 2500
     recall_fraction: float = 0.35
-    max_aim_decisions: int = 8
+    min_attack_fraction: float = 0.35
+    max_aim_decisions: int = 6
     rush_threat_threshold: int = 600
 
 
@@ -177,6 +180,8 @@ class ScriptedPolicy:
         self.aa_locations: dict[int, tuple[int, int]] = {}
         self.seen_air = False
         self.rush_detected = False
+        self.harass_built = 0
+        self.recent_threat_peak = 0
 
     def _observe_intel(self, obs: pb.GameObservation, have: Counter) -> int:
         for b in obs.visible_enemy_buildings:
@@ -201,10 +206,17 @@ class ScriptedPolicy:
     def decide(self, step: StepResult) -> list[pb.Decision]:
         buildings, units = counts(step.obs)
         threat = self._observe_intel(step.obs, buildings)
+        for req in step.pending:
+            if req.kind == pb.DECIDE_ARMY:
+                for t in req.targets:
+                    if t.kind == "enemy_building" and base_type(t.type) in ("hpad", "afld"):
+                        self.seen_air = True
+                    elif t.kind == "enemy_mobile" and base_type(t.type) in AIR_TYPES:
+                        self.seen_air = True
         out: list[pb.Decision] = []
         for req in step.pending:
             if req.kind == pb.DECIDE_BUILD:
-                out.append(pb.Decision(request_id=req.id, choice=self.build(req, step.obs, buildings, threat)))
+                out.append(pb.Decision(request_id=req.id, choice=self.build(req, step.obs, buildings, units, threat)))
             elif req.kind == pb.DECIDE_TRAIN:
                 out.append(pb.Decision(request_id=req.id, choice=self.train(req, step.obs, buildings, units, threat)))
             elif req.kind == pb.DECIDE_ARMY:
@@ -305,16 +317,26 @@ class ScriptedPolicy:
     def power_item(self, options: set[str]) -> str:
         return "apwr" if "apwr" in options else ("powr" if "powr" in options else "")
 
-    def build(self, req: pb.DecisionRequest, obs: pb.GameObservation, have: Counter, threat: int = 0) -> str:
+    def build(
+        self,
+        req: pb.DecisionRequest,
+        obs: pb.GameObservation,
+        have: Counter,
+        units: Counter | None = None,
+        threat: int = 0,
+    ) -> str:
         options = {base_type(o) for o in req.options}
         raw_map = {base_type(o): o for o in req.options}
 
         def pick(item: str) -> str:
             return raw_map.get(item, "")
 
+        tanks = (units["1tnk"] + units["2tnk"] + units["3tnk"] + units["4tnk"] + units["ctnk"]) if units else 0
+        b_cash = bank(obs)
+
         if req.queue == "Defense":
             if have["weap"] == 0:
-                if self.rush_detected and have["proc"] >= 1:
+                if (self.rush_detected or threat >= 400) and have["proc"] >= 1:
                     for item, n in RUSH_DEFENSES:
                         if item in options and have[item] < n:
                             return pick(item)
@@ -322,28 +344,41 @@ class ScriptedPolicy:
             for item, n in EARLY_DEFENSES:
                 if item in options and have[item] < n:
                     return pick(item)
-            if self.seen_air:
+            if self.seen_air and b_cash >= 600:
                 for item, n in AA_DEFENSES:
                     if item in options and have[item] < n:
                         return pick(item)
-            if bank(obs) >= 2000 or len(self.seen_defenses) >= self.p.siege_def_threshold:
+            if b_cash >= 700 and have["proc"] >= 2 and (tanks >= 2 or threat >= 800):
                 for item, n in MID_DEFENSES + LATE_DEFENSES:
                     if item in options and have[item] < n:
                         return pick(item)
-            if bank(obs) >= 3500 and (have["atek"] or have["stek"]):
+            if b_cash >= 3000 and (have["atek"] or have["stek"]):
                 for item, n in SUPER_DEFENSES:
                     if item in options and have[item] < n:
                         return pick(item)
             return ""
 
         spare = obs.economy.power_provided - obs.economy.power_drained
-        if spare < self.p.power_margin and have["fact"]:
+        needed = 100 if (have["dome"] or have["afld"] or have["tsla"]) else self.p.power_margin
+        if spare < needed and have["fact"]:
             p_item = self.power_item(options)
             return pick(p_item) if p_item else ""
         for item, n in BUILD_ORDER:
-            if have[item] < n and item in options:
+            current = have[item] + (have["apwr"] if item == "powr" else 0)
+            if current < n and item in options:
+                if item == "proc" and n >= 4 and units and tanks < 2:
+                    continue
+                if item in ("afld", "hpad") and units and tanks < 2:
+                    continue
+                if item == "dome" and units and tanks < 6:
+                    continue
+                if item in ("stek", "atek") and units and tanks < 10:
+                    continue
                 return pick(item)
-        if bank(obs) >= self.p.rich_bank:
+
+        if (b_cash >= 1500 and tanks >= 3) or b_cash >= 2500:
+            if "proc" in options and have["proc"] < 4:
+                return pick("proc")
             if "weap" in options and have["weap"] < self.p.max_weap:
                 return pick("weap")
             for b_inf in ("tent", "barr"):
@@ -366,11 +401,15 @@ class ScriptedPolicy:
             return raw_map.get(item, "")
 
         if req.queue == "Infantry":
+            if "dog" in options and units["dog"] < 3:
+                return pick("dog")
             infantry = units["e1"] + units["e2"] + units["e3"] + units["e4"] + units["shok"]
             under_attack = threat >= self.p.rush_threat_threshold
             if infantry >= self.p.max_infantry:
                 return ""
-            if not under_attack and bank(obs) < self.p.infantry_bank and have["weap"]:
+            if not under_attack and have["weap"] == 0 and infantry >= 4:
+                return ""
+            if not under_attack and bank(obs) < self.p.infantry_bank:
                 return ""
             ratio = 1 if self.seen_air else self.p.rifles_per_rocket
             if "e3" in options and units["e3"] * ratio < max(1, units["e1"] + units["e2"]):
@@ -382,28 +421,24 @@ class ScriptedPolicy:
             return pick("e1") if "e1" in options else ""
 
         if req.queue == "Vehicle":
+            tanks = units["2tnk"] + units["1tnk"] + units["3tnk"] + units["4tnk"] + units["ctnk"]
             if "harv" in options and units["harv"] < min(self.p.max_harv, self.p.harv_per_proc * have["proc"]):
                 return pick("harv")
 
-            if (
-                "mcv" in options
-                and (have["fact"] + units["mcv"] < 2)
-                and (
-                    have["fact"] == 0
-                    or (bank(obs) >= 4500 and have["weap"] >= 2 and (units["3tnk"] + units["2tnk"] + units["1tnk"]) >= 6)
-                )
-            ):
+            if "mcv" in options and have["fact"] == 0 and units["mcv"] == 0:
                 return pick("mcv")
 
             tanks = units["2tnk"] + units["1tnk"] + units["3tnk"] + units["4tnk"] + units["ctnk"]
-            if (
-                have["proc"] >= 2
-                and (units["jeep"] + units["ftrk"] < self.p.harass_raiders)
-                and (tanks >= 2 or not any(t in options for t in ("3tnk", "2tnk", "1tnk")))
-            ):
-                for raider in ("ftrk", "jeep"):
-                    if raider in options:
-                        return pick(raider)
+            flaks = units["ftrk"]
+            target_flaks = min(4, max(1, tanks // 3))
+            if self.seen_air:
+                target_flaks = max(target_flaks, 3)
+            if tanks >= 3 and flaks < target_flaks and "ftrk" in options:
+                return pick("ftrk")
+            if "jeep" in options and self.harass_built < 1 and have["proc"] >= 2:
+                self.harass_built += 1
+                return pick("jeep")
+
             arties = units["arty"] + units["v2rl"]
             siege_mode = len(self.seen_defenses) >= self.p.siege_def_threshold
             arty_ratio = self.p.siege_arty_every if siege_mode else self.p.arty_every
@@ -451,13 +486,14 @@ class ScriptedPolicy:
             return None
         if index < 0:
             return pb.Decision(request_id=req.id, choice="hold", target_index=-1)
-        vis_ene = sum(COMBAT_COST.get(base_type(u.type), 0) for u in obs.visible_enemies)
         val = ground_main_value(obs) or army_value(units)
         tgt = req.targets[index]
+        crit_buildings = {"fact", "weap", "proc"}
+        is_crit = tgt.kind == "enemy_building" and base_type(tgt.type) in crit_buildings
         use_all_in = (
-            val >= self.p.all_in_value
+            (val >= self.p.all_in_value or (val >= 8500 and is_crit) or (obs.tick >= 20000 and val >= 5500))
             and tgt.kind == "enemy_building"
-            and val >= int(2.5 * max(threat, vis_ene, 1500))
+            and threat < 1500
         )
         return pb.Decision(
             request_id=req.id,
@@ -470,19 +506,33 @@ class ScriptedPolicy:
         if not req.targets:
             return None
         if not self.attacking:
-            push_threshold = self.p.attack_value
-            if len(self.seen_defenses) >= self.p.siege_def_threshold and self.recalls > 0:
-                push_threshold = min(
-                    self.p.max_attack_value,
-                    self.p.attack_value + self.p.siege_step_value * min(3, self.recalls),
-                )
-            if threat >= 1500:
-                push_threshold = max(push_threshold, int(1.3 * threat))
+            if threat >= 400 and value > 0:
+                self.recent_threat_peak = max(self.recent_threat_peak, threat)
+                idx = self.aim(req, defending=True)
+                if idx is not None and 0 <= idx < len(req.targets):
+                    if req.targets[idx].kind == "enemy_mobile":
+                        return idx
+                return -1
+
+            self.recent_threat_peak = 0
+
+            is_allied = obs.player_faction in ALLIED_FACTIONS
+            base_push = 8500 if is_allied else self.p.attack_value
+            push_threshold = base_push
+            if obs.tick >= 22000:
+                push_threshold = min(push_threshold, 6000 if is_allied else 7500)
+            elif obs.tick >= 12000:
+                push_threshold = min(push_threshold, 8500 if is_allied else 9500)
+
             if value >= push_threshold:
                 self.attacking, self.peak = True, value
                 return self.aim(req)
             return None
         self.peak = max(self.peak, value)
+        if threat >= 1500 and threat > 0.3 * value:
+            self.attacking, self.target = False, None
+            self.recalls += 1
+            return -1
         if value < self.p.recall_fraction * self.peak:
             self.attacking, self.target = False, None
             self.recalls += 1
@@ -490,6 +540,14 @@ class ScriptedPolicy:
         self.aim_age += 1
         if self.target not in {(t.kind, t.cell_x, t.cell_y) for t in req.targets}:
             return self.aim(req)
+        # If currently tracking an exploratory target but real enemy targets were spotted, retarget immediately!
+        if self.target[0] in ("enemy_spawn", "unexplored", "stale"):
+            if any(t.kind in ("enemy_building", "enemy_harvester", "enemy_mobile") for t in req.targets):
+                return self.aim(req)
+        # If currently tracking a harvester but enemy combat units appear, prioritize them!
+        if self.target[0] == "enemy_harvester":
+            if any(t.kind == "enemy_mobile" for t in req.targets):
+                return self.aim(req)
         if self.aim_age >= self.p.max_aim_decisions:
             self.skipped.add(self.target)
             return self.aim(req)
@@ -512,9 +570,9 @@ class ScriptedPolicy:
             self.harass_skipped.add(self.harass_target)
 
         prio = (
-            ("enemy_spawn", "unexplored", "enemy_harvester", "stale", "enemy_building", "enemy_mobile")
-            if obs.explored_percent < 45.0
-            else ("enemy_harvester", "enemy_spawn", "unexplored", "stale", "enemy_building", "enemy_mobile")
+            ("unexplored", "enemy_harvester", "stale", "enemy_spawn", "enemy_building", "enemy_mobile")
+            if obs.explored_percent < 50.0
+            else ("enemy_harvester", "unexplored", "stale", "enemy_spawn", "enemy_building", "enemy_mobile")
         )
         idx = self._pick_by_priority(req, prio, self.harass_skipped)
         if idx is None:
@@ -583,11 +641,24 @@ class ScriptedPolicy:
         )
         return pb.Decision(request_id=req.id, choice="attack", target_index=idx or 0)
 
-    def aim(self, req: pb.DecisionRequest) -> int:
-        i = self.pick_target(req, self.skipped)
+    def aim(self, req: pb.DecisionRequest, defending: bool = False) -> int | None:
+        if not defending and self.target is not None and self.target not in self.skipped:
+            is_exploratory = self.target[0] in ("enemy_spawn", "unexplored", "stale")
+            has_real_targets = any(t.kind in ("enemy_building", "enemy_harvester", "enemy_mobile") for t in req.targets)
+            if is_exploratory and has_real_targets:
+                pass
+            elif self.target[0] == "enemy_harvester" and any(t.kind == "enemy_mobile" for t in req.targets):
+                pass
+            else:
+                for i, t in enumerate(req.targets):
+                    if (t.kind, t.cell_x, t.cell_y) == self.target:
+                        return i
+        i = self.pick_target(req, self.skipped, defending=defending)
         if i is None:
+            if defending:
+                return None
             self.skipped.clear()
-            i = self.pick_target(req, self.skipped) or 0
+            i = self.pick_target(req, self.skipped, defending=defending) or 0
         t = req.targets[i]
         new = (t.kind, t.cell_x, t.cell_y)
         if new != self.target:
@@ -608,8 +679,36 @@ class ScriptedPolicy:
         return None
 
     @staticmethod
-    def pick_target(req: pb.DecisionRequest, skipped: set = frozenset()) -> int | None:
-        for kind in ("enemy_building", "enemy_harvester", "enemy_mobile", "enemy_spawn", "unexplored", "stale"):
+    def pick_target(req: pb.DecisionRequest, skipped: set = frozenset(), defending: bool = False) -> int | None:
+        if defending:
+            for i, t in enumerate(req.targets):
+                if t.kind == "enemy_mobile" and (t.kind, t.cell_x, t.cell_y) not in skipped:
+                    return i
+            return None
+
+        # Attacking: kill harvesters and critical production buildings first!
+        for i, t in enumerate(req.targets):
+            if t.kind == "enemy_harvester" and (t.kind, t.cell_x, t.cell_y) not in skipped:
+                return i
+
+        crit = {"fact", "weap", "proc", "barr", "tent", "afld", "hpad"}
+        for i, t in enumerate(req.targets):
+            if (
+                t.kind == "enemy_building"
+                and base_type(t.type) in crit
+                and (t.kind, t.cell_x, t.cell_y) not in skipped
+            ):
+                return i
+
+        for i, t in enumerate(req.targets):
+            if t.kind == "enemy_building" and (t.kind, t.cell_x, t.cell_y) not in skipped:
+                return i
+
+        for i, t in enumerate(req.targets):
+            if t.kind == "enemy_spawn" and (t.kind, t.cell_x, t.cell_y) not in skipped:
+                return i
+
+        for kind in ("enemy_mobile", "unexplored", "stale"):
             for i, t in enumerate(req.targets):
                 if t.kind == kind and (t.kind, t.cell_x, t.cell_y) not in skipped:
                     return i
