@@ -5,7 +5,7 @@ import random
 import numpy as np
 
 from ra_env import StepResult, pb
-from ra_rl.features import Features
+from ra_rl.features import Features, is_tactical_request, tactical_channel_id
 from ra_rl.model import NEG
 from ra_rl.vocab import QUEUE_INDEX
 
@@ -26,7 +26,7 @@ class RandomPolicy:
         self.feats.observe(step.obs)
         out = []
         for req in step.pending:
-            mask = self.feats.candidates(req)[1] if req.kind == pb.DECIDE_ARMY else self.feats.item_mask(req)
+            mask = self.feats.candidates(req)[1] if is_tactical_request(req) else self.feats.item_mask(req)
             a = self.rng.choice(np.flatnonzero(mask).tolist())
             d = self.feats.decision(req, a)
             self.feats.record(req, d)
@@ -72,12 +72,13 @@ class NetPolicy:
         out = []
         with torch.no_grad():
             for req in step.pending:
-                if req.kind == pb.DECIDE_ARMY:
+                if is_tactical_request(req):
                     cand, mask = self.feats.candidates(req)
                     mask_t = torch.from_numpy(mask).unsqueeze(0)
-                    logits = self.net.army_logits(g, torch.from_numpy(cand).unsqueeze(0), mask_t)
+                    grp_t = torch.tensor([tactical_channel_id(req)], dtype=torch.long)
+                    logits = self.net.army_logits(g, torch.from_numpy(cand).unsqueeze(0), mask_t, grp_t)
                 else:
-                    queue = torch.tensor([QUEUE_INDEX.get(req.queue, 0)])
+                    queue = torch.tensor([QUEUE_INDEX.get(req.queue, 0)], dtype=torch.long)
                     mask_t = torch.from_numpy(self.feats.item_mask(req)).unsqueeze(0)
                     logits = self.net.item_logits(g, queue, mask_t)
                 if self.temperature > 0.0:

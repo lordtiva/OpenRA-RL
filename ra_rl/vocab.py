@@ -22,13 +22,42 @@ UNITS = INFANTRY + VEHICLES + AIRCRAFT + SHIPS
 ITEMS = BUILDINGS + UNITS
 
 QUEUES = ("Building", "Defense", "Infantry", "Vehicle", "Aircraft", "Ship")
-TARGET_KINDS = ("enemy_spawn", "enemy_building", "unexplored", "stale")
+TARGET_KINDS = ("enemy_spawn", "enemy_building", "enemy_harvester", "enemy_mobile", "unexplored", "stale")
+
+FACTIONS = ("england", "france", "germany", "russia", "ukraine")
+ALLIED_FACTIONS = frozenset({"england", "france", "germany"})
+SOVIET_FACTIONS = frozenset({"russia", "ukraine"})
+
+ALLIED_ONLY_ACTORS = frozenset({
+    "tent", "pbox", "hbox", "gun", "agun", "fix", "hpad", "atek", "gap", "pdox",
+    "jeep", "1tnk", "2tnk", "arty", "apc", "mrj", "mgg", "ctnk", "medi", "mech", "spy", "thf",
+    "mh60", "heli",
+})
+SOVIET_ONLY_ACTORS = frozenset({
+    "barr", "kenn", "ftur", "tsla", "sam", "afld", "stek", "iron", "mslo",
+    "3tnk", "4tnk", "v2rl", "ftrk", "ttnk", "dtrk", "qtnk", "stnk", "dog", "e2", "e4", "shok",
+    "yak", "mig",
+})
+
+ARMY_GROUPS = ("MAIN", "HARASS", "AIR")
+SUPPORT_POWERS = (
+    "SovietSpyPlane",
+    "SovietParatroopers",
+    "UkraineParabombs",
+    "Chronoshift",
+    "AdvancedChronoshift",
+    "NukePowerInfoOrder",
+    "GrantExternalConditionPowerInfoOrder",
+)
+TACTICAL_CHANNELS = ARMY_GROUPS + SUPPORT_POWERS + ("OTHER_SUPPORT",)
 
 BUILDING_INDEX = {t: i for i, t in enumerate(BUILDINGS)}
 UNIT_INDEX = {t: i for i, t in enumerate(UNITS)}
 ITEM_INDEX = {t: i for i, t in enumerate(ITEMS)}
 QUEUE_INDEX = {q: i for i, q in enumerate(QUEUES)}
 KIND_INDEX = {k: i for i, k in enumerate(TARGET_KINDS)}
+FACTION_INDEX = {f: i for i, f in enumerate(FACTIONS)}
+TACTICAL_INDEX = {c: i for i, c in enumerate(TACTICAL_CHANNELS)}
 
 # Valued.Cost from the rules.
 COST = {
@@ -51,7 +80,7 @@ NON_COMBAT = frozenset({"harv", "mcv", "truk", "mnly", "tran", "lst", "e6", "spy
 
 
 def base_type(actor_type: str) -> str:
-    """Faction variants share the base type (e.g. "spy.england" -> "spy")."""
+    """Faction variants share the base type (e.g. "spy.england" -> "spy", "afld.ukraine" -> "afld")."""
     return actor_type.split(".", 1)[0]
 
 

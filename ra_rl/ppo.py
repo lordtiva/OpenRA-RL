@@ -1,19 +1,17 @@
-"""PPO training for the commander network (Phase 3 v2).
+"""PPO training for the commander network (Commander v4).
 
-    python -m ra_rl.ppo --init runs/phase2_5/bc_s3/model.pt --out runs/phase3/ppo_v2
+    python -m ra_rl.ppo --init runs/v4/bc_v4/model.pt --out runs/v4/ppo
 
 Key architectural & algorithmic safeguards:
 - Decoupled Asymmetric Critic V(g, priv) (CTDE): separate network trunk reading
-  spectator summary + opponent identity during training only; zero gradient
-  interference on the actor trunk, plus initial critic warmup (--critic-warmup-iters).
-- Joint-Step SMDP GAE: simultaneous decisions at the same tick share a single
-  temporal StepNode (no fake intra-tick decay), discounted continuously by elapsed
-  game ticks gamma^(dt / gamma_ticks).
+  player-relative spectator summary + opponent identity during training only.
+- Joint-Step SMDP GAE: simultaneous decisions at the same tick (BUILD, TRAIN,
+  MAIN, HARASS, AIR, SUPPORT) share a single temporal StepNode, discounted
+  continuously by elapsed game ticks gamma^(dt / gamma_ticks).
 - Exact telescoping Potential-Based Reward Shaping (PBRS, Ng et al. 1999) with
   Phi(s_terminal) = 0, preserving optimal-policy invariance.
-- Masked KL anchor to frozen BC reference model (--kl-coef), preventing catastrophic
-  forgetting and unit-composition drift (harvester/pillbox spam, WAIT/KEEP deadlocks).
-- Behavioral telemetry logged every iteration + clean daemon recycling in eval.
+- Masked KL anchor to frozen BC reference model (--kl-coef / --kl-coef-army),
+  supporting independent production vs tactical KL decay in self-play.
 """
 
 import argparse
@@ -38,30 +36,34 @@ except ImportError:
     SummaryWriter = None
     HAS_TB = False
 
-from ra_env import Bridge, GameSession, MatchConfig, daemons, pb
-from ra_rl.eval import DEFAULT_DAEMONS, evaluate
+from ra_env import Bridge, GameSession, MatchConfig, StepResult, daemons, pb
+from ra_rl.eval import DEFAULT_DAEMONS, evaluate, is_win
 from ra_rl.features import (
+    ALL_IN_OFFSET,
     HOLD,
     KEEP,
     MAX_TARGETS,
     WAIT,
     Features,
+    is_tactical_request,
     opponent_id,
     privileged_features,
     state_potential,
+    tactical_channel_id,
 )
 from ra_rl.model import NEG, CommanderNet
-from ra_rl.vocab import ITEM_INDEX, QUEUE_INDEX
+from ra_rl.vocab import ITEM_INDEX, QUEUE_INDEX, TACTICAL_INDEX
 
 TERMINAL_REWARDS = {
     "win": 1.0,
+    "win_early": 1.0,
     "lose": -1.0,
     "draw": 0.0,
     "truncated": -0.5,
 }
 
 PROD_KEYS = ("g", "queue", "mask", "action", "old_lp", "adv", "bot_idx")
-ARMY_KEYS = ("g", "cand", "mask", "action", "old_lp", "adv", "bot_idx")
+ARMY_KEYS = ("g", "group", "cand", "mask", "action", "old_lp", "adv", "bot_idx")
 STEP_KEYS = ("g", "priv", "ret", "val", "bot_idx")
 
 
@@ -71,13 +73,13 @@ def pack(d: dict[str, list], keys: tuple[str, ...]) -> dict[str, np.ndarray]:
         if not d.get(k):
             dtype = (
                 bool if k == "mask"
-                else np.int64 if k in ("queue", "action", "bot_idx")
+                else np.int64 if k in ("queue", "group", "action", "bot_idx")
                 else np.float32
             )
             res[k] = np.zeros((0,), dtype=dtype)
         elif k in ("g", "priv", "cand", "adv", "ret", "val", "old_lp"):
             res[k] = np.asarray(d[k], dtype=np.float32)
-        elif k in ("queue", "action", "bot_idx"):
+        elif k in ("queue", "group", "action", "bot_idx"):
             res[k] = np.asarray(d[k], dtype=np.int64)
         elif k == "mask":
             res[k] = np.asarray(d[k], dtype=bool)
@@ -94,6 +96,7 @@ class ProdDecision:
 
 @dataclass
 class ArmyDecision:
+    group: int
     cand: np.ndarray
     mask: np.ndarray
     action: int
@@ -116,8 +119,8 @@ class StepNode:
     def add_item(self, queue: int, mask: np.ndarray, action: int, log_prob: float) -> None:
         self.items.append(ProdDecision(queue=queue, mask=mask, action=action, log_prob=log_prob))
 
-    def add_army(self, cand: np.ndarray, mask: np.ndarray, action: int, log_prob: float) -> None:
-        self.armies.append(ArmyDecision(cand=cand, mask=mask, action=action, log_prob=log_prob))
+    def add_army(self, cand: np.ndarray, mask: np.ndarray, action: int, log_prob: float, group: int = 0) -> None:
+        self.armies.append(ArmyDecision(group=group, cand=cand, mask=mask, action=action, log_prob=log_prob))
 
 
 class GameTrajectory:
@@ -194,6 +197,7 @@ class GameTrajectory:
 
             for ar in node.armies:
                 army_data["g"].append(node.g)
+                army_data["group"].append(ar.group)
                 army_data["cand"].append(ar.cand)
                 army_data["mask"].append(ar.mask)
                 army_data["action"].append(ar.action)
@@ -263,31 +267,114 @@ def compute_behavior_stats(prod_np: dict[str, np.ndarray], army_np: dict[str, np
     out["beh_bld_wait_pct"] = round(100.0 * float((a_arr[bld_idx] == WAIT).mean()), 1) if bld_idx.any() else 0.0
 
     def_idx = q_arr == QUEUE_INDEX["Defense"]
-    pbox_id = ITEM_INDEX["pbox"]
-    out["beh_def_pbox_pct"] = round(100.0 * float((a_arr[def_idx] == pbox_id).mean()), 1) if def_idx.any() else 0.0
+    pbox_ids = np.array([ITEM_INDEX["pbox"], ITEM_INDEX["ftur"]], dtype=np.int64)
+    out["beh_def_pbox_pct"] = (
+        round(100.0 * float(np.isin(a_arr[def_idx], pbox_ids).mean()), 1) if def_idx.any() else 0.0
+    )
 
     veh_idx = q_arr == QUEUE_INDEX["Vehicle"]
     if veh_idx.any():
         veh_a = a_arr[veh_idx]
+        tank_ids = np.array([ITEM_INDEX[t] for t in ("1tnk", "2tnk", "3tnk", "4tnk", "ctnk")], dtype=np.int64)
+        arty_ids = np.array([ITEM_INDEX["arty"], ITEM_INDEX["v2rl"]], dtype=np.int64)
         out["beh_veh_harv_pct"] = round(100.0 * float((veh_a == ITEM_INDEX["harv"]).mean()), 1)
-        out["beh_veh_2tnk_pct"] = round(100.0 * float((veh_a == ITEM_INDEX["2tnk"]).mean()), 1)
-        out["beh_veh_arty_pct"] = round(100.0 * float((veh_a == ITEM_INDEX["arty"]).mean()), 1)
+        out["beh_veh_2tnk_pct"] = round(100.0 * float(np.isin(veh_a, tank_ids).mean()), 1)
+        out["beh_veh_arty_pct"] = round(100.0 * float(np.isin(veh_a, arty_ids).mean()), 1)
     else:
         out["beh_veh_harv_pct"] = 0.0
         out["beh_veh_2tnk_pct"] = 0.0
         out["beh_veh_arty_pct"] = 0.0
 
+    air_idx = q_arr == QUEUE_INDEX["Aircraft"]
+    out["beh_air_train_pct"] = round(100.0 * float((a_arr[air_idx] != WAIT).mean()), 1) if air_idx.any() else 0.0
+
     army_a = army_np.get("action", np.zeros((0,), dtype=np.int64))
+    army_grp = army_np.get("group", np.zeros_like(army_a))
     if len(army_a) > 0:
-        out["beh_army_atk_pct"] = round(100.0 * float((army_a < MAX_TARGETS).mean()), 1)
+        out["beh_army_atk_pct"] = round(100.0 * float((army_a < HOLD).mean()), 1)
+        out["beh_army_allin_pct"] = round(
+            100.0 * float(((army_a >= ALL_IN_OFFSET) & (army_a < HOLD)).mean()), 1
+        )
         out["beh_army_keep_pct"] = round(100.0 * float((army_a == KEEP).mean()), 1)
         out["beh_army_hold_pct"] = round(100.0 * float((army_a == HOLD).mean()), 1)
+        har_mask = army_grp == TACTICAL_INDEX["HARASS"]
+        out["beh_harass_atk_pct"] = (
+            round(100.0 * float((army_a[har_mask] < MAX_TARGETS).mean()), 1) if har_mask.any() else 0.0
+        )
     else:
         out["beh_army_atk_pct"] = 0.0
+        out["beh_army_allin_pct"] = 0.0
         out["beh_army_keep_pct"] = 0.0
         out["beh_army_hold_pct"] = 0.0
+        out["beh_harass_atk_pct"] = 0.0
 
     return out
+
+
+def step_trajectory(
+    step: StepResult,
+    feats: Features,
+    traj: GameTrajectory,
+    net: CommanderNet,
+    bot_name: str,
+    b_idx: int,
+) -> tuple[list[pb.Decision], int]:
+    """Observe one side's StepResult, sample on-policy actions, and record a joint StepNode."""
+    feats.observe(step.obs)
+    if not step.pending:
+        return [], 0
+
+    priv = privileged_features(step.obs, bot_name)
+    phi = state_potential(step.obs)
+    g_tensor = torch.from_numpy(feats.g).unsqueeze(0)
+    priv_tensor = torch.from_numpy(priv).unsqueeze(0)
+    with torch.no_grad():
+        val = float(net.value(g_tensor, priv_tensor).item())
+
+    node = traj.begin_step(
+        tick=step.obs.tick, g=feats.g, priv=priv, val=val, phi=phi, bot_idx=b_idx,
+    )
+
+    answer: list[pb.Decision] = []
+    decisions = 0
+    for req in step.pending:
+        if is_tactical_request(req):
+            cand, mask = feats.candidates(req)
+            grp = tactical_channel_id(req)
+            cand_t = torch.from_numpy(cand).unsqueeze(0)
+            mask_t = torch.from_numpy(mask).unsqueeze(0)
+            grp_t = torch.tensor([grp], dtype=torch.long)
+            with torch.no_grad():
+                logits = net.army_logits(g_tensor, cand_t, mask_t, grp_t)
+                dist = Categorical(logits=logits)
+                action = int(dist.sample().item())
+                lp = float(dist.log_prob(torch.tensor(action)).item())
+
+            d = feats.decision(req, action)
+            feats.record(req, d)
+            if d is not None:
+                answer.append(d)
+            node.add_army(cand, mask, action, lp, group=grp)
+            decisions += 1
+        else:
+            q_idx = QUEUE_INDEX.get(req.queue, 0)
+            q_t = torch.tensor([q_idx], dtype=torch.long)
+            mask = feats.item_mask(req)
+            mask_t = torch.from_numpy(mask).unsqueeze(0)
+            with torch.no_grad():
+                logits = net.item_logits(g_tensor, q_t, mask_t)
+                dist = Categorical(logits=logits)
+                action = int(dist.sample().item())
+                lp = float(dist.log_prob(torch.tensor(action)).item())
+
+            d = feats.decision(req, action)
+            feats.record(req, d)
+            if d is not None:
+                answer.append(d)
+            node.add_item(q_idx, mask, action, lp)
+            decisions += 1
+
+    return answer, decisions
 
 
 def collect_game(
@@ -309,60 +396,17 @@ def collect_game(
     decisions = 0
     error = ""
     outcome = "error"
+    faction = ""
 
     try:
         step = session.reset(seed)
+        faction = step.obs.player_faction
         while not (step.done or step.truncated):
-            feats.observe(step.obs)
-            answer: list[pb.Decision] = []
-            if step.pending:
-                priv = privileged_features(step.obs, match.bot)
-                phi = state_potential(step.obs)
-                g_tensor = torch.from_numpy(feats.g).unsqueeze(0)
-                priv_tensor = torch.from_numpy(priv).unsqueeze(0)
-                with torch.no_grad():
-                    val = float(net.value(g_tensor, priv_tensor).item())
-
-                node = traj.begin_step(
-                    tick=step.obs.tick, g=feats.g, priv=priv, val=val, phi=phi, bot_idx=b_idx,
-                )
-
-                for req in step.pending:
-                    if req.kind == pb.DECIDE_ARMY:
-                        cand, mask = feats.candidates(req)
-                        cand_t = torch.from_numpy(cand).unsqueeze(0)
-                        mask_t = torch.from_numpy(mask).unsqueeze(0)
-                        with torch.no_grad():
-                            logits = net.army_logits(g_tensor, cand_t, mask_t)
-                            dist = Categorical(logits=logits)
-                            action = int(dist.sample().item())
-                            lp = float(dist.log_prob(torch.tensor(action)).item())
-
-                        d = feats.decision(req, action)
-                        feats.record(req, d)
-                        if d is not None:
-                            answer.append(d)
-                        node.add_army(cand, mask, action, lp)
-                        decisions += 1
-                    else:
-                        q_idx = QUEUE_INDEX.get(req.queue, 0)
-                        q_t = torch.tensor([q_idx])
-                        mask = feats.item_mask(req)
-                        mask_t = torch.from_numpy(mask).unsqueeze(0)
-                        with torch.no_grad():
-                            logits = net.item_logits(g_tensor, q_t, mask_t)
-                            dist = Categorical(logits=logits)
-                            action = int(dist.sample().item())
-                            lp = float(dist.log_prob(torch.tensor(action)).item())
-
-                        d = feats.decision(req, action)
-                        feats.record(req, d)
-                        if d is not None:
-                            answer.append(d)
-                        node.add_item(q_idx, mask, action, lp)
-                        decisions += 1
-
+            answer, n_dec = step_trajectory(step, feats, traj, net, match.bot, b_idx)
+            decisions += n_dec
             step = session.step(answer, step_ticks)
+            if not faction and step.obs.player_faction:
+                faction = step.obs.player_faction
         outcome = step.result or "truncated"
     except (grpc.RpcError, RuntimeError) as e:
         error = repr(e)
@@ -385,8 +429,8 @@ def collect_game(
         step_data = {k: [] for k in STEP_KEYS}
 
     meta = {
-        "seed": seed, "bot": match.bot, "outcome": outcome, "ticks": session.tick,
-        "decisions": decisions, "steps_joint": len(traj.steps),
+        "seed": seed, "bot": match.bot, "faction": faction, "outcome": outcome,
+        "ticks": session.tick, "decisions": decisions, "steps_joint": len(traj.steps),
         "wall_s": round(time.perf_counter() - t0, 1), "error": error,
     }
     return meta, prod_data, army_data, step_data
@@ -474,12 +518,13 @@ def collect_rollouts(
     outcomes: dict[str, int] = {}
     for m in valid_metas:
         outcomes[m["outcome"]] = outcomes.get(m["outcome"], 0) + 1
+    wins = sum(1 for m in valid_metas if is_win(m["outcome"]))
 
     stats = {
         "games_collected": len(valid_metas),
         "games_failed": len(metas) - len(valid_metas),
         "outcomes": outcomes,
-        "win_rate": round(outcomes.get("win", 0) / max(1, len(valid_metas)), 3),
+        "win_rate": round(wins / max(1, len(valid_metas)), 3),
         "mean_ticks": round(sum(m["ticks"] for m in valid_metas) / max(1, len(valid_metas))),
         "mean_decisions": round(sum(m["decisions"] for m in valid_metas) / max(1, len(valid_metas)), 1),
         "n_prod": len(packed_prod.get("g", [])),
@@ -501,7 +546,7 @@ def to_torch_dict(d: dict[str, np.ndarray], device: str) -> dict[str, torch.Tens
         t = torch.from_numpy(v)
         if k in ("g", "priv", "cand", "adv", "ret", "val", "old_lp"):
             t = t.float()
-        elif k in ("queue", "action", "bot_idx"):
+        elif k in ("queue", "group", "action", "bot_idx"):
             t = t.long()
         elif k == "mask":
             t = t.bool()
@@ -523,6 +568,7 @@ def ppo_update(
     clip_eps: float = 0.2,
     ent_coef: float = 0.005,
     kl_coef: float = 0.03,
+    kl_coef_army: float | None = None,
     army_weight: float = 1.0,
     max_grad_norm: float = 0.5,
     target_kl: float = 0.025,
@@ -531,6 +577,7 @@ def ppo_update(
     if ref_net is not None:
         ref_net.eval()
     device = next(net.parameters()).device
+    kl_a_coef = kl_coef if kl_coef_army is None else kl_coef_army
 
     n_prod = len(prod.get("g", []))
     n_army = len(army.get("g", []))
@@ -546,7 +593,6 @@ def ppo_update(
         "early_stopped": False, "critic_only": critic_only,
     }
 
-    # 1. Update decoupled Asymmetric Critic on unique joint StepNodes (runs even in warmup).
     if n_step > 0:
         c_batch = min(batch_size, max(128, n_step // 4))
         c_steps_per_epoch = max(1, (n_step + c_batch - 1) // c_batch)
@@ -579,7 +625,6 @@ def ppo_update(
             "epochs_ran": 0, "early_stopped": False, "critic_only": critic_only,
         }
 
-    # 2. Update Actor heads + trunk with PPO-clip + masked KL anchor to BC teacher.
     actor_params = list(net.actor_parameters())
     steps_per_epoch = max(1, n_prod // batch_size) if n_prod > 0 else max(1, n_army // batch_size)
     army_batch = max(1, batch_size * n_army // max(1, n_prod)) if n_prod > 0 and n_army > 0 else batch_size
@@ -621,7 +666,8 @@ def ppo_update(
             if n_army > 0:
                 ai = torch.randint(0, n_army, (min(n_army, army_batch),), device=device)
                 g_a, c_a, m_a = army["g"][ai], army["cand"][ai], army["mask"][ai]
-                logits_a = net.army_logits(g_a, c_a, m_a)
+                grp_a = army["group"][ai] if "group" in army and len(army["group"]) == n_army else None
+                logits_a = net.army_logits(g_a, c_a, m_a, grp_a)
                 dist_a = Categorical(logits=logits_a)
                 new_lp_a = dist_a.log_prob(army["action"][ai])
                 log_ratio_a = torch.clamp(new_lp_a - army["old_lp"][ai], -10.0, 10.0)
@@ -634,12 +680,12 @@ def ppo_update(
                 kl_a = ((ratio_a - 1.0) - log_ratio_a).mean()
 
                 kl_ref_a = torch.tensor(0.0, device=device)
-                if ref_net is not None and kl_coef > 0.0:
+                if ref_net is not None and kl_a_coef > 0.0:
                     with torch.no_grad():
-                        ref_logits_a = ref_net.army_logits(g_a, c_a, m_a)
+                        ref_logits_a = ref_net.army_logits(g_a, c_a, m_a, grp_a)
                     kl_ref_a = masked_kl(logits_a, ref_logits_a, m_a)
 
-                total_loss = total_loss + army_weight * (pi_loss_a + kl_coef * kl_ref_a) - ent_coef * ent_a
+                total_loss = total_loss + army_weight * (pi_loss_a + kl_a_coef * kl_ref_a) - ent_coef * ent_a
                 metrics["pi_loss_army"] += float(pi_loss_a.item())
                 metrics["ent_army"] += float(ent_a.item())
                 metrics["kl_army"] += float(kl_a.item())
@@ -687,27 +733,29 @@ def policy_spec(ckpt_path: Path, eval_temp: float) -> str:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--init", default="runs/phase2_5/bc_s3/model.pt", help="starting checkpoint (BC or previous PPO)")
+    ap.add_argument("--init", default="runs/v4/bc_v4/model.pt", help="starting checkpoint")
     ap.add_argument("--ref", default="", help="frozen KL anchor checkpoint (defaults to --init)")
     ap.add_argument("--out", required=True, help="output directory for checkpoints and logs")
     ap.add_argument("--iterations", type=int, default=80, help="total PPO iterations")
     ap.add_argument("--games-per-iter", type=int, default=48, help="number of games collected per iteration")
     ap.add_argument("--bot", default="hard", help="opponent difficulty during training")
+    ap.add_argument("--player-faction", default="Random")
+    ap.add_argument("--enemy-faction", default="Random")
     ap.add_argument("--map", default=MatchConfig.map_name)
     ap.add_argument("--max-ticks", type=int, default=54000)
     ap.add_argument("--daemons", default=DEFAULT_DAEMONS)
-    ap.add_argument("--seed-base", type=int, default=100000, help="starting seed for rollouts (never overlaps with eval)")
-    ap.add_argument("--lr", type=float, default=5e-5, help="actor learning rate")
-    ap.add_argument("--critic-lr", type=float, default=3e-4, help="decoupled critic learning rate")
-    ap.add_argument("--critic-warmup-iters", type=int, default=6, help="train critic only for the first N iterations")
-    ap.add_argument("--reset-critic", action="store_true", help="re-initialize critic weights on load")
+    ap.add_argument("--seed-base", type=int, default=100000)
+    ap.add_argument("--lr", type=float, default=5e-5)
+    ap.add_argument("--critic-lr", type=float, default=3e-4)
+    ap.add_argument("--critic-warmup-iters", type=int, default=6)
+    ap.add_argument("--reset-critic", action="store_true")
     ap.add_argument("--weight-decay", type=float, default=1e-4)
-    ap.add_argument("--gamma", type=float, default=0.995, help="discount factor per --gamma-ticks ticks")
-    ap.add_argument("--gamma-ticks", type=float, default=250.0, help="reference tick interval for SMDP discounting")
-    ap.add_argument("--gae-lambda", type=float, default=0.98, help="GAE lambda")
-    ap.add_argument("--pbrs-coef", type=float, default=0.15, help="exact telescoping PBRS weight (0 disables)")
-    ap.add_argument("--kl-coef", type=float, default=0.03, help="KL penalty toward --ref teacher (0 disables)")
-    ap.add_argument("--ppo-epochs", type=int, default=4, help="optimization epochs per iteration")
+    ap.add_argument("--gamma", type=float, default=0.995)
+    ap.add_argument("--gamma-ticks", type=float, default=250.0)
+    ap.add_argument("--gae-lambda", type=float, default=0.98)
+    ap.add_argument("--pbrs-coef", type=float, default=0.15)
+    ap.add_argument("--kl-coef", type=float, default=0.03)
+    ap.add_argument("--ppo-epochs", type=int, default=4)
     ap.add_argument("--batch-size", type=int, default=2048)
     ap.add_argument("--clip-eps", type=float, default=0.2)
     ap.add_argument("--ent-coef", type=float, default=0.005)
@@ -716,13 +764,13 @@ def main() -> None:
     ap.add_argument("--army-weight", type=float, default=1.0)
     ap.add_argument("--max-grad-norm", type=float, default=0.5)
     ap.add_argument("--target-kl", type=float, default=0.025)
-    ap.add_argument("--eval-every", type=int, default=10, help="evaluate every N iterations")
-    ap.add_argument("--eval-games", type=int, default=100)
-    ap.add_argument("--eval-seeds-base", type=int, default=20000, help="selection seeds (20000-20199)")
-    ap.add_argument("--eval-temp", type=float, default=0.0, help="evaluation softmax temperature (0.0 = argmax)")
+    ap.add_argument("--eval-every", type=int, default=10)
+    ap.add_argument("--eval-games", type=int, default=60)
+    ap.add_argument("--eval-seeds-base", type=int, default=20000)
+    ap.add_argument("--eval-temp", type=float, default=0.0)
     ap.add_argument("--save-every", type=int, default=5)
     ap.add_argument("--recycle-every", type=int, default=50)
-    ap.add_argument("--tb", action=argparse.BooleanOptionalAction, default=True, help="log metrics to TensorBoard")
+    ap.add_argument("--tb", action=argparse.BooleanOptionalAction, default=True)
     args = ap.parse_args()
 
     out = Path(args.out)
@@ -733,11 +781,10 @@ def main() -> None:
 
     ref_path = args.ref or args.init
     print(json.dumps({
-        "msg": "Starting Phase 3 v2 SMDP-PPO",
+        "msg": "Starting Commander v4 SMDP-PPO",
         "init": args.init, "ref": ref_path, "out": str(out),
         "device": device, "daemons": len(daemons_list), "games_per_iter": args.games_per_iter,
-        "gamma": args.gamma, "gamma_ticks": args.gamma_ticks, "gae_lambda": args.gae_lambda,
-        "pbrs_coef": args.pbrs_coef, "kl_coef": args.kl_coef, "critic_warmup": args.critic_warmup_iters,
+        "player_faction": args.player_faction, "kl_coef": args.kl_coef,
     }), flush=True)
 
     net = CommanderNet.load(args.init, device=device)
@@ -756,7 +803,14 @@ def main() -> None:
     log = (out / "metrics.jsonl").open("a", encoding="utf-8")
 
     t_start = time.perf_counter()
-    match = MatchConfig(map_name=args.map, bot=args.bot, max_ticks=args.max_ticks, brain="external")
+    match = MatchConfig(
+        map_name=args.map,
+        bot=args.bot,
+        player_faction=args.player_faction,
+        enemy_faction=args.enemy_faction,
+        max_ticks=args.max_ticks,
+        brain="external",
+    )
 
     for it in range(1, args.iterations + 1):
         t_it = time.perf_counter()
@@ -816,12 +870,10 @@ def main() -> None:
         }
 
         if args.eval_every > 0 and it % args.eval_every == 0:
-            print(f"[Iter {it}] Running evaluation ({args.eval_games} games vs {args.bot})...", flush=True)
-            eval_match = MatchConfig(map_name=args.map, bot=args.bot, max_ticks=args.max_ticks)
             eval_summary = evaluate(
                 daemons=daemons_list,
                 policy=policy_spec(out / "checkpoint_latest.pt", args.eval_temp),
-                match=eval_match,
+                match=match,
                 games=args.eval_games,
                 seed_base=args.eval_seeds_base,
                 step_ticks=500,
@@ -829,16 +881,14 @@ def main() -> None:
                 recycle_every=args.recycle_every,
                 pre_recycle=True,
             )
-            err_count = eval_summary["outcomes"].get("error", 0)
-            it_record["eval"] = {
-                "games": eval_summary["games"],
-                "win_rate": eval_summary["win_rate"],
-                "win_rate_ci95": eval_summary["win_rate_ci95"],
-                "outcomes": eval_summary["outcomes"],
-            }
-            if eval_summary["win_rate"] > best_eval_wr and err_count <= max(2, args.eval_games // 10):
-                best_eval_wr = eval_summary["win_rate"]
-                net.save(str(out / "checkpoint_best.pt"), iteration=it, eval=eval_summary)
+            eval_wr = eval_summary["win_rate"]
+            eval_errors = eval_summary["outcomes"].get("error", 0)
+            it_record["eval_win_rate"] = eval_wr
+            it_record["eval_ci95"] = eval_summary["win_rate_ci95"]
+            it_record["eval_outcomes"] = eval_summary["outcomes"]
+            if eval_wr > best_eval_wr and eval_errors <= max(2, args.eval_games // 10):
+                best_eval_wr = eval_wr
+                net.save(str(out / "checkpoint_best.pt"), iteration=it, eval_win_rate=eval_wr, eval=eval_summary)
                 it_record["new_best"] = True
 
         log.write(json.dumps(it_record) + "\n")
@@ -847,32 +897,13 @@ def main() -> None:
 
         if writer is not None:
             writer.add_scalar("rollout/win_rate", collect_stats["win_rate"], it)
-            writer.add_scalar("rollout/mean_ticks", collect_stats["mean_ticks"], it)
-            writer.add_scalar("rollout/mean_decisions", collect_stats["mean_decisions"], it)
             writer.add_scalar("rollout/explained_var", collect_stats["explained_var"], it)
-            writer.add_scalar("behavior/veh_harv_pct", collect_stats["beh_veh_harv_pct"], it)
-            writer.add_scalar("behavior/veh_2tnk_pct", collect_stats["beh_veh_2tnk_pct"], it)
-            writer.add_scalar("behavior/bld_wait_pct", collect_stats["beh_bld_wait_pct"], it)
-            writer.add_scalar("behavior/army_atk_pct", collect_stats["beh_army_atk_pct"], it)
-
-            writer.add_scalar("loss/policy_prod", update_metrics["pi_loss_prod"], it)
-            writer.add_scalar("loss/policy_army", update_metrics["pi_loss_army"], it)
             writer.add_scalar("loss/value", update_metrics["val_loss"], it)
-            writer.add_scalar("policy/entropy_prod", update_metrics["ent_prod"], it)
-            writer.add_scalar("policy/entropy_army", update_metrics["ent_army"], it)
-            writer.add_scalar("policy/kl_ref_prod", update_metrics["kl_ref_prod"], it)
-            writer.add_scalar("policy/kl_ref_army", update_metrics["kl_ref_army"], it)
-
-            if "eval" in it_record:
-                writer.add_scalar("eval/win_rate", eval_summary["win_rate"], it)
-                writer.add_scalar("eval/mean_ticks", eval_summary["mean_ticks"], it)
-
             writer.flush()
 
     log.close()
     if writer is not None:
         writer.close()
-    print(f"PPO complete in {time.perf_counter() - t_start:.0f}s. Best eval win rate: {best_eval_wr}", flush=True)
 
 
 if __name__ == "__main__":

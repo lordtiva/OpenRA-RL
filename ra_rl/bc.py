@@ -1,7 +1,7 @@
-"""Behavior cloning: train the commander network on recorded games.
+"""Behavior cloning (Commander v4): train the commander network on recorded games.
 
-    python -m ra_rl.bc --data data/scripted_v2 --out runs/phase2_5/bc_s0
-    python -m ra_rl.bc --data data/scripted_v2,data/dagger1_v2 --out runs/phase2_5/bc_s3
+    python -m ra_rl.bc --data data/scripted_v4 --out runs/v4/bc_s0
+    python -m ra_rl.bc --data data/scripted_v4,data/dagger1_v4 --out runs/v4/bc_v4
 
 The validation split is by game (every 20th seed), never by row. The checkpoint
 with the lowest validation loss is kept as <out>/model.pt; per-epoch metrics go
@@ -20,7 +20,10 @@ import torch.nn.functional as F
 from ra_rl.features import FEATURE_VERSION, GLOBAL_DIM
 from ra_rl.model import CommanderNet
 
-ARRAYS = ("prod_g", "prod_queue", "prod_mask", "prod_y", "army_g", "army_cand", "army_mask", "army_y")
+ARRAYS = (
+    "prod_g", "prod_queue", "prod_mask", "prod_y",
+    "army_g", "army_group", "army_cand", "army_mask", "army_y",
+)
 
 
 def load(dirs: list[str], val_every: int = 20) -> tuple[dict, dict, dict]:
@@ -40,7 +43,11 @@ def load(dirs: list[str], val_every: int = 20) -> tuple[dict, dict, dict]:
                 )
             split = "val" if meta["seed"] % val_every == 0 else "train"
             for k in ARRAYS:
-                if len(z[k]):
+                if k == "army_group" and "army_group" not in z:
+                    if len(z["army_y"]):
+                        parts[split]["army_group"].append(np.zeros(len(z["army_y"]), dtype=np.int8))
+                    continue
+                if k in z and len(z[k]):
                     parts[split][k].append(z[k])
             stats["games"] += 1
             stats["outcomes"][meta["outcome"]] = stats["outcomes"].get(meta["outcome"], 0) + 1
@@ -57,7 +64,7 @@ def to_device(arrays: dict[str, np.ndarray], device: str) -> dict[str, torch.Ten
         t = torch.from_numpy(v)
         if k.endswith(("_g", "_cand")):
             t = t.float()
-        elif k.endswith(("_y", "_queue")):
+        elif k.endswith(("_y", "_queue", "_group")):
             t = t.long()
         out[k] = t.to(device)
     return out
@@ -71,7 +78,8 @@ def losses(net: CommanderNet, d: dict[str, torch.Tensor], pi: torch.Tensor, ai: 
         out["prod_loss"] = F.cross_entropy(logits, y)
         out["prod_acc"] = (logits.argmax(-1) == y).float().mean()
     if len(ai):
-        logits = net.army_logits(d["army_g"][ai], d["army_cand"][ai], d["army_mask"][ai])
+        grp = d["army_group"][ai] if "army_group" in d else None
+        logits = net.army_logits(d["army_g"][ai], d["army_cand"][ai], d["army_mask"][ai], grp)
         y = d["army_y"][ai]
         out["army_loss"] = F.cross_entropy(logits, y)
         out["army_acc"] = (logits.argmax(-1) == y).float().mean()
@@ -100,7 +108,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--data", required=True, help="comma-separated directories of recorded games")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--epochs", type=int, default=20)
+    ap.add_argument("--epochs", type=int, default=25)
     ap.add_argument("--batch", type=int, default=1024)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=1e-4)
@@ -121,9 +129,12 @@ def main() -> None:
         raise SystemExit("need BUILD/TRAIN and ARMY rows in both splits: record more games or lower --val-every")
     train, val = to_device(train_np, device), to_device(val_np, device)
     n_prod, n_army = len(train["prod_y"]), len(train["army_y"])
-    print(json.dumps({"games": stats["games"], "outcomes": stats["outcomes"], "train_prod": n_prod,
-                      "train_army": n_army, "val_prod": len(val["prod_y"]), "val_army": len(val["army_y"]),
-                      "load_s": round(time.perf_counter() - t0, 1), "device": device}), flush=True)
+    print(json.dumps({
+        "games": stats["games"], "outcomes": stats["outcomes"],
+        "train_prod": n_prod, "train_army": n_army,
+        "val_prod": len(val["prod_y"]), "val_army": len(val["army_y"]),
+        "load_s": round(time.perf_counter() - t0, 1), "device": device,
+    }), flush=True)
 
     net = CommanderNet(hidden=args.hidden).to(device)
     net.reset_critic()
@@ -148,9 +159,13 @@ def main() -> None:
             sched.step()
         v = evaluate(net, val)
         total = v["prod_loss"] + args.army_weight * v["army_loss"]
-        row = {"epoch": epoch + 1, **{f"val_{k}": round(x, 4) for k, x in v.items()},
-               "train_prod_loss": round(m["prod_loss"].item(), 4), "train_army_loss": round(m["army_loss"].item(), 4),
-               "s": round(time.perf_counter() - t0, 1)}
+        row = {
+            "epoch": epoch + 1,
+            **{f"val_{k}": round(x, 4) for k, x in v.items()},
+            "train_prod_loss": round(m["prod_loss"].item(), 4),
+            "train_army_loss": round(m["army_loss"].item(), 4),
+            "s": round(time.perf_counter() - t0, 1),
+        }
         if total < best:
             best = total
             net.save(str(out / "model.pt"), epoch=epoch + 1, val=v, data=args.data)

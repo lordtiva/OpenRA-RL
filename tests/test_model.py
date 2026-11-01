@@ -1,11 +1,20 @@
 import pytest
 import torch
 
-from ra_rl.features import CAND_DIM, FEATURE_VERSION, GLOBAL_DIM, MAX_TARGETS, N_ITEM_ACTIONS, PRIV_DIM
+from ra_rl.features import (
+    CAND_DIM,
+    FEATURE_VERSION,
+    GLOBAL_DIM,
+    MAX_TARGETS,
+    N_ARMY_ACTIONS,
+    N_ITEM_ACTIONS,
+    PRIV_DIM,
+)
 from ra_rl.model import CommanderNet
+from ra_rl.vocab import TACTICAL_CHANNELS
 
 
-def test_commandernet_decoupled_critic_and_logits():
+def test_commandernet_decoupled_critic_and_multichannel_logits():
     net = CommanderNet(hidden=64, cand_hidden=32)
     B = 4
     g = torch.randn(B, GLOBAL_DIM)
@@ -31,13 +40,16 @@ def test_commandernet_decoupled_critic_and_logits():
     assert logits.shape == (B, N_ITEM_ACTIONS)
     assert (logits[:, 5:] < -1e8).all()
 
-    # Army logits
+    # Tactical logits across MAIN, HARASS, AIR, SUPPORT channels
     cand = torch.randn(B, MAX_TARGETS, CAND_DIM)
-    army_mask = torch.ones(B, MAX_TARGETS + 2, dtype=torch.bool)
+    army_mask = torch.ones(B, N_ARMY_ACTIONS, dtype=torch.bool)
     army_mask[:, 3:MAX_TARGETS] = False
-    a_logits = net.army_logits(g, cand, army_mask)
-    assert a_logits.shape == (B, MAX_TARGETS + 2)
+    army_mask[:, MAX_TARGETS + 3:2 * MAX_TARGETS] = False
+    group = torch.tensor([0, 1, 2, len(TACTICAL_CHANNELS) - 1], dtype=torch.long)
+    a_logits = net.army_logits(g, cand, army_mask, group)
+    assert a_logits.shape == (B, N_ARMY_ACTIONS)
     assert (a_logits[:, 3:MAX_TARGETS] < -1e8).all()
+    assert (a_logits[:, MAX_TARGETS + 3:2 * MAX_TARGETS] < -1e8).all()
 
 
 def test_load_checkpoint_with_missing_critic_and_reject_wrong_feature_version(tmp_path):
@@ -50,7 +62,7 @@ def test_load_checkpoint_with_missing_critic_and_reject_wrong_feature_version(tm
     v = loaded.value(torch.randn(2, GLOBAL_DIM), torch.randn(2, PRIV_DIM))
     assert v.shape == (2,)
 
-    bad_path = tmp_path / "old_v1.pt"
+    bad_path = tmp_path / "old_v2.pt"
     torch.save({"config": {**net.config, "feature_version": FEATURE_VERSION - 1}, "state": actor_only_state}, bad_path)
     with pytest.raises(ValueError, match="features v"):
         CommanderNet.load(str(bad_path))

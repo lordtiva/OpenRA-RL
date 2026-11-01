@@ -1,18 +1,11 @@
-r"""Phase 4 v2: PFSP Multi-Bot League Training for the Commander Network.
+r"""Fase 4.2: PFSP Multi-Bot Warm-Start League Training for Commander v4.
 
-    python -m ra_rl.league --init runs/phase2_5/bc_s3/model.pt \
-        --ref runs/phase2_5/bc_s3/model.pt --out runs/phase4/league_v2
+    python -m ra_rl.league --init runs/v4/bc_v4/model.pt \
+        --ref runs/v4/bc_v4/model.pt --out runs/v4/league_warmstart
 
-Key safeguards against multi-opponent collapse & composition drift:
-  - Reuses Phase 3 v2 SMDP joint-step GAE (continuous tick discounting + exact PBRS)
-    and decoupled Asymmetric Critic V(g, priv) conditioned on true opponent archetype.
-  - Stratified per-opponent advantage normalization (adv normalized within each bot type,
-    preventing easy wins vs one archetype from biasing gradients against another).
-  - Prioritized Fictitious Self-Play (PFSP) dynamic opponent weighting: automatically
-    allocates more rollout games to opponents with lower EMA win rate while keeping a
-    minimum sampling floor per archetype.
-  - Masked KL anchor (--kl-coef) toward the multi-bot BC reference teacher (--ref).
-  - Clean multi-bot evaluation (hard, brutal, turtle) with automatic daemon recycling.
+Supports bilateral factions (--player-faction Random) across {hard, brutal, turtle}
+with joint-step SMDP GAE, exact PBRS, CTDE asymmetric critic, stratified advantage
+normalization, and masked KL anchoring.
 """
 
 import argparse
@@ -34,7 +27,7 @@ except ImportError:
     HAS_TB = False
 
 from ra_env import Bridge, MatchConfig, daemons
-from ra_rl.eval import DEFAULT_DAEMONS, evaluate
+from ra_rl.eval import DEFAULT_DAEMONS, evaluate, is_win
 from ra_rl.model import CommanderNet
 from ra_rl.ppo import (
     ARMY_KEYS,
@@ -102,6 +95,8 @@ def collect_league_rollouts(
     probs: np.ndarray,
     map_name: str,
     max_ticks: int,
+    player_faction: str = "Random",
+    enemy_faction: str = "Random",
     gamma: float = 0.995,
     gae_lambda: float = 0.98,
     recycle_every: int = 50,
@@ -139,7 +134,14 @@ def collect_league_rollouts(
                     bridge = Bridge(addr)
                     played = 0
 
-                match = MatchConfig(map_name=map_name, bot=bot_name, max_ticks=max_ticks, brain="external")
+                match = MatchConfig(
+                    map_name=map_name,
+                    bot=bot_name,
+                    player_faction=player_faction,
+                    enemy_faction=enemy_faction,
+                    max_ticks=max_ticks,
+                    brain="external",
+                )
                 meta, p_data, a_data, s_data = collect_game(
                     bridge, net_cpu, match, seed, gamma, gae_lambda, step_ticks, gamma_ticks, pbrs_coef,
                 )
@@ -175,7 +177,6 @@ def collect_league_rollouts(
     packed_army = pack(all_army, ARMY_KEYS)
     packed_step = pack(all_step, STEP_KEYS)
 
-    # Stratified normalization per opponent prevents cross-archetype baseline bias.
     normalize_advantages(packed_prod, per_bot=True)
     normalize_advantages(packed_army, per_bot=True)
     beh = compute_behavior_stats(packed_prod, packed_army, packed_step)
@@ -186,7 +187,7 @@ def collect_league_rollouts(
 
     for bot in opponents:
         bot_metas = [m for m in valid_metas if m["bot"] == bot]
-        w = sum(1 for m in bot_metas if m["outcome"] == "win")
+        w = sum(1 for m in bot_metas if is_win(m["outcome"]))
         bot_stats[bot] = {
             "games": len(bot_metas),
             "wins": w,
@@ -195,12 +196,13 @@ def collect_league_rollouts(
 
     for m in valid_metas:
         outcomes[m["outcome"]] = outcomes.get(m["outcome"], 0) + 1
+    wins_total = sum(1 for m in valid_metas if is_win(m["outcome"]))
 
     stats = {
         "games_collected": len(valid_metas),
         "games_failed": len(metas) - len(valid_metas),
         "outcomes": outcomes,
-        "win_rate": round(outcomes.get("win", 0) / max(1, len(valid_metas)), 3),
+        "win_rate": round(wins_total / max(1, len(valid_metas)), 3),
         "mean_ticks": round(sum(m["ticks"] for m in valid_metas) / max(1, len(valid_metas))),
         "mean_decisions": round(sum(m["decisions"] for m in valid_metas) / max(1, len(valid_metas)), 1),
         "n_prod": len(packed_prod.get("g", [])),
@@ -217,31 +219,33 @@ def collect_league_rollouts(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--init", default="runs/phase2_5/bc_s3/model.pt", help="starting checkpoint")
+    ap.add_argument("--init", default="runs/v4/bc_v4/model.pt", help="starting checkpoint")
     ap.add_argument("--ref", default="", help="frozen KL anchor checkpoint (defaults to --init)")
     ap.add_argument("--out", required=True, help="output directory for checkpoints and logs")
-    ap.add_argument("--iterations", type=int, default=80, help="total league training iterations")
-    ap.add_argument("--games-per-iter", type=int, default=48, help="number of games collected per iteration")
-    ap.add_argument("--opponents", default="hard,brutal,turtle", help="comma-separated opponent bot types")
-    ap.add_argument("--opponent-weights", default="0.4,0.3,0.3", help="static weights when --no-pfsp is set")
-    ap.add_argument("--pfsp", action=argparse.BooleanOptionalAction, default=True, help="adaptive PFSP opponent focus")
+    ap.add_argument("--iterations", type=int, default=35, help="total league warm-start iterations")
+    ap.add_argument("--games-per-iter", type=int, default=48)
+    ap.add_argument("--opponents", default="hard,brutal,turtle")
+    ap.add_argument("--opponent-weights", default="0.4,0.3,0.3")
+    ap.add_argument("--pfsp", action=argparse.BooleanOptionalAction, default=True)
     ap.add_argument("--pfsp-power", type=float, default=1.5)
     ap.add_argument("--min-opp-prob", type=float, default=0.18)
-    ap.add_argument("--eval-bots", default="hard,brutal,turtle", help="bots evaluated every --eval-every iterations")
+    ap.add_argument("--eval-bots", default="hard,brutal,turtle")
+    ap.add_argument("--player-faction", default="Random")
+    ap.add_argument("--enemy-faction", default="Random")
     ap.add_argument("--map", default=MatchConfig.map_name)
     ap.add_argument("--max-ticks", type=int, default=54000)
     ap.add_argument("--daemons", default=DEFAULT_DAEMONS)
-    ap.add_argument("--seed-base", type=int, default=300000, help="starting seed for rollouts (never overlaps with eval)")
-    ap.add_argument("--lr", type=float, default=4e-5, help="actor learning rate")
-    ap.add_argument("--critic-lr", type=float, default=3e-4, help="decoupled critic learning rate")
-    ap.add_argument("--critic-warmup-iters", type=int, default=6, help="critic warmup iterations on multi-bot mix")
-    ap.add_argument("--reset-critic", action="store_true", help="re-initialize critic weights on load")
+    ap.add_argument("--seed-base", type=int, default=300000)
+    ap.add_argument("--lr", type=float, default=4e-5)
+    ap.add_argument("--critic-lr", type=float, default=3e-4)
+    ap.add_argument("--critic-warmup-iters", type=int, default=6)
+    ap.add_argument("--reset-critic", action="store_true")
     ap.add_argument("--weight-decay", type=float, default=1e-4)
-    ap.add_argument("--gamma", type=float, default=0.995, help="discount factor per --gamma-ticks ticks")
+    ap.add_argument("--gamma", type=float, default=0.995)
     ap.add_argument("--gamma-ticks", type=float, default=250.0)
     ap.add_argument("--gae-lambda", type=float, default=0.98)
     ap.add_argument("--pbrs-coef", type=float, default=0.15)
-    ap.add_argument("--kl-coef", type=float, default=0.05, help="KL penalty toward --ref teacher")
+    ap.add_argument("--kl-coef", type=float, default=0.04)
     ap.add_argument("--ppo-epochs", type=int, default=4)
     ap.add_argument("--batch-size", type=int, default=2048)
     ap.add_argument("--clip-eps", type=float, default=0.2)
@@ -254,7 +258,7 @@ def main() -> None:
     ap.add_argument("--eval-every", type=int, default=10)
     ap.add_argument("--eval-games-per-bot", type=int, default=50)
     ap.add_argument("--eval-seeds-base", type=int, default=20000)
-    ap.add_argument("--eval-temp", type=float, default=0.0, help="evaluation softmax temperature (0.0 = argmax)")
+    ap.add_argument("--eval-temp", type=float, default=0.0)
     ap.add_argument("--save-every", type=int, default=5)
     ap.add_argument("--recycle-every", type=int, default=50)
     ap.add_argument("--tb", action=argparse.BooleanOptionalAction, default=True)
@@ -273,13 +277,11 @@ def main() -> None:
     ref_path = args.ref or args.init
 
     print(json.dumps({
-        "msg": "Starting Phase 4 v2 PFSP League Training",
+        "msg": "Starting Commander v4 PFSP League Warm-Start",
         "init": args.init, "ref": ref_path, "out": str(out),
         "device": device, "daemons": len(daemons_list),
-        "opponents": opponents, "eval_bots": eval_bots, "pfsp": args.pfsp,
-        "kl_coef": args.kl_coef, "ent_coef": args.ent_coef, "pbrs_coef": args.pbrs_coef,
-        "critic_warmup": args.critic_warmup_iters, "reset_critic": args.reset_critic,
-        "games_per_iter": args.games_per_iter,
+        "opponents": opponents, "player_faction": args.player_faction,
+        "kl_coef": args.kl_coef, "games_per_iter": args.games_per_iter,
     }), flush=True)
 
     net = CommanderNet.load(args.init, device=device)
@@ -319,6 +321,8 @@ def main() -> None:
             probs=probs,
             map_name=args.map,
             max_ticks=args.max_ticks,
+            player_faction=args.player_faction,
+            enemy_faction=args.enemy_faction,
             gamma=args.gamma,
             gae_lambda=args.gae_lambda,
             recycle_every=args.recycle_every,
@@ -377,7 +381,13 @@ def main() -> None:
             eval_results = {}
             total_eval_errors = 0
             for test_bot in eval_bots:
-                eval_match = MatchConfig(map_name=args.map, bot=test_bot, max_ticks=args.max_ticks)
+                eval_match = MatchConfig(
+                    map_name=args.map,
+                    bot=test_bot,
+                    player_faction=args.player_faction,
+                    enemy_faction=args.enemy_faction,
+                    max_ticks=args.max_ticks,
+                )
                 eval_summary = evaluate(
                     daemons=daemons_list,
                     policy=policy_spec(out / "checkpoint_latest.pt", args.eval_temp),
@@ -394,6 +404,7 @@ def main() -> None:
                     "win_rate": eval_summary["win_rate"],
                     "ci95": eval_summary["win_rate_ci95"],
                     "outcomes": eval_summary["outcomes"],
+                    "factions": eval_summary.get("factions", {}),
                 }
 
             harmonic_score = compute_harmonic_score(*(eval_results[b]["win_rate"] for b in eval_bots))
@@ -417,30 +428,10 @@ def main() -> None:
             writer.add_scalar("rollout/win_rate_total", collect_stats["win_rate"], it)
             for bot, bstat in collect_stats.get("bot_stats", {}).items():
                 writer.add_scalar(f"rollout/win_rate_{bot}", bstat["win_rate"], it)
-                writer.add_scalar(f"pfsp/prob_{bot}", collect_stats["opp_probs"].get(bot, 0.0), it)
-
-            writer.add_scalar("rollout/mean_ticks", collect_stats["mean_ticks"], it)
-            writer.add_scalar("rollout/mean_decisions", collect_stats["mean_decisions"], it)
             writer.add_scalar("rollout/explained_var", collect_stats["explained_var"], it)
-            writer.add_scalar("behavior/veh_harv_pct", collect_stats["beh_veh_harv_pct"], it)
-            writer.add_scalar("behavior/veh_2tnk_pct", collect_stats["beh_veh_2tnk_pct"], it)
-            writer.add_scalar("behavior/bld_wait_pct", collect_stats["beh_bld_wait_pct"], it)
-            writer.add_scalar("behavior/army_atk_pct", collect_stats["beh_army_atk_pct"], it)
-
-            writer.add_scalar("loss/policy_prod", update_metrics["pi_loss_prod"], it)
-            writer.add_scalar("loss/policy_army", update_metrics["pi_loss_army"], it)
             writer.add_scalar("loss/value", update_metrics["val_loss"], it)
-            writer.add_scalar("policy/entropy_prod", update_metrics["ent_prod"], it)
-            writer.add_scalar("policy/entropy_army", update_metrics["ent_army"], it)
-            writer.add_scalar("policy/kl_ref_prod", update_metrics["kl_ref_prod"], it)
-            writer.add_scalar("policy/kl_ref_army", update_metrics["kl_ref_army"], it)
-
             if "eval" in it_record:
-                ev = it_record["eval"]
-                for b in eval_bots:
-                    writer.add_scalar(f"eval/win_rate_{b}", ev[b]["win_rate"], it)
-                writer.add_scalar("eval/harmonic_score", ev["harmonic_score"], it)
-
+                writer.add_scalar("eval/harmonic_score", it_record["eval"]["harmonic_score"], it)
             writer.flush()
 
     log.close()

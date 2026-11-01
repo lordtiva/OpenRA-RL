@@ -8,7 +8,7 @@
 #   python -m ra_env.bench --daemons localhost:9999,localhost:10000,...  --sessions 1
 
 x-daemon: &daemon
-  image: openra-rl:v3
+  image: openra-rl:v4
   build:
     context: .
   environment:

@@ -1,9 +1,11 @@
-"""Commander network: an actor MLP trunk + two action heads, and a decoupled asymmetric critic.
+"""Commander network v4: actor MLP trunk + item & multi-channel tactical pointer heads + CTDE critic.
 
 - item head (BUILD / TRAIN): logits over the item vocabulary + wait, conditioned on
-  the queue, masked to what the queue offers right now.
-- army head (ARMY): a pointer over the target candidates (each scored against the
-  trunk) plus two fixed actions, hold and keep.
+  the queue, masked to what the queue offers right now (with rearm & spam sanity caps).
+- tactical head (ARMY groups MAIN / HARASS / AIR + SUPPORT powers): conditioned on
+  `tactical_emb(group)`, scoring every target candidate for both normal engagement
+  (`0..15`) and fearless `all_in` assault (`16..31`, MAIN only), plus `HOLD` (`32`)
+  and `KEEP` (`33`).
 - critic (training only, CTDE): an independent MLP over [g, priv] with zero shared
   weights with the actor trunk, preventing value-gradient interference on the policy.
 """
@@ -13,8 +15,16 @@ from typing import Iterator
 import torch
 from torch import nn
 
-from ra_rl.features import CAND_DIM, FEATURE_VERSION, GLOBAL_DIM, MAX_TARGETS, N_ITEM_ACTIONS, PRIV_DIM
-from ra_rl.vocab import QUEUES
+from ra_rl.features import (
+    CAND_DIM,
+    FEATURE_VERSION,
+    GLOBAL_DIM,
+    MAX_TARGETS,
+    N_ARMY_ACTIONS,
+    N_ITEM_ACTIONS,
+    PRIV_DIM,
+)
+from ra_rl.vocab import QUEUES, TACTICAL_CHANNELS
 
 NEG = -1e9
 
@@ -34,13 +44,15 @@ class CommanderNet(nn.Module):
             nn.Linear(hidden, hidden), nn.LayerNorm(hidden), nn.ReLU(),
         )
         self.queue_emb = nn.Embedding(len(QUEUES), hidden)
+        self.tactical_emb = nn.Embedding(len(TACTICAL_CHANNELS), hidden)
         self.item_head = nn.Sequential(nn.ReLU(), nn.Linear(hidden, N_ITEM_ACTIONS))
         self.cand_enc = nn.Sequential(nn.Linear(CAND_DIM, cand_hidden), nn.ReLU())
+        # Output 2 scores per candidate: [0] = normal attack/strike, [1] = fearless all_in (MAIN).
         self.cand_score = nn.Sequential(
             nn.Linear(hidden + cand_hidden, cand_hidden), nn.ReLU(),
-            nn.Linear(cand_hidden, 1),
+            nn.Linear(cand_hidden, 2),
         )
-        self.army_fixed = nn.Linear(hidden, 2)  # hold, keep
+        self.army_fixed = nn.Linear(hidden, 2)  # HOLD, KEEP
 
         # Independent asymmetric critic trunk + scalar head (CTDE; unused at eval time).
         self.critic = nn.Sequential(
@@ -79,12 +91,24 @@ class CommanderNet(nn.Module):
         h = self.trunk(g) + self.queue_emb(queue)
         return self.item_head(h).masked_fill(~mask, NEG)
 
-    def army_logits(self, g: torch.Tensor, cand: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        h = self.trunk(g)
+    def army_logits(
+        self,
+        g: torch.Tensor,
+        cand: torch.Tensor,
+        mask: torch.Tensor,
+        group: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if group is None:
+            group = torch.zeros(g.shape[0], device=g.device, dtype=torch.long)
+        h = self.trunk(g) + self.tactical_emb(group)
         c = self.cand_enc(cand)                                            # B, T, C
         hc = torch.cat([h.unsqueeze(1).expand(-1, MAX_TARGETS, -1), c], dim=-1)
-        scores = self.cand_score(hc).squeeze(-1)                           # B, T
-        logits = torch.cat([scores, self.army_fixed(h)], dim=-1)           # B, T + 2
+        pair_scores = self.cand_score(hc)                                  # B, T, 2
+        logits = torch.cat(
+            [pair_scores[..., 0], pair_scores[..., 1], self.army_fixed(h)],
+            dim=-1,
+        )                                                                  # B, 2*T + 2
+        assert logits.shape[-1] == N_ARMY_ACTIONS
         return logits.masked_fill(~mask, NEG)
 
     def save(self, path: str, **extra) -> None:
