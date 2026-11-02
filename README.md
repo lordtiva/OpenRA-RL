@@ -7,7 +7,7 @@ vive en el submódulo `OpenRA/` ([lordtiva/OpenRA](https://github.com/lordtiva/O
 
 - **`v2-final`**: congelado (AlphaLiteNet micro).
 - **`v3-final`**: congelado en `main` (`80.0%` vs `hard`, `74.0%` vs `brutal`, `85.0%` vs `turtle`, armónica `0.794`; ver [`docs/v3-plan.md`](docs/v3-plan.md) y [`docs/v3-commander.md`](docs/v3-commander.md)).
-- **`v4` (rama activa)**: **Commander v4** multi-escuadrón (`MAIN` con `all_in`, `HARASS`, `AIR`, `DECIDE_SUPPORT`) + **Self-Play Lock-Step Real** (`SelfPlaySession`). Contrato y arquitectura: [`docs/v4-commander.md`](docs/v4-commander.md) y [`docs/v4-plan.md`](docs/v4-plan.md).
+- **`v4` (rama activa)**: **Commander v4** multi-escuadrón (`MAIN` con `all_in`, `HARASS`, `AIR`, `DECIDE_SUPPORT`) + **Self-Play Lock-Step Real** (`SelfPlaySession`). Contrato y arquitectura: [`docs/v4-commander.md`](docs/v4-commander.md) y [`docs/v4-plan.md`](docs/v4-plan.md). Resultados oficiales: [`docs/v4-results.md`](docs/v4-results.md) y [`docs/v4-evals.jsonl`](docs/v4-evals.jsonl).
 
 ## Estructura
 
