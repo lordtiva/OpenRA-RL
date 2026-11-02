@@ -23,7 +23,7 @@ from ra_rl.features import (
 from ra_rl.policies.net import RandomPolicy
 from ra_rl.policies.scripted import Params, ScriptedPolicy
 from ra_rl.record import GameBuffer
-from ra_rl.vocab import ITEM_INDEX
+from ra_rl.vocab import BUILDINGS, ITEM_INDEX, TARGET_KINDS
 
 
 def game_obs(tick=100, faction="england") -> pb.GameObservation:
@@ -63,7 +63,7 @@ def army_req(*kinds, rid=3, queue="MAIN") -> pb.DecisionRequest:
 
 
 def test_global_vector_is_deterministic_and_ignores_the_spectator_summary():
-    assert FEATURE_VERSION == 3
+    assert FEATURE_VERSION == 4
     a, b = Features(), Features()
     a.observe(game_obs())
     o = game_obs()
@@ -136,14 +136,14 @@ def test_item_mask_sanity_caps_and_aircraft_rearm_rule():
             + [pb.RlBuildingInfo(type="hpad")] * 1
             + [pb.RlBuildingInfo(type="afld.ukraine")] * 2
         ),
-        units=[pb.RlUnitInfo(type="harv")] * 4 + [pb.RlUnitInfo(type="heli")] + [pb.RlUnitInfo(type="yak")],
+        units=[pb.RlUnitInfo(type="harv")] * 4 + [pb.RlUnitInfo(type="heli")] + [pb.RlUnitInfo(type="yak")] + [pb.RlUnitInfo(type="truk")] + [pb.RlUnitInfo(type="tran")],
     )
     f.observe(o)
 
     veh_req = pb.DecisionRequest(id=1, kind=pb.DECIDE_TRAIN, queue="Vehicle", options=["harv", "2tnk", "truk"])
     veh_mask = f.item_mask(veh_req)
     assert not veh_mask[ITEM_INDEX["harv"]]
-    assert not veh_mask[ITEM_INDEX["truk"]]  # non-combat convoy forbidden
+    assert not veh_mask[ITEM_INDEX["truk"]]  # non-combat convoy capped at 1
     assert veh_mask[ITEM_INDEX["2tnk"]] and veh_mask[WAIT]
 
     bld_req = pb.DecisionRequest(id=2, kind=pb.DECIDE_BUILD, queue="Building", options=["tent", "barr", "weap", "sbag"])
@@ -197,7 +197,8 @@ def test_multisquad_all_in_and_support_actions():
     assert f.army.attacking and f.army.all_in and f.army.target == ("enemy_building", 61, 60)
     f.observe(game_obs(tick=400))
     cand, _ = f.candidates(req_main)
-    assert cand[1, -1] == 1 and cand[0, -1] == 0
+    main_target_idx = len(TARGET_KINDS) + len(BUILDINGS) + 11
+    assert cand[1, main_target_idx] == 1 and cand[0, main_target_idx] == 0
 
     # HARASS disables all_in (16..31) while keeping 0..1, HOLD, KEEP
     req_har = army_req("unexplored", "enemy_harvester", queue="HARASS")

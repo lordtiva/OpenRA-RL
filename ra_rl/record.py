@@ -123,8 +123,10 @@ def _step_side(
 
 
 def record_selfplay_game(bridge: Bridge, args, seed: int) -> dict:
+    maps = [m.strip() for m in args.map.split(",") if m.strip()]
+    map_name = maps[seed % len(maps)]
     sp_cfg = SelfPlayConfig(
-        map_name=args.map,
+        map_name=map_name,
         player_faction=args.player_faction,
         enemy_faction=args.enemy_faction,
         max_ticks=args.max_ticks,
@@ -177,8 +179,10 @@ def record_game(bridge: Bridge, args, seed: int, bot: str) -> dict:
         return record_selfplay_game(bridge, args, seed)
 
     builtin = args.teacher == "builtin"
+    maps = [m.strip() for m in args.map.split(",") if m.strip()]
+    map_name = maps[seed % len(maps)]
     match = MatchConfig(
-        map_name=args.map,
+        map_name=map_name,
         bot=bot,
         player_faction=args.player_faction,
         enemy_faction=args.enemy_faction,

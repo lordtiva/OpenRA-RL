@@ -1,11 +1,13 @@
-"""Commander network v4: actor MLP trunk + item & multi-channel tactical pointer heads + CTDE critic.
+"""Commander network v5: actor MLP trunk + spatial transformer + specialized heads + CTDE critic.
 
 - item head (BUILD / TRAIN): logits over the item vocabulary + wait, conditioned on
-  the queue, masked to what the queue offers right now (with rearm & spam sanity caps).
-- tactical head (ARMY groups MAIN / HARASS / AIR + SUPPORT powers): conditioned on
-  `tactical_emb(group)`, scoring every target candidate for both normal engagement
-  (`0..15`) and fearless `all_in` assault (`16..31`, MAIN only), plus `HOLD` (`32`)
-  and `KEEP` (`33`).
+  the queue, masked to what the queue offers right now (with dynamic economic sanity caps).
+- tactical head (ARMY groups MAIN / HARASS / AIR + SUPPORT powers): contextualized
+  spatial transformer over target candidates, scoring every target for both normal engagement
+  (0..15) and fearless all_in assault (16..31, MAIN only), plus HOLD (32) and KEEP (33).
+- ability head (DECIDE_ABILITY): unified 17-output pointer over the 16 target candidates
+  and the CLS token (16 = HOLD), conditioned on `ability_emb`.
+- macro_ops head (DECIDE_MACRO_OPS): 3-way classifier over ("repair", "sell", "hold").
 - critic (training only, CTDE): an independent MLP over [g, priv] with zero shared
   weights with the actor trunk, preventing value-gradient interference on the policy.
 """
@@ -24,7 +26,7 @@ from ra_rl.features import (
     N_ITEM_ACTIONS,
     PRIV_DIM,
 )
-from ra_rl.vocab import QUEUES, TACTICAL_CHANNELS
+from ra_rl.vocab import MACRO_OPERATIONS, QUEUES, SPECIAL_ABILITIES, TACTICAL_CHANNELS
 
 NEG = -1e9
 
@@ -45,14 +47,29 @@ class CommanderNet(nn.Module):
         )
         self.queue_emb = nn.Embedding(len(QUEUES), hidden)
         self.tactical_emb = nn.Embedding(len(TACTICAL_CHANNELS), hidden)
+        self.ability_emb = nn.Embedding(len(SPECIAL_ABILITIES), hidden)
+
+        # Contextualized spatial transformer (v5)
+        self.cls_token_proj = nn.Linear(hidden, hidden)
+        self.cand_proj = nn.Linear(CAND_DIM, hidden)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden,
+            nhead=4,
+            dim_feedforward=hidden * 2,
+            batch_first=True,
+            norm_first=True,
+        )
+        self.spatial_transformer = nn.TransformerEncoder(encoder_layer, num_layers=1)
+
+        # Output heads
         self.item_head = nn.Sequential(nn.ReLU(), nn.Linear(hidden, N_ITEM_ACTIONS))
-        self.cand_enc = nn.Sequential(nn.Linear(CAND_DIM, cand_hidden), nn.ReLU())
-        # Output 2 scores per candidate: [0] = normal attack/strike, [1] = fearless all_in (MAIN).
         self.cand_score = nn.Sequential(
-            nn.Linear(hidden + cand_hidden, cand_hidden), nn.ReLU(),
+            nn.Linear(hidden, cand_hidden), nn.ReLU(),
             nn.Linear(cand_hidden, 2),
         )
         self.army_fixed = nn.Linear(hidden, 2)  # HOLD, KEEP
+        self.ability_head = nn.Linear(hidden, 1)  # 17 tokens -> 17 logits (0..15 candidates, 16 = HOLD)
+        self.macro_ops_head = nn.Linear(hidden, len(MACRO_OPERATIONS))  # repair, sell, hold
 
         # Independent asymmetric critic trunk + scalar head (CTDE; unused at eval time).
         self.critic = nn.Sequential(
@@ -101,15 +118,46 @@ class CommanderNet(nn.Module):
         if group is None:
             group = torch.zeros(g.shape[0], device=g.device, dtype=torch.long)
         h = self.trunk(g) + self.tactical_emb(group)
-        c = self.cand_enc(cand)                                            # B, T, C
-        hc = torch.cat([h.unsqueeze(1).expand(-1, MAX_TARGETS, -1), c], dim=-1)
-        pair_scores = self.cand_score(hc)                                  # B, T, 2
+        cls_tok = self.cls_token_proj(h).unsqueeze(1)                   # B, 1, H
+        cand_toks = self.cand_proj(cand)                                # B, 16, H
+        tokens = torch.cat([cand_toks, cls_tok], dim=1)                 # B, 17, H
+        trans_tokens = self.spatial_transformer(tokens)                 # B, 17, H
+        cand_ctx = trans_tokens[:, :MAX_TARGETS, :]                     # B, 16, H
+        pair_scores = self.cand_score(cand_ctx)                         # B, 16, 2
         logits = torch.cat(
             [pair_scores[..., 0], pair_scores[..., 1], self.army_fixed(h)],
             dim=-1,
-        )                                                                  # B, 2*T + 2
+        )                                                               # B, 34
         assert logits.shape[-1] == N_ARMY_ACTIONS
         return logits.masked_fill(~mask, NEG)
+
+    def ability_logits(
+        self,
+        g: torch.Tensor,
+        cand: torch.Tensor,
+        mask: torch.Tensor,
+        ability_id: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if ability_id is None:
+            ability_id = torch.zeros(g.shape[0], device=g.device, dtype=torch.long)
+        h = self.trunk(g) + self.ability_emb(ability_id)
+        cls_tok = self.cls_token_proj(h).unsqueeze(1)                   # B, 1, H
+        cand_toks = self.cand_proj(cand)                                # B, 16, H
+        tokens = torch.cat([cand_toks, cls_tok], dim=1)                 # B, 17, H
+        trans_tokens = self.spatial_transformer(tokens)                 # B, 17, H
+        logits = self.ability_head(trans_tokens).squeeze(-1)            # B, 17 (0..15 candidates, 16 = HOLD)
+        return logits.masked_fill(~mask, NEG)
+
+    def macro_ops_logits(
+        self,
+        g: torch.Tensor,
+        mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        h = self.trunk(g)
+        logits = self.macro_ops_head(h)                                 # B, 3
+        if mask is not None:
+            logits = logits.masked_fill(~mask, NEG)
+        return logits
 
     def save(self, path: str, **extra) -> None:
         torch.save({"config": self.config, "state": self.state_dict(), **extra}, path)

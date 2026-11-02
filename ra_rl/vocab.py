@@ -22,7 +22,17 @@ UNITS = INFANTRY + VEHICLES + AIRCRAFT + SHIPS
 ITEMS = BUILDINGS + UNITS
 
 QUEUES = ("Building", "Defense", "Infantry", "Vehicle", "Aircraft", "Ship")
-TARGET_KINDS = ("enemy_spawn", "enemy_building", "enemy_harvester", "enemy_mobile", "unexplored", "stale")
+TARGET_KINDS = ("enemy_spawn", "enemy_building", "enemy_harvester", "enemy_mobile", "unexplored", "stale", "ally_building")
+
+SPECIAL_ABILITIES = (
+    "ChronoTeleport",
+    "MADDetonate",
+    "EngineerCapture",
+    "SpyInfiltrate",
+    "MineDeploy",
+    "TransportDrop",
+)
+MACRO_OPERATIONS = ("repair", "sell", "hold")
 
 FACTIONS = ("england", "france", "germany", "russia", "ukraine")
 ALLIED_FACTIONS = frozenset({"england", "france", "germany"})
@@ -58,6 +68,8 @@ QUEUE_INDEX = {q: i for i, q in enumerate(QUEUES)}
 KIND_INDEX = {k: i for i, k in enumerate(TARGET_KINDS)}
 FACTION_INDEX = {f: i for i, f in enumerate(FACTIONS)}
 TACTICAL_INDEX = {c: i for i, c in enumerate(TACTICAL_CHANNELS)}
+ABILITY_INDEX = {a: i for i, a in enumerate(SPECIAL_ABILITIES)}
+MACRO_INDEX = {m: i for i, m in enumerate(MACRO_OPERATIONS)}
 
 # Valued.Cost from the rules.
 COST = {

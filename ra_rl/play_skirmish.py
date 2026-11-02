@@ -44,6 +44,10 @@ def find_default_checkpoint() -> str | None:
     """Backward-compatible alias for finding model checkpoint path (.pt)."""
     pt_candidates = [
         os.environ.get("OPENRA_RL_CKPT"),
+        ROOT_DIR / "runs" / "v5" / "selfplay" / "checkpoint_best.pt",
+        ROOT_DIR / "runs" / "v5" / "selfplay" / "checkpoint_latest.pt",
+        ROOT_DIR / "runs" / "v5" / "bc_v5" / "model.pt",
+        ROOT_DIR / "runs" / "v5" / "warmstart" / "model.pt",
         ROOT_DIR / "rl_agent" / "checkpoint_best.pt",
         ROOT_DIR / "rl_agent" / "model.pt",
         ROOT_DIR / "runs" / "v4" / "selfplay" / "checkpoint_best.pt",

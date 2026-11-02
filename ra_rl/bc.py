@@ -70,18 +70,18 @@ def to_device(arrays: dict[str, np.ndarray], device: str) -> dict[str, torch.Ten
     return out
 
 
-def losses(net: CommanderNet, d: dict[str, torch.Tensor], pi: torch.Tensor, ai: torch.Tensor) -> dict:
+def losses(net: CommanderNet, d: dict[str, torch.Tensor], pi: torch.Tensor, ai: torch.Tensor, label_smoothing: float = 0.0) -> dict:
     out = {}
     if len(pi):
         logits = net.item_logits(d["prod_g"][pi], d["prod_queue"][pi], d["prod_mask"][pi])
         y = d["prod_y"][pi]
-        out["prod_loss"] = F.cross_entropy(logits, y)
+        out["prod_loss"] = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
         out["prod_acc"] = (logits.argmax(-1) == y).float().mean()
     if len(ai):
         grp = d["army_group"][ai] if "army_group" in d else None
         logits = net.army_logits(d["army_g"][ai], d["army_cand"][ai], d["army_mask"][ai], grp)
         y = d["army_y"][ai]
-        out["army_loss"] = F.cross_entropy(logits, y)
+        out["army_loss"] = F.cross_entropy(logits, y, label_smoothing=label_smoothing)
         out["army_acc"] = (logits.argmax(-1) == y).float().mean()
     return out
 
@@ -114,6 +114,8 @@ def main() -> None:
     ap.add_argument("--weight-decay", type=float, default=1e-4)
     ap.add_argument("--army-weight", type=float, default=1.0)
     ap.add_argument("--hidden", type=int, default=256)
+    ap.add_argument("--init", default="", help="optional checkpoint to initialize weights from")
+    ap.add_argument("--label-smoothing", type=float, default=0.04, help="label smoothing over legal actions")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--val-every", type=int, default=20, help="games whose seed is a multiple of this validate")
     args = ap.parse_args()
@@ -136,7 +138,11 @@ def main() -> None:
         "load_s": round(time.perf_counter() - t0, 1), "device": device,
     }), flush=True)
 
-    net = CommanderNet(hidden=args.hidden).to(device)
+    if args.init:
+        print(f"Initializing weights from {args.init}", flush=True)
+        net = CommanderNet.load(args.init, device=device)
+    else:
+        net = CommanderNet(hidden=args.hidden).to(device)
     net.reset_critic()
     actor_params = list(net.actor_parameters())
     opt = torch.optim.AdamW(actor_params, lr=args.lr, weight_decay=args.weight_decay)
@@ -151,7 +157,7 @@ def main() -> None:
         for s in range(steps_per_epoch):
             pi = perm[s * args.batch:(s + 1) * args.batch]
             ai = torch.randint(0, n_army, (army_batch,), device=device)
-            m = losses(net, train, pi, ai)
+            m = losses(net, train, pi, ai, label_smoothing=args.label_smoothing)
             loss = m["prod_loss"] + args.army_weight * m["army_loss"]
             opt.zero_grad(set_to_none=True)
             loss.backward()

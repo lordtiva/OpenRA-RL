@@ -51,6 +51,18 @@ def test_commandernet_decoupled_critic_and_multichannel_logits():
     assert (a_logits[:, 3:MAX_TARGETS] < -1e8).all()
     assert (a_logits[:, MAX_TARGETS + 3:2 * MAX_TARGETS] < -1e8).all()
 
+    # Ability logits (17 outputs: 0..15 candidates, 16 = HOLD)
+    ab_mask = torch.ones(B, 17, dtype=torch.bool)
+    ab_mask[:, 5:16] = False
+    ab_logits = net.ability_logits(g, cand, ab_mask, torch.zeros(B, dtype=torch.long))
+    assert ab_logits.shape == (B, 17)
+    assert (ab_logits[:, 5:16] < -1e8).all()
+    assert (ab_logits[:, 16] > -1e8).all()
+
+    # Macro ops logits (3 outputs: repair, sell, hold)
+    macro_logits = net.macro_ops_logits(g)
+    assert macro_logits.shape == (B, 3)
+
 
 def test_load_checkpoint_with_missing_critic_and_reject_wrong_feature_version(tmp_path):
     net = CommanderNet(hidden=32, cand_hidden=16)

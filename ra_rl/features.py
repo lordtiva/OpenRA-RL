@@ -19,6 +19,7 @@ import numpy as np
 
 from ra_env import pb
 from ra_rl.vocab import (
+    ABILITY_INDEX,
     AIRCRAFT,
     ALLIED_FACTIONS,
     ALLIED_ONLY_ACTORS,
@@ -31,10 +32,13 @@ from ra_rl.vocab import (
     ITEM_INDEX,
     ITEMS,
     KIND_INDEX,
+    MACRO_INDEX,
+    MACRO_OPERATIONS,
     QUEUE_INDEX,
     QUEUES,
     SOVIET_FACTIONS,
     SOVIET_ONLY_ACTORS,
+    SPECIAL_ABILITIES,
     TACTICAL_INDEX,
     TARGET_KINDS,
     UNIT_INDEX,
@@ -43,7 +47,7 @@ from ra_rl.vocab import (
     combat_value,
 )
 
-FEATURE_VERSION = 3
+FEATURE_VERSION = 4
 
 MAX_TARGETS = 16                     # RLCommander.MaxTargets in v4
 WAIT = len(ITEMS)                    # item head: "produce nothing for now"
@@ -65,7 +69,6 @@ AA_ACTORS = frozenset({"sam", "agun", "ftrk", "e3"})
 HEAVY_ARMOR = frozenset({"2tnk", "3tnk", "4tnk", "v2rl", "ttnk", "ctnk", "qtnk", "stnk"})
 AIR_COMBAT_SET = frozenset({"heli", "hind", "mh60", "yak", "mig"})
 WALL_ITEMS = frozenset({"sbag", "fenc", "brik"})
-FORBIDDEN_TRAIN_ITEMS = frozenset({"tran", "truk", "e6", "spy", "thf", "mnly"})
 
 # Sanity caps for non-combat / redundant / rearm-bound spam in external commander mode.
 MAX_HARVESTERS = 10
@@ -78,7 +81,7 @@ MAX_AIR_PADS = 4
 MAX_MCV_TOTAL = 2
 
 N_SCALARS = 45
-N_MEMORY = 23
+N_MEMORY = 24
 GLOBAL_DIM = (
     N_SCALARS
     + len(FACTIONS)
@@ -90,7 +93,7 @@ GLOBAL_DIM = (
     + len(UNITS)
     + N_MEMORY
 )
-CAND_DIM = len(TARGET_KINDS) + len(BUILDINGS) + 12
+CAND_DIM = len(TARGET_KINDS) + len(BUILDINGS) + 18
 
 # Training-only asymmetric critic inputs (never used by the actor or at eval time).
 OPPONENTS = ("hard", "brutal", "turtle", "selfplay", "snapshot", "bc", "other")
@@ -487,11 +490,28 @@ class Features:
         mask = np.zeros(N_ITEM_ACTIONS, bool)
         for o in req.options:
             bt = base_type(o)
-            if bt in WALL_ITEMS or bt in FORBIDDEN_TRAIN_ITEMS:
+            if bt in WALL_ITEMS:
                 continue
             i = ITEM_INDEX.get(bt)
             if i is not None:
                 mask[i] = True
+
+        # Dynamic Economic Sanity Guards (v5):
+        # Special support units (e6, spy, thf, mnly, tran, truk) require basic economic
+        # and production infrastructure: >= 1 refinery and >= 1 factory/barracks.
+        has_refinery = self._own_b[BUILDING_INDEX["proc"]] > 0
+        has_production = (
+            self._own_b[BUILDING_INDEX["barr"]] > 0
+            or self._own_b[BUILDING_INDEX["tent"]] > 0
+            or self._own_b[BUILDING_INDEX["weap"]] > 0
+        )
+        econ_ready = has_refinery and has_production
+
+        for spec_unit, cap in (("spy", 2), ("e6", 2), ("thf", 1), ("mnly", 1), ("tran", 1), ("truk", 1)):
+            if not econ_ready:
+                mask[ITEM_INDEX[spec_unit]] = False
+            elif self._own_u[UNIT_INDEX[spec_unit]] + self._producing[ITEM_INDEX[spec_unit]] >= cap:
+                mask[ITEM_INDEX[spec_unit]] = False
 
         # Sanity caps on non-combat / redundant spam (external mode bypasses YAML UnitLimits).
         own_proc = int(self._own_b[BUILDING_INDEX["proc"]])
@@ -573,12 +593,18 @@ class Features:
 
     def candidates(self, req: pb.DecisionRequest) -> tuple[np.ndarray, np.ndarray]:
         cand = np.zeros((MAX_TARGETS, CAND_DIM), np.float32)
-        mask = np.zeros(N_ARMY_ACTIONS, bool)
-        mask[HOLD] = True
+        is_ability = req.kind == pb.DECIDE_ABILITY
+        if is_ability:
+            mask = np.zeros(17, bool)
+            mask[16] = True  # HOLD is always legal for ability
+        else:
+            mask = np.zeros(N_ARMY_ACTIONS, bool)
+            mask[HOLD] = True
+
         is_support = req.kind == pb.DECIDE_SUPPORT
         grp = tactical_group_name(req)
-        allow_all_in = (not is_support) and (grp == "MAIN")
-        if not is_support:
+        allow_all_in = (not is_support) and (not is_ability) and (grp == "MAIN")
+        if (not is_support) and (not is_ability):
             mask[KEEP] = True
 
         grp_mem = self.armies.get(grp, self.armies["MAIN"])
@@ -607,7 +633,7 @@ class Features:
             o += len(BUILDINGS)
             r = rank.get(t.kind, 0)
             rank[t.kind] = r + 1
-            row[o:o + 12] = [
+            row[o:o + 18] = [
                 COST.get(bt, 0) / 2000.0,
                 _dist(cell, self.base) / 100.0,
                 _dist(cell, self.away_center) / 100.0 if self.away_center else 1.0,
@@ -620,6 +646,12 @@ class Features:
                 sum(v for x, y, v in self.own_units if _dist((x, y), cell) <= NEAR_CELLS) / 5000.0,
                 float(grp_mem.target == (t.kind, t.cell_x, t.cell_y)),
                 float(main_mem.target == (t.kind, t.cell_x, t.cell_y)),
+                t.health_percent / 100.0,
+                float(t.is_capturable),
+                float(t.is_infiltratable),
+                float(t.is_ally),
+                (cell[0] - self.base[0]) / 100.0,
+                (cell[1] - self.base[1]) / 100.0,
             ]
         return cand, mask
 
@@ -628,6 +660,17 @@ class Features:
     @staticmethod
     def label(req: pb.DecisionRequest, decision: pb.Decision | None) -> int | None:
         """Network action for a decision; None if it is outside the vocabulary."""
+        if req.kind == pb.DECIDE_ABILITY:
+            if decision is None or decision.target_index < 0 or decision.target_index >= 16:
+                return 16  # HOLD
+            return decision.target_index if decision.target_index < min(MAX_TARGETS, len(req.targets)) else 16
+
+        if req.kind == pb.DECIDE_MACRO_OPS:
+            if decision is None:
+                return MACRO_INDEX["hold"]
+            act = decision.macro_action or decision.choice or "hold"
+            return MACRO_INDEX.get(act.lower(), MACRO_INDEX["hold"])
+
         if req.kind == pb.DECIDE_SUPPORT:
             if decision is None or decision.target_index < 0 or decision.choice == "hold":
                 return HOLD
@@ -647,13 +690,22 @@ class Features:
         if decision is None or decision.choice not in req.options:
             return WAIT
         bt = base_type(decision.choice)
-        if bt in WALL_ITEMS or bt in FORBIDDEN_TRAIN_ITEMS:
+        if bt in WALL_ITEMS:
             return WAIT
         return ITEM_INDEX.get(bt)
 
     @staticmethod
     def decision(req: pb.DecisionRequest, action: int) -> pb.Decision | None:
         """Inverse of label(): the Decision to send (None = leave ARMY request unanswered)."""
+        if req.kind == pb.DECIDE_ABILITY:
+            if action == 16:
+                return pb.Decision(request_id=req.id, choice="hold", target_index=16)
+            return pb.Decision(request_id=req.id, choice="execute", target_index=action)
+
+        if req.kind == pb.DECIDE_MACRO_OPS:
+            act = MACRO_OPERATIONS[action] if 0 <= action < len(MACRO_OPERATIONS) else "hold"
+            return pb.Decision(request_id=req.id, choice=act, macro_action=act)
+
         if req.kind == pb.DECIDE_SUPPORT:
             if action == HOLD or action == KEEP:
                 return pb.Decision(request_id=req.id, choice="hold", target_index=-1)
