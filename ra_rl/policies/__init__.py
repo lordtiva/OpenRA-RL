@@ -30,7 +30,7 @@ class BuiltinPolicy:
 
 
 def make_policy(name: str) -> Policy:
-    """builtin | scripted | random | net:<model.pt> | net-sample:<model.pt> | net-t<temp>:<model.pt>"""
+    """builtin | scripted | random | onnx:<dir_or_item> | net:<model.pt> | net-sample:<model.pt> | net-t<temp>:<model.pt>"""
     if name == "builtin":
         return BuiltinPolicy()
     if name == "scripted":
@@ -40,6 +40,17 @@ def make_policy(name: str) -> Policy:
         from ra_rl.policies.net import RandomPolicy
         return RandomPolicy()
     kind, _, path = name.partition(":")
+    if kind == "onnx" and path:
+        from pathlib import Path
+        from ra_rl.policies.onnx_policy import OnnxPolicy
+        p = Path(path)
+        if p.is_dir():
+            item_p = p / "commander_item.onnx"
+            army_p = p / "commander_army.onnx"
+        else:
+            item_p = p
+            army_p = p.parent / "commander_army.onnx"
+        return OnnxPolicy(item_p, army_p)
     if kind in ("net", "net-sample") and path:
         from ra_rl.policies.net import NetPolicy
         return NetPolicy(path, sample=kind == "net-sample")
@@ -48,5 +59,5 @@ def make_policy(name: str) -> Policy:
         temp = float(kind[len("net-t"):])
         return NetPolicy(path, temperature=temp)
     raise ValueError(
-        f"unknown policy {name!r}; expected builtin | scripted | random | net:<path> | net-sample:<path> | net-t<T>:<path>"
+        f"unknown policy {name!r}; expected builtin | scripted | random | onnx:<dir> | net:<path> | net-sample:<path> | net-t<T>:<path>"
     )
