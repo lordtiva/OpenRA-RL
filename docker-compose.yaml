@@ -13,6 +13,7 @@ x-daemon: &daemon
     context: .
   environment:
     - OPENRA_RL_WORKERS=1
+    - OPENRA_RL_EARLY_WIN=1
   deploy:
     resources:
       limits:

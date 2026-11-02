@@ -94,3 +94,10 @@ El pipeline v5 cuenta con:
    - `faction_win_rate/*`: Balance de victorias por facción (Aliados vs Soviéticos).
    - `behavior/*`: Uso de tanques, artillería, aviación, ataques `all_in`, cosechadoras y habilidades.
    - `eval/*`: Puntuación armónica, win rate vs `bc_v5` y vs cada bot.
+
+---
+
+## Documentación Relacionada
+- [**`docs/v5-commander.md`**](file:///c:/Users/lordc/Desktop/OpenRA-RL/docs/v5-commander.md): Especificación técnica del agente, contrato gRPC, Transformer spatial encoder y destacamento `SPECOPS`.
+- [**`docs/v4-vs-v5.md`**](file:///c:/Users/lordc/Desktop/OpenRA-RL/docs/v4-vs-v5.md): Comparativa dimensional detallada v4 vs v5 y benchmarks esperados.
+- [**`docs/v5-contingencia-y-diagnostico.md`**](file:///c:/Users/lordc/Desktop/OpenRA-RL/docs/v5-contingencia-y-diagnostico.md): Matriz de decisión ante desviaciones de desempeño, árbol de diagnóstico por TensorBoard y mitigación de partidas truncadas en `doubles.oramap`.
