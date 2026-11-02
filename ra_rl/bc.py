@@ -17,6 +17,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    HAS_TB = True
+except ImportError:
+    SummaryWriter = None
+    HAS_TB = False
+
 from ra_rl.features import FEATURE_VERSION, GLOBAL_DIM
 from ra_rl.model import CommanderNet
 
@@ -118,12 +125,14 @@ def main() -> None:
     ap.add_argument("--label-smoothing", type=float, default=0.04, help="label smoothing over legal actions")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--val-every", type=int, default=20, help="games whose seed is a multiple of this validate")
+    ap.add_argument("--tb", action=argparse.BooleanOptionalAction, default=True)
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
+    writer = SummaryWriter(log_dir=str(out / "tb")) if (args.tb and HAS_TB) else None
 
     t0 = time.perf_counter()
     train_np, val_np, stats = load(args.data.split(","), args.val_every)
@@ -179,7 +188,19 @@ def main() -> None:
         log.write(json.dumps(row) + "\n")
         log.flush()
         print(json.dumps(row), flush=True)
+
+        if writer is not None:
+            ep = epoch + 1
+            writer.add_scalar("loss/train_prod", row["train_prod_loss"], ep)
+            writer.add_scalar("loss/train_army", row["train_army_loss"], ep)
+            writer.add_scalar("loss/val_prod", row.get("val_prod_loss", 0.0), ep)
+            writer.add_scalar("loss/val_army", row.get("val_army_loss", 0.0), ep)
+            writer.add_scalar("loss/val_total", total, ep)
+            writer.add_scalar("lr", opt.param_groups[0]["lr"], ep)
+            writer.flush()
     log.close()
+    if writer is not None:
+        writer.close()
 
 
 if __name__ == "__main__":

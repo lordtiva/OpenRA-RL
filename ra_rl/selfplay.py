@@ -885,14 +885,62 @@ def main() -> None:
             writer.add_scalar("selfplay/elo", learner_elo, it)
             writer.add_scalar("selfplay/kl_coef_prod", kl_p, it)
             writer.add_scalar("selfplay/kl_coef_army", kl_a, it)
-            writer.add_scalar("rollout/win_rate_vs_external", collect_stats["win_rate_vs_external"], it)
-            writer.add_scalar("rollout/explained_var", collect_stats["explained_var"], it)
-            writer.add_scalar("behavior/army_allin_pct", collect_stats["beh_army_allin_pct"], it)
-            writer.add_scalar("behavior/harass_atk_pct", collect_stats["beh_harass_atk_pct"], it)
+            writer.add_scalar("selfplay/entropy_coef", cur_ent, it)
+
+            # Rollout & Game Dynamics
+            writer.add_scalar("rollout/win_rate_vs_external", collect_stats.get("win_rate_vs_external", 0.0), it)
+            writer.add_scalar("rollout/explained_var", collect_stats.get("explained_var", 0.0), it)
+            writer.add_scalar("rollout/mean_ticks", collect_stats.get("mean_ticks", 0), it)
+            writer.add_scalar("rollout/mean_decisions", collect_stats.get("mean_decisions", 0), it)
+            writer.add_scalar("rollout/games_collected", collect_stats.get("games_collected", 0), it)
+            writer.add_scalar("rollout/games_failed", collect_stats.get("games_failed", 0), it)
+
+            # Per-pool Win Rates
+            pool_stats = collect_stats.get("pool_stats", {})
+            for p_name, p_data in pool_stats.items():
+                if isinstance(p_data, dict) and "win_rate" in p_data:
+                    writer.add_scalar(f"pool_win_rate/{p_name}", p_data["win_rate"], it)
+
+            # Per-faction Win Rates
+            fac_stats = collect_stats.get("faction_stats", {})
+            for f_name, f_data in fac_stats.items():
+                if isinstance(f_data, dict) and "win_rate" in f_data:
+                    writer.add_scalar(f"faction_win_rate/{f_name}", f_data["win_rate"], it)
+
+            # PPO Losses & Optimizations
+            writer.add_scalar("loss/value", update_metrics.get("val_loss", 0.0), it)
+            writer.add_scalar("loss/pi_prod", update_metrics.get("pi_loss_prod", 0.0), it)
+            writer.add_scalar("loss/pi_army", update_metrics.get("pi_loss_army", 0.0), it)
+            writer.add_scalar("entropy/prod", update_metrics.get("ent_prod", 0.0), it)
+            writer.add_scalar("entropy/army", update_metrics.get("ent_army", 0.0), it)
+            writer.add_scalar("kl/prod", update_metrics.get("kl_prod", 0.0), it)
+            writer.add_scalar("kl/army", update_metrics.get("kl_army", 0.0), it)
+            writer.add_scalar("kl/ref_prod", update_metrics.get("kl_ref_prod", 0.0), it)
+            writer.add_scalar("kl/ref_army", update_metrics.get("kl_ref_army", 0.0), it)
+
+            # Behavior & Tactical Meta
+            writer.add_scalar("behavior/army_allin_pct", collect_stats.get("beh_army_allin_pct", 0.0), it)
+            writer.add_scalar("behavior/army_atk_pct", collect_stats.get("beh_army_atk_pct", 0.0), it)
+            writer.add_scalar("behavior/army_keep_pct", collect_stats.get("beh_army_keep_pct", 0.0), it)
+            writer.add_scalar("behavior/army_hold_pct", collect_stats.get("beh_army_hold_pct", 0.0), it)
+            writer.add_scalar("behavior/harass_atk_pct", collect_stats.get("beh_harass_atk_pct", 0.0), it)
+            writer.add_scalar("behavior/veh_harv_pct", collect_stats.get("beh_veh_harv_pct", 0.0), it)
+            writer.add_scalar("behavior/veh_2tnk_pct", collect_stats.get("beh_veh_2tnk_pct", 0.0), it)
+            writer.add_scalar("behavior/veh_arty_pct", collect_stats.get("beh_veh_arty_pct", 0.0), it)
+            writer.add_scalar("behavior/def_pbox_pct", collect_stats.get("beh_def_pbox_pct", 0.0), it)
+            writer.add_scalar("behavior/air_train_pct", collect_stats.get("beh_air_train_pct", 0.0), it)
+            writer.add_scalar("behavior/bld_wait_pct", collect_stats.get("beh_bld_wait_pct", 0.0), it)
+
+            # Periodic Evaluation Tournament
             if "eval" in it_record:
-                writer.add_scalar("eval/bot_harmonic", it_record["eval"]["bot_harmonic_score"], it)
-                writer.add_scalar("eval/vs_bc_win_rate", it_record["eval"]["vs_bc"]["win_rate"], it)
-                writer.add_scalar("eval/composite_score", it_record["eval"]["composite_score"], it)
+                eval_data = it_record["eval"]
+                writer.add_scalar("eval/bot_harmonic", eval_data.get("bot_harmonic_score", 0.0), it)
+                writer.add_scalar("eval/composite_score", eval_data.get("composite_score", 0.0), it)
+                if "vs_bc" in eval_data and "win_rate" in eval_data["vs_bc"]:
+                    writer.add_scalar("eval/vs_bc_win_rate", eval_data["vs_bc"]["win_rate"], it)
+                for b_name in eval_bots:
+                    if b_name in eval_data and "win_rate" in eval_data[b_name]:
+                        writer.add_scalar(f"eval/vs_{b_name}_win_rate", eval_data[b_name]["win_rate"], it)
             writer.flush()
 
     log.close()
