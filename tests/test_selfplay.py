@@ -111,7 +111,7 @@ def test_pipeline_progress_monitor():
     assert format_duration(75) == "01:15"
     assert format_duration(3665) == "01:01:05"
     assert len(format_bar(5, 10, width=10)) == 10
-    assert format_bar(5, 10, width=10) == "█████░░░░░"
+    assert format_bar(5, 10, width=10) == "=====-----"
     assert len(format_clock(datetime.now())) == 8
 
     mon = StageProgressMonitor("Test Task", total=10, unit="items", initial=0)
