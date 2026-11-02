@@ -264,6 +264,7 @@ def eval_gate(
     out_jsonl: Path,
     seed_base: int = 20000,
     player_faction: str = "Random",
+    enemy_faction: str = "",
     opponent_policy: str = "",
     title: str = "",
 ) -> float:
@@ -303,6 +304,8 @@ def eval_gate(
     ]
     if opponent_policy:
         cmd.extend(["--opponent-policy", opponent_policy])
+        if enemy_faction:
+            cmd.extend(["--enemy-faction", enemy_faction])
     else:
         cmd.extend(["--bot", bot])
 
@@ -522,8 +525,19 @@ def run_final_eval(args) -> None:
 
     eval_dir = Path("runs/v4/eval_test_10000")
     spec = f"net:{champ}"
-    # Official 100-seed test benchmark (10000-10099): both bilateral Random and Allied-parity
-    for fac_tag, fac in (("random", "Random"), ("allies", "RandomAllies")):
+
+    # Head-to-Head: Allies-RL vs Soviets-RL (100 games, alternating slots)
+    eval_gate(
+        args.daemons, spec, "", 100, 0.0,
+        eval_dir / "head2head_allies_vs_soviets.jsonl",
+        seed_base=10000, player_faction="RandomAllies",
+        enemy_faction="RandomSoviet",
+        opponent_policy=spec,
+        title="Eval Final Allies vs Soviets",
+    )
+
+    # Official 100-seed test benchmark (10000-10099): Random, Allied-parity, and Soviet-parity
+    for fac_tag, fac in (("random", "Random"), ("allies", "RandomAllies"), ("soviets", "RandomSoviet")):
         for bot in ("hard", "brutal", "turtle"):
             eval_gate(
                 args.daemons, spec, bot, 100, 0.0,
