@@ -9,10 +9,12 @@ import time
 
 from scripts.run_v5_pipeline import (
     StageProgressMonitor,
+    check_eval_complete,
     count_npz_files,
     format_bar,
     format_clock,
     format_duration,
+    get_completed_epochs,
     get_completed_iterations,
 )
 
@@ -104,3 +106,30 @@ def test_get_completed_iterations(tmp_path: Path):
     ]
     m.write_text("\n".join(lines) + "\n", encoding="utf-8")
     assert get_completed_iterations(m) == 5
+
+
+def test_get_completed_epochs(tmp_path: Path):
+    m = tmp_path / "metrics.jsonl"
+    assert get_completed_epochs(m) == 0
+
+    lines = [
+        json.dumps({"epoch": 1, "val_prod_loss": 0.5}),
+        json.dumps({"epoch": 12, "val_prod_loss": 0.2}),
+    ]
+    m.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    assert get_completed_epochs(m) == 12
+
+
+def test_check_eval_complete(tmp_path: Path):
+    p = tmp_path / "eval.jsonl"
+    assert check_eval_complete(p, 100) is None
+
+    # Incomplete (only 50 games summary)
+    p.write_text(json.dumps({"summary": {"games": 50, "win_rate": 0.8}}) + "\n", encoding="utf-8")
+    assert check_eval_complete(p, 100) is None
+
+    # Complete (100 games summary)
+    p.write_text(json.dumps({"summary": {"games": 100, "win_rate": 0.85}}) + "\n", encoding="utf-8")
+    res = check_eval_complete(p, 100)
+    assert res is not None
+    assert res["win_rate"] == 0.85

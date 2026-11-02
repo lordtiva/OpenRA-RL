@@ -277,6 +277,36 @@ def get_completed_iterations(metrics_path: Path) -> int:
     return max_it
 
 
+def get_completed_epochs(metrics_path: Path) -> int:
+    if not metrics_path.exists():
+        return 0
+    max_ep = 0
+    try:
+        for line in metrics_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            max_ep = max(max_ep, int(rec.get("epoch", 0)))
+    except Exception:
+        pass
+    return max_ep
+
+
+def check_eval_complete(jsonl_path: Path, expected_games: int) -> dict | None:
+    if not jsonl_path.exists():
+        return None
+    try:
+        lines = [json.loads(x) for x in jsonl_path.read_text(encoding="utf-8").splitlines() if x.strip()]
+        if lines and "summary" in lines[-1]:
+            summary = lines[-1]["summary"]
+            if int(summary.get("games", 0)) == expected_games:
+                return summary
+    except Exception:
+        pass
+    return None
+
+
 def warmstart_v4_to_v5(v4_path: Path, out_path: Path) -> Path:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     print(f"\n[WARMSTART] Loading v4 champion from: {v4_path}")
@@ -323,66 +353,79 @@ def eval_tournament(
 
     # 1. H2H Tournament vs v4 Champion across dual maps
     h2h_jsonl = out_dir / "h2h_v5_vs_v4.jsonl"
-    if h2h_jsonl.exists():
-        h2h_jsonl.unlink()
+    existing_h2h = check_eval_complete(h2h_jsonl, games_h2h)
+    if existing_h2h is not None:
+        h2h_wr = float(existing_h2h["win_rate"])
+        print(f"[RESUME] H2H Tournament already completed ({games_h2h} partidas): WR={h2h_wr * 100:.1f}%")
+        report["h2h_win_rate"] = h2h_wr
+        report["h2h_summary"] = existing_h2h
+    else:
+        if h2h_jsonl.exists():
+            h2h_jsonl.unlink()
 
-    cmd_h2h = [
-        sys.executable, "-m", "ra_rl.eval",
-        "--daemons", daemons,
-        "--policy", v5_policy,
-        "--peer-policy", v4_policy,
-        "--games", str(games_h2h),
-        "--map", "singles.oramap,doubles.oramap",
-        "--seed-base", "50000",
-        "--max-ticks", "54000",
-        "--pre-recycle",
-        "--out", str(h2h_jsonl),
-    ]
-    run_cmd_monitored(
-        cmd_h2h,
-        title=f"Eval H2H v5 vs v4 ({games_h2h} partidas)",
-        total=games_h2h,
-        unit="partidas",
-        kind="eval",
-    )
+        cmd_h2h = [
+            sys.executable, "-m", "ra_rl.eval",
+            "--daemons", daemons,
+            "--policy", v5_policy,
+            "--peer-policy", v4_policy,
+            "--games", str(games_h2h),
+            "--map", "singles.oramap,doubles.oramap",
+            "--seed-base", "50000",
+            "--max-ticks", "54000",
+            "--pre-recycle",
+            "--out", str(h2h_jsonl),
+        ]
+        run_cmd_monitored(
+            cmd_h2h,
+            title=f"Eval H2H v5 vs v4 ({games_h2h} partidas)",
+            total=games_h2h,
+            unit="partidas",
+            kind="eval",
+        )
 
-    h2h_lines = [json.loads(x) for x in h2h_jsonl.read_text(encoding="utf-8").splitlines() if x.strip()]
-    h2h_summary = h2h_lines[-1]["summary"]
-    h2h_wr = float(h2h_summary["win_rate"])
-    report["h2h_win_rate"] = h2h_wr
-    report["h2h_summary"] = h2h_summary
-    print(f"\n>>> H2H Result: v5 Win Rate vs v4 Champion = {h2h_wr * 100:.1f}%")
+        h2h_lines = [json.loads(x) for x in h2h_jsonl.read_text(encoding="utf-8").splitlines() if x.strip()]
+        h2h_summary = h2h_lines[-1]["summary"]
+        h2h_wr = float(h2h_summary["win_rate"])
+        report["h2h_win_rate"] = h2h_wr
+        report["h2h_summary"] = h2h_summary
+        print(f"\n>>> H2H Result: v5 Win Rate vs v4 Champion = {h2h_wr * 100:.1f}%")
 
     # 2. Evaluation against C# bots on dual map pool
     bot_results = {}
     for bot in ("brutal", "hard", "turtle"):
         bot_jsonl = out_dir / f"eval_vs_{bot}.jsonl"
-        if bot_jsonl.exists():
-            bot_jsonl.unlink()
-        cmd_bot = [
-            sys.executable, "-m", "ra_rl.eval",
-            "--daemons", daemons,
-            "--policy", v5_policy,
-            "--bot", bot,
-            "--games", str(games_bot),
-            "--map", "singles.oramap,doubles.oramap",
-            "--seed-base", "55000",
-            "--max-ticks", "54000",
-            "--pre-recycle",
-            "--out", str(bot_jsonl),
-        ]
-        run_cmd_monitored(
-            cmd_bot,
-            title=f"Eval v5 vs {bot} ({games_bot} partidas)",
-            total=games_bot,
-            unit="partidas",
-            kind="eval",
-        )
-        lines = [json.loads(x) for x in bot_jsonl.read_text(encoding="utf-8").splitlines() if x.strip()]
-        b_summary = lines[-1]["summary"]
-        b_wr = float(b_summary["win_rate"])
-        bot_results[bot] = {"win_rate": b_wr, "outcomes": b_summary["outcomes"]}
-        print(f">>> v5 vs {bot}: Win Rate = {b_wr * 100:.1f}%")
+        existing_bot = check_eval_complete(bot_jsonl, games_bot)
+        if existing_bot is not None:
+            b_wr = float(existing_bot["win_rate"])
+            print(f"[RESUME] Eval vs {bot} already completed ({games_bot} partidas): WR={b_wr * 100:.1f}%")
+            bot_results[bot] = {"win_rate": b_wr, "outcomes": existing_bot["outcomes"]}
+        else:
+            if bot_jsonl.exists():
+                bot_jsonl.unlink()
+            cmd_bot = [
+                sys.executable, "-m", "ra_rl.eval",
+                "--daemons", daemons,
+                "--policy", v5_policy,
+                "--bot", bot,
+                "--games", str(games_bot),
+                "--map", "singles.oramap,doubles.oramap",
+                "--seed-base", "55000",
+                "--max-ticks", "54000",
+                "--pre-recycle",
+                "--out", str(bot_jsonl),
+            ]
+            run_cmd_monitored(
+                cmd_bot,
+                title=f"Eval v5 vs {bot} ({games_bot} partidas)",
+                total=games_bot,
+                unit="partidas",
+                kind="eval",
+            )
+            lines = [json.loads(x) for x in bot_jsonl.read_text(encoding="utf-8").splitlines() if x.strip()]
+            b_summary = lines[-1]["summary"]
+            b_wr = float(b_summary["win_rate"])
+            bot_results[bot] = {"win_rate": b_wr, "outcomes": b_summary["outcomes"]}
+            print(f">>> v5 vs {bot}: Win Rate = {b_wr * 100:.1f}%")
 
     report["bots"] = bot_results
 
@@ -427,9 +470,12 @@ def main() -> None:
 
     # Stage 0: Warmstart
     if args.stage in ("all", "warmstart", "phase5_0"):
-        if not v4_path.exists():
-            raise SystemExit(f"v4 checkpoint not found: {v4_path}")
-        warmstart_v4_to_v5(v4_path, warmstart_path)
+        if warmstart_path.exists():
+            print(f"[RESUME] Warmstart model at {warmstart_path} already exists; skipping transfer.", flush=True)
+        else:
+            if not v4_path.exists():
+                raise SystemExit(f"v4 checkpoint not found: {v4_path}")
+            warmstart_v4_to_v5(v4_path, warmstart_path)
         if args.stage in ("warmstart", "phase5_0"):
             return
 
@@ -474,8 +520,9 @@ def main() -> None:
     # Stage 2: Train BC with Label Smoothing (eps=0.04)
     if args.stage in ("all", "bc", "phase5_1", "phase5_1_train"):
         bc_model = bc_dir / "model.pt"
-        if bc_model.exists():
-            print(f"[RESUME] BC model at {bc_model} already exists; skipping BC training.", flush=True)
+        completed_epochs = get_completed_epochs(bc_dir / "metrics.jsonl")
+        if bc_model.exists() and completed_epochs >= args.bc_epochs:
+            print(f"[RESUME] BC model at {bc_model} already completed {completed_epochs}/{args.bc_epochs} epochs; skipping BC training.", flush=True)
         else:
             print(f"\n[BC] Training bc_v5 with label smoothing eps=0.04...")
             cmd_bc = [
@@ -532,13 +579,17 @@ def main() -> None:
         bc_model = bc_dir / "model.pt"
         init_model = bc_model if bc_model.exists() else warmstart_path
         completed_iters = get_completed_iterations(selfplay_dir / "metrics.jsonl")
+        latest_sp_ckpt = selfplay_dir / "checkpoint_latest.pt"
         if completed_iters >= args.selfplay_iters and (selfplay_dir / "checkpoint_best.pt").exists():
             print(f"[RESUME] Selfplay at {selfplay_dir} already completed {completed_iters}/{args.selfplay_iters} iters; skipping.", flush=True)
         else:
+            cur_init = latest_sp_ckpt if (latest_sp_ckpt.exists() and completed_iters > 0) else init_model
             print(f"\n[SELFPLAY] Launching v5 League with Discovery Exploiters ({args.selfplay_iters} iterations)...")
+            if completed_iters > 0:
+                print(f"[RESUME] Resuming from iteration {completed_iters + 1}/{args.selfplay_iters} with init={cur_init}")
             cmd_sp = [
                 sys.executable, "-m", "ra_rl.selfplay",
-                "--init", str(init_model),
+                "--init", str(cur_init),
                 "--ref", str(init_model),
                 "--daemons", args.daemons,
                 "--maps", "singles.oramap,doubles.oramap",
