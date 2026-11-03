@@ -47,10 +47,14 @@ def make_policy(name: str) -> Policy:
         if p.is_dir():
             item_p = p / "commander_item.onnx"
             army_p = p / "commander_army.onnx"
+            ability_p = p / "commander_ability.onnx"
+            macro_p = p / "commander_macro.onnx"
         else:
             item_p = p
             army_p = p.parent / "commander_army.onnx"
-        return OnnxPolicy(item_p, army_p)
+            ability_p = p.parent / "commander_ability.onnx"
+            macro_p = p.parent / "commander_macro.onnx"
+        return OnnxPolicy(item_p, army_p, ability_p, macro_p)
     if kind in ("net", "net-sample") and path:
         from ra_rl.policies.net import NetPolicy
         return NetPolicy(path, sample=kind == "net-sample")

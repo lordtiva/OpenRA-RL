@@ -2,15 +2,15 @@
 
 
 a = Analysis(
-    ['ra_rl/play_skirmish.py'],
-    pathex=[],
+    ['C:/Users/lordc/Desktop/OpenRA-RL/ra_rl/play_skirmish.py'],
+    pathex=['C:/Users/lordc/Desktop/OpenRA-RL'],
     binaries=[],
-    datas=[('onnx_models', 'onnx_models')],
-    hiddenimports=[],
+    datas=[],
+    hiddenimports=['torch', 'numpy', 'grpc', 'ra_env', 'ra_rl'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=['torch', 'torchvision', 'torchaudio', 'matplotlib', 'pandas', 'scipy'],
+    excludes=[],
     noarchive=False,
     optimize=0,
 )

@@ -198,3 +198,15 @@ def export_models(ckpt_path: str, output_dir: str):
 
     print("\n[SUCCESS] All 4 ONNX models exported and verified mathematically identical!")
     return item_onnx_path, army_onnx_path, ability_onnx_path, macro_onnx_path
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Export CommanderNet v5 checkpoint to ONNX models.")
+    parser.add_argument("--ckpt", type=str, default="runs/v5/selfplay/checkpoint_best.pt", help="Path to checkpoint .pt")
+    parser.add_argument("--out", type=str, default="onnx_models/v5", help="Output directory for ONNX models")
+    args = parser.parse_args()
+
+    export_models(args.ckpt, args.out)
+

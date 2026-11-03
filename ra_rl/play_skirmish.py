@@ -68,6 +68,8 @@ def find_default_model() -> str | None:
     # 1. Check for ONNX models first (lightweight, zero-torch runtime)
     onnx_candidates = [
         os.environ.get("OPENRA_RL_ONNX"),
+        BUNDLE_DIR / "onnx_models" / "v5",
+        ROOT_DIR / "onnx_models" / "v5",
         BUNDLE_DIR / "onnx_models",
         ROOT_DIR / "onnx_models",
         ROOT_DIR / "rl_agent" / "onnx_models",
