@@ -26,6 +26,17 @@ import subprocess
 import sys
 import time
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import torch
 
 from ra_rl.eval import DEFAULT_DAEMONS
@@ -117,17 +128,25 @@ class StageProgressMonitor:
             f"Transcurrido: {elapsed_str} | Restante: {eta_str} | Fin Est.: {clock_str}{extra_info}"
         )
 
-        if self.is_tty:
-            pad = max(0, self.last_len - len(line))
-            sys.stdout.write("\r" + line + (" " * pad))
-            sys.stdout.flush()
-            self.last_len = max(len(line), self.last_len)
-        else:
-            current_pct_step = int(pct // 10) * 10
-            if force or current_pct_step > self.last_reported_pct:
-                self.last_reported_pct = current_pct_step
-                sys.stdout.write(line + "\n")
+        try:
+            if self.is_tty:
+                pad = max(0, self.last_len - len(line))
+                sys.stdout.write("\r" + line + (" " * pad))
                 sys.stdout.flush()
+                self.last_len = max(len(line), self.last_len)
+            else:
+                current_pct_step = int(pct // 10) * 10
+                if force or current_pct_step > self.last_reported_pct:
+                    self.last_reported_pct = current_pct_step
+                    sys.stdout.write(line + "\n")
+                    sys.stdout.flush()
+        except UnicodeEncodeError:
+            safe_line = line.encode("ascii", errors="replace").decode("ascii")
+            if self.is_tty:
+                sys.stdout.write("\r" + safe_line)
+            else:
+                sys.stdout.write(safe_line + "\n")
+            sys.stdout.flush()
 
     def finish(self, summary: str = "") -> None:
         self.current = self.total
@@ -135,13 +154,18 @@ class StageProgressMonitor:
         elapsed = format_duration(time.perf_counter() - self.t0)
         clock_str = format_clock(datetime.now())
         extra = f" | {summary}" if summary else ""
-        done_line = f"✔ [{self.title}] {self.total}/{self.total} {self.unit} (100.0%) en {elapsed} ({clock_str}){extra}"
-        pad = max(0, self.last_len - len(done_line))
-        if self.is_tty:
-            sys.stdout.write("\r" + done_line + (" " * pad) + "\n")
-        else:
+        try:
+            done_line = f"✔ [{self.title}] {self.total}/{self.total} {self.unit} (100.0%) en {elapsed} ({clock_str}){extra}"
+            if self.is_tty:
+                pad = max(0, self.last_len - len(done_line))
+                sys.stdout.write("\r" + done_line + (" " * pad) + "\n")
+            else:
+                sys.stdout.write(done_line + "\n")
+            sys.stdout.flush()
+        except UnicodeEncodeError:
+            done_line = f"[OK] [{self.title}] {self.total}/{self.total} {self.unit} (100.0%) en {elapsed} ({clock_str}){extra}"
             sys.stdout.write(done_line + "\n")
-        sys.stdout.flush()
+            sys.stdout.flush()
 
 
 def run_cmd_monitored(
@@ -367,7 +391,7 @@ def eval_tournament(
             sys.executable, "-m", "ra_rl.eval",
             "--daemons", daemons,
             "--policy", v5_policy,
-            "--peer-policy", v4_policy,
+            "--opponent-policy", v4_policy,
             "--games", str(games_h2h),
             "--map", "singles.oramap,doubles.oramap",
             "--seed-base", "50000",
@@ -614,10 +638,11 @@ def main() -> None:
         v5_best = selfplay_dir / "checkpoint_best.pt"
         if not v5_best.exists():
             v5_best = bc_dir / "model.pt" if (bc_dir / "model.pt").exists() else warmstart_path
+        eval_ref_policy = warmstart_path if warmstart_path.exists() else v4_path
         eval_tournament(
             daemons=args.daemons,
             v5_policy=f"net:{v5_best}",
-            v4_policy=f"net:{v4_path}",
+            v4_policy=f"net:{eval_ref_policy}",
             out_dir=out_root / "tournament",
             games_h2h=100,
             games_bot=40,

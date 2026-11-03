@@ -157,6 +157,7 @@ def evaluate(
     recycle_every: int = 50,
     pre_recycle: bool = False,
 ) -> dict:
+    maps = [m.strip() for m in match.map_name.split(",") if m.strip()]
     lock = threading.Lock()
     next_game = [0]
     results: list[dict] = []
@@ -180,7 +181,16 @@ def evaluate(
                     played = 0
 
                 seed = seed_base + g
-                r = play_game(bridge, policy, match, seed, step_ticks)
+                cur_map = maps[g % len(maps)]
+                cur_match = MatchConfig(
+                    map_name=cur_map,
+                    bot=match.bot,
+                    player_faction=match.player_faction,
+                    enemy_faction=match.enemy_faction,
+                    max_ticks=match.max_ticks,
+                    brain=match.brain,
+                )
+                r = play_game(bridge, policy, cur_match, seed, step_ticks)
                 played += 1
 
                 if r["outcome"] == "error":
@@ -188,7 +198,7 @@ def evaluate(
                     if daemon_ctl.restart(addr):
                         bridge = Bridge(addr)
                         played = 0
-                        r = play_game(bridge, policy, match, seed, step_ticks)
+                        r = play_game(bridge, policy, cur_match, seed, step_ticks)
                         played += 1
                     else:
                         bridge = Bridge(addr)
@@ -240,6 +250,7 @@ def evaluate_selfplay(
     recycle_every: int = 50,
     pre_recycle: bool = False,
 ) -> dict:
+    maps = [m.strip() for m in cfg.map_name.split(",") if m.strip()]
     lock = threading.Lock()
     next_game = [0]
     results: list[dict] = []
@@ -264,7 +275,14 @@ def evaluate_selfplay(
 
                 seed = seed_base + g
                 a_is_p1 = True if not swap_slots else (g % 2 == 0)
-                r = play_selfplay_game(bridge, policy_a, policy_b, cfg, seed, step_ticks, a_is_p1=a_is_p1)
+                cur_map = maps[g % len(maps)]
+                cur_cfg = SelfPlayConfig(
+                    map_name=cur_map,
+                    player_faction=cfg.player_faction,
+                    enemy_faction=cfg.enemy_faction,
+                    max_ticks=cfg.max_ticks,
+                )
+                r = play_selfplay_game(bridge, policy_a, policy_b, cur_cfg, seed, step_ticks, a_is_p1=a_is_p1)
                 played += 1
 
                 if r["outcome"] == "error":
@@ -272,7 +290,7 @@ def evaluate_selfplay(
                     if daemon_ctl.restart(addr):
                         bridge = Bridge(addr)
                         played = 0
-                        r = play_selfplay_game(bridge, policy_a, policy_b, cfg, seed, step_ticks, a_is_p1=a_is_p1)
+                        r = play_selfplay_game(bridge, policy_a, policy_b, cur_cfg, seed, step_ticks, a_is_p1=a_is_p1)
                         played += 1
                     else:
                         bridge = Bridge(addr)
@@ -314,7 +332,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--policy", default="scripted",
                     help="builtin | scripted | random | net:<path> | net-sample:<path> | net-t0.25:<path>")
-    ap.add_argument("--opponent-policy", default="",
+    ap.add_argument("--opponent-policy", "--peer-policy", default="",
                     help="if set, evaluate RL-vs-RL via SelfPlaySession instead of vs --bot")
     ap.add_argument("--daemons", default=DEFAULT_DAEMONS)
     ap.add_argument("--games", type=int, default=100)
